@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.spec
+.DS_Store
+.pytest_cache/
+pureclick_fire_log.csv
+pureclick_seat_config.json
+pureclick_watch_config.json
+mac/.pureclick_browser_state.json
