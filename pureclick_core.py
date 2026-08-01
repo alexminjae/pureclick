@@ -3,11 +3,13 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 import email.utils
+import http.client
 import platform
 import statistics
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -132,6 +134,87 @@ def _open_request(
         return opener(request, timeout_seconds)
 
 
+class KeepAliveProbe:
+    """Samples the server ``Date`` header over one persistent connection.
+
+    Reusing a single TCP/TLS connection removes the handshake cost from every
+    poll, so the tick-catch loop can poll at nearly the bare network RTT. That
+    directly tightens the bracket around the server's second boundary, which
+    is the dominant error term in the whole sync.
+    """
+
+    def __init__(self, url: str, *, timeout_seconds: float = 1.5) -> None:
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme not in ("http", "https"):
+            raise ServerTimeError("Server URL must start with http:// or https://")
+        self._host = parts.hostname or ""
+        self._port = parts.port
+        self._https = parts.scheme == "https"
+        self._path = parts.path or "/"
+        if parts.query:
+            self._path += "?" + parts.query
+        self._timeout = timeout_seconds
+        self._conn: http.client.HTTPConnection | None = None
+
+    def _connect(self) -> http.client.HTTPConnection:
+        if self._https:
+            return http.client.HTTPSConnection(self._host, self._port, timeout=self._timeout)
+        return http.client.HTTPConnection(self._host, self._port, timeout=self._timeout)
+
+    def close(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
+    def sample(self) -> TimeSample:
+        last_error: Exception | None = None
+        # One retry: a keep-alive connection the server quietly dropped fails
+        # on the first request after the drop and succeeds on a fresh socket.
+        for attempt in range(2):
+            if self._conn is None:
+                self._conn = self._connect()
+            connection = self._conn
+            try:
+                start_unix = time.time()
+                start_perf = time.perf_counter()
+                connection.request(
+                    "HEAD",
+                    self._path,
+                    headers={"Connection": "keep-alive", "User-Agent": "PureClick"},
+                )
+                response = connection.getresponse()
+                response.read()
+                end_perf = time.perf_counter()
+            except Exception as exc:
+                last_error = exc
+                self.close()
+                continue
+
+            raw_date = response.getheader("Date")
+            if response.will_close:
+                self.close()
+            if not raw_date:
+                raise ServerTimeError("Server response did not include a Date header")
+
+            rtt = end_perf - start_perf
+            local_mid_unix = start_unix + (rtt / 2.0)
+            local_mid_perf = start_perf + (rtt / 2.0)
+            server_unix = parse_http_date(raw_date)
+            return TimeSample(
+                offset_seconds=server_unix - local_mid_unix,
+                rtt_seconds=rtt,
+                server_unix=server_unix,
+                local_mid_unix=local_mid_unix,
+                raw_date=raw_date,
+                local_mid_perf=local_mid_perf,
+                local_recv_perf=end_perf,
+            )
+        raise ServerTimeError(f"Could not reach server: {last_error}")
+
+
 class ServerClock:
     def __init__(self) -> None:
         self._sync_result: SyncResult | None = None
@@ -200,66 +283,69 @@ class ServerClock:
         if min_samples < 1:
             raise ValueError("min_samples must be at least 1")
 
-        opener = opener or urllib.request.urlopen
+        probe: KeepAliveProbe | None = None
+        if opener is None:
+            probe = KeepAliveProbe(url, timeout_seconds=timeout_seconds)
+            fetch = probe.sample
+        else:
+            def fetch() -> TimeSample:
+                return fetch_server_date(url, timeout_seconds=timeout_seconds, opener=opener)
+
         deadline = time.perf_counter() + max_wait_seconds
         tick_samples: list[TimeSample] = []
         failures: list[str] = []
 
         try:
-            previous = fetch_server_date(
-                url,
-                timeout_seconds=timeout_seconds,
-                opener=opener,
-            )
-            current_raw_date = previous.raw_date
-        except ServerTimeError as exc:
-            previous = None
-            current_raw_date = ""
-            failures.append(str(exc))
-
-        while len(tick_samples) < sample_count and time.perf_counter() < deadline:
             try:
-                sample = fetch_server_date(
-                    url,
-                    timeout_seconds=timeout_seconds,
-                    opener=opener,
-                )
+                previous = fetch()
+                current_raw_date = previous.raw_date
             except ServerTimeError as exc:
+                previous = None
+                current_raw_date = ""
                 failures.append(str(exc))
-                time.sleep(poll_seconds)
-                continue
 
-            if sample.raw_date != current_raw_date:
-                # The server-second boundary fell between the previous poll's
-                # receipt and this one. Bracket it with the midpoint of that
-                # gap, so the anchor error is at most half the poll spacing
-                # rather than a full RTT.
-                if previous is not None and previous.local_recv_perf:
-                    bracket_perf = (previous.local_recv_perf + sample.local_recv_perf) / 2.0
-                    bracket_gap = sample.local_recv_perf - previous.local_recv_perf
-                else:
-                    bracket_perf = sample.local_mid_perf
-                    bracket_gap = sample.rtt_seconds
-                tick_samples.append(
-                    TimeSample(
-                        offset_seconds=sample.offset_seconds,
-                        rtt_seconds=bracket_gap,
-                        server_unix=sample.server_unix,
-                        local_mid_unix=sample.local_mid_unix,
-                        raw_date=sample.raw_date,
-                        local_mid_perf=bracket_perf,
-                        local_recv_perf=sample.local_recv_perf,
+            while len(tick_samples) < sample_count and time.perf_counter() < deadline:
+                try:
+                    sample = fetch()
+                except ServerTimeError as exc:
+                    failures.append(str(exc))
+                    time.sleep(poll_seconds)
+                    continue
+
+                if sample.raw_date != current_raw_date:
+                    # The server-second boundary fell between the previous
+                    # poll's receipt and this one. Bracket it with the midpoint
+                    # of that gap, so the anchor error is at most half the poll
+                    # spacing rather than a full RTT.
+                    if previous is not None and previous.local_recv_perf:
+                        bracket_perf = (previous.local_recv_perf + sample.local_recv_perf) / 2.0
+                        bracket_gap = sample.local_recv_perf - previous.local_recv_perf
+                    else:
+                        bracket_perf = sample.local_mid_perf
+                        bracket_gap = sample.rtt_seconds
+                    tick_samples.append(
+                        TimeSample(
+                            offset_seconds=sample.offset_seconds,
+                            rtt_seconds=bracket_gap,
+                            server_unix=sample.server_unix,
+                            local_mid_unix=sample.local_mid_unix,
+                            raw_date=sample.raw_date,
+                            local_mid_perf=bracket_perf,
+                            local_recv_perf=sample.local_recv_perf,
+                        )
                     )
-                )
-                current_raw_date = sample.raw_date
-                if len(tick_samples) >= min_samples:
-                    brackets = sorted(s.rtt_seconds * 1000 for s in tick_samples)
-                    jitter_ms = brackets[-1] - brackets[0] if len(brackets) > 1 else 0.0
-                    if brackets[0] <= 60.0 and jitter_ms <= 40.0:
-                        break
+                    current_raw_date = sample.raw_date
+                    if len(tick_samples) >= min_samples:
+                        brackets = sorted(s.rtt_seconds * 1000 for s in tick_samples)
+                        jitter_ms = brackets[-1] - brackets[0] if len(brackets) > 1 else 0.0
+                        if brackets[0] <= 60.0 and jitter_ms <= 40.0:
+                            break
 
-            previous = sample
-            time.sleep(poll_seconds)
+                previous = sample
+                time.sleep(poll_seconds)
+        finally:
+            if probe is not None:
+                probe.close()
 
         if not tick_samples:
             detail = failures[-1] if failures else "server Date header did not roll over"
@@ -511,12 +597,35 @@ def _windows_waitable_sleep(duration_seconds: float) -> None:
             kernel32.CloseHandle(timer)
 
 
-def _configure_user32() -> object:
-    user32 = ctypes.windll.user32
+def enable_windows_dpi_awareness() -> None:
+    """Make cursor, click, and screen-capture coordinates physical pixels.
+
+    Must run before any window is created. Tries per-monitor-v2 first
+    (correct on mixed-DPI multi-monitor setups), then falls back to older
+    APIs for pre-1703 Windows 10.
+    """
+    if platform.system() != "Windows":
+        return
     try:
-        user32.SetProcessDPIAware()
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == -4
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
     except Exception:
         pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+        return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+def _configure_user32() -> object:
+    user32 = ctypes.windll.user32
+    enable_windows_dpi_awareness()
 
     user32.SetCursorPos.argtypes = (ctypes.c_int, ctypes.c_int)
     user32.SetCursorPos.restype = ctypes.c_int

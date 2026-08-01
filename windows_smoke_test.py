@@ -10,7 +10,7 @@ from pureclick_core import ServerClock, WindowsClicker, precise_wait_until
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="PureClick Windows handoff smoke test")
-    parser.add_argument("--url", default="https://ticket.interpark.com/")
+    parser.add_argument("--url", default="https://poticket.interpark.com/Book/BookMain.asp")
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--runs", type=int, default=20)
     parser.add_argument("--interval", type=float, default=0.2)
@@ -19,6 +19,11 @@ def main() -> int:
         "--click-test",
         action="store_true",
         help="Move to the current cursor position and send one real click after 3 seconds.",
+    )
+    parser.add_argument(
+        "--capture-test",
+        action="store_true",
+        help="Benchmark screen capture speed for the Phase 2 watcher (Windows only).",
     )
     args = parser.parse_args()
 
@@ -54,6 +59,28 @@ def main() -> int:
         precise_wait_until(deadline)
         clicker.click(x, y)
         print("Click sent.")
+
+    if args.capture_test:
+        if platform.system() != "Windows":
+            print("Screen capture test is only available on Windows.")
+            return 1
+        from pureclick_watch_core import WatchRegion, WindowsScreenGrabber, grid_from_bgra
+
+        region = WatchRegion(left=0, top=0, width=800, height=600)
+        grabber = WindowsScreenGrabber()
+        try:
+            grabber.grab(region)  # warm up cached GDI resources
+            frame_times: list[float] = []
+            for _ in range(30):
+                started = time.perf_counter()
+                data = grabber.grab(region)
+                grid_from_bgra(data, region.width, region.height, stride=2)
+                frame_times.append((time.perf_counter() - started) * 1000)
+            print(f"Capture+grid median: {statistics.median(frame_times):.1f} ms")
+            print(f"Capture+grid worst: {max(frame_times):.1f} ms")
+            print(f"Watch loop can sustain ~{1000 / statistics.median(frame_times):.0f} fps")
+        finally:
+            grabber.close()
 
     print("Smoke test complete.")
     return 0
