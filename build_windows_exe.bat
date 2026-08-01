@@ -33,7 +33,7 @@ echo [2/3] Installing PyInstaller...
 if errorlevel 1 goto fail
 
 echo [3/3] Building single-file executable...
-".venv\Scripts\python.exe" -m PyInstaller --onefile --windowed --name PureClick --hidden-import pureclick_seat_core --add-data "browser;browser" pureclick.py
+".venv\Scripts\python.exe" -m PyInstaller --onefile --windowed --name PureClick --hidden-import pureclick_core --hidden-import pureclick_watch_core pureclick.py
 if errorlevel 1 goto fail
 
 echo.

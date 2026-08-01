@@ -8,8 +8,8 @@ if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
 py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip pyinstaller
 .\.venv\Scripts\python.exe -m PyInstaller --onefile --windowed --name PureClick `
-  --hidden-import pureclick_seat_core `
-  --add-data "browser;browser" `
+  --hidden-import pureclick_core `
+  --hidden-import pureclick_watch_core `
   pureclick.py
 
 Write-Host ""

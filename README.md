@@ -1,206 +1,91 @@
 # PureClick
 
-PureClick is an Interpark ticket-drop assistant in two editions:
+Windows Interpark ticket-drop assistant with two phases:
 
-| Edition | Folder | Platform | Entry point |
-|---|---|---|---|
-| **Windows** | repo root | Windows | `pureclick.py` or `dist/PureClick.exe` |
-| **Mac** | `mac/` | macOS | `mac/pureclick.py` or `mac/dist/PureClick for Mac.app` |
+1. **Timed click** — syncs to the booking server clock and fires a native mouse click at an exact KST millisecond.
+2. **Cancellation watch** — watches a user-framed screen area for a seat bubble to appear (취켓팅) and clicks it.
 
-Both share server clock sync, seat ranking logic, and the browser seat autopilot
-in `browser/`. Each edition has its own native click backend.
+No Mac edition, no browser scripts, no Tampermonkey. Pure Windows native click + screen capture.
 
----
+## Requirements
 
-## Windows edition (repo root)
+- Windows 10/11
+- Python 3.11+ (or the built `PureClick.exe`)
 
-PureClick for Windows fires a native mouse click at a user-defined Interpark server time.
+## Run
 
-The default server target is the Interpark booking backend (the server that
-assigns your place in the queue when sale opens):
+```powershell
+python pureclick.py
+```
+
+Or double-click `run_pureclick.bat`.
+
+## Phase 1 · Timed Click
+
+1. Log in to Interpark in the browser and open the event page.
+2. Open PureClick and wait for server time to sync.
+3. Enter the target KST date/time.
+4. **Lock Position** — move the cursor over `예매하기`, wait 5 seconds.
+5. **Test** (dry run) a few times, then **Arm**.
+
+Sync target:
 
 ```text
 https://poticket.interpark.com/Book/BookMain.asp
 ```
 
-This endpoint is uncached (`cache-control: no-store`, always `x-cache: Miss`),
-returns a tiny response, and updates its `Date` header every second, which makes
-it the most reliable clock to sync against. Avoid `nol.interpark.com/ticket` and
-`tickets.interpark.com/...` for syncing: both are served through a CDN cache and
-return a stale, frozen `Date` header.
+This endpoint is uncached (`cache-control: no-store`, `x-cache: Miss`) and updates its `Date` header every second. PureClick catches the header rollover over a keep-alive connection and anchors that tick to `perf_counter()`.
 
-## What It Does
+## Phase 2 · Cancellation Watch
 
-- Watches the Interpark HTTP `Date` header roll over and anchors that server tick
-  to a high-resolution monotonic clock, bracketing the exact second boundary
-  between two consecutive polls.
-- Shows the current estimated booking-server time in KST.
-- Lets users enter target date, hour, minute, second, and millisecond.
-- Lets users lock the click location with a 5-second cursor capture.
-- Anchors server time to a monotonic high-resolution clock after sync.
-- Pre-moves the cursor before the target time so the final action is only the
-  click signal.
-- Sends the real click on Windows with `SetCursorPos` and `SendInput`.
-- Sends two optional internal retry clicks shortly after the first click.
-- Provides a dry-run mode for testing without clicking.
+For catching seats when someone else's reservation is cancelled:
 
-## Run (Windows)
+1. Open the seat map in the browser (keep it fully visible, no overlapping windows).
+2. **Select Watch Area** — drag a box around the seat map.
+3. Tune if needed:
+   - **Tolerance** — color channel delta that counts as a change (default 40)
+   - **Min points** — minimum changed samples before a candidate (default 3)
+   - **Confirm frames** — consecutive candidate frames required before click (default 2)
+   - **Poll ms** — capture interval (default 60)
+   - **Auto-refresh s** — press F5 every N seconds while quiet (0 = off)
+4. **Test Watch** first (detects but does not click), then **Start Watch**.
 
-Use Python 3.11 or newer.
+When a colored seat bubble appears in the framed area, PureClick clicks its center. Settings are saved to `pureclick_watch_config.json`.
 
-```bash
-python pureclick.py
-```
+## Build `.exe`
 
-On macOS or Linux, use the dedicated Mac edition in `mac/` instead of the root app.
-
-On Windows, you can also double-click:
-
-```text
-run_pureclick.bat
-```
-
-On Windows, `Arm` sends the real click. On macOS, use `mac/pureclick.py` for real clicks.
-
-## Basic Use
-
-1. Log in to Interpark in the browser.
-2. Open the event page and select the date/round.
-3. Open PureClick and wait for the server time to sync.
-4. Enter the target KST server date and time.
-5. Click `Lock Position`, move the cursor over `예매하기`, and wait 5 seconds.
-6. Use `Test` first, then `Arm` on Windows.
-
-## Phase 2 · Seat Autopilot (Onestop reserved shows)
-
-Phase 1 clicks `예매하기` at the exact server time. Phase 2 locks a seat on the
-onestop seat map so you can finish payment manually.
-
-**Supported today:** shows where `isIngredientOnestop` and `isReservedSeat` are
-both true (~85% of sampled concerts). Legacy `poticket` popups and GA shows are
-not covered yet.
-
-### One-time browser setup
-
-1. Open PureClick and set grade order (default `2,3,4,1` = R, S, A, OP).
-2. Click **Copy Config Snippet** and paste it in the Chrome DevTools console on
-   `tickets.interpark.com` (sets `localStorage` for this browser profile).
-3. Install **Tampermonkey**, click **Copy Userscript**, create a new script,
-   paste, and save. It runs on `https://tickets.interpark.com/onestop/*`.
-
-### Drop-day workflow
-
-1. Log in, pick date/round, lock `예매하기` in PureClick (Phase 1).
-2. **Arm** PureClick for the target KST server time.
-3. After the queue, when `/onestop/seat` opens, the userscript scans seats in
-   your grade order and calls `POST /onestop/api/seats/select`.
-4. On success it redirects to `?step=price` — complete payment yourself.
-
-The in-page overlay shows scan/lock status. In DevTools console:
-
-```javascript
-PureClickSeat.status()
-PureClickSeat.setGradeOrder(["2", "3", "4", "1"])
-PureClickSeat.run()
-```
-
-### Files
-
-| File | Role |
-|---|---|
-| `pureclick_seat_core.py` | Grade ranking, payload builder, compatibility helpers |
-| `browser/pureclick_seat_autopilot.js` | Core browser autopilot |
-| `browser/pureclick_seat_autopilot.user.js` | Tampermonkey bundle |
-| `pureclick_seat_config.json` | Saved desktop preferences (optional) |
-
-## Send To A Windows User
-
-Send the whole PureClick folder, including:
-
-```text
-pureclick.py
-pureclick_core.py
-pureclick_seat_core.py
-browser/
-run_pureclick.bat
-windows_smoke_test.py
-```
-
-The recipient needs Python 3.11 or newer installed. After extracting the folder,
-they can double-click `run_pureclick.bat`.
-
-### Single `.exe` (no Python needed by the recipient)
-
-To get one double-clickable file, build it once on a Windows computer. The
-recipient of the final `.exe` does not need Python installed.
-
-Easiest way: double-click `build_windows_exe.bat`.
-
-Or from a terminal:
+On a Windows machine:
 
 ```powershell
-.\build_windows_exe.ps1
+.\build_windows_exe.bat
 ```
 
-The build itself requires Python 3.11+ on the build machine. The output is a
-single file:
+Output: `dist\PureClick.exe` — no Python needed by the recipient. Cannot be built from macOS/Linux.
 
-```text
-dist\PureClick.exe
-```
-
-Send only `dist\PureClick.exe`. The recipient double-clicks it; nothing else is
-required.
-
-Note: the `.exe` must be built on Windows. It cannot be built from macOS or
-Linux, because PyInstaller does not cross-compile.
-
-## Windows Smoke Test
-
-Before using a real click, run:
+## Smoke test
 
 ```powershell
 py -3 windows_smoke_test.py
-```
-
-This prints median/worst local wait lateness and tick-catch sync quality. For
-more samples:
-
-```powershell
-py -3 windows_smoke_test.py --runs 100 --samples 9
-```
-
-To test that Windows can send a real click, put the cursor somewhere harmless
-and run:
-
-```powershell
 py -3 windows_smoke_test.py --click-test
+py -3 windows_smoke_test.py --capture-test
 ```
 
-That waits 3 seconds, then sends one click at the current cursor position.
-
-## Target Time Format
-
-Target time is interpreted as Interpark/Korea server time (KST):
-
-```text
-2026-05-28 20:00:00.000
-2026-05-28T20:00:00.000+09:00
-```
-
-## Practical Accuracy
-
-PureClick can schedule the local firing point very tightly, but exact server-time
-clicking still depends on server header precision, network jitter, Windows
-scheduling, browser focus, page rendering, popups, and display scaling. HTTP
-`Date` headers are second-precision, so PureClick catches the moment that header
-rolls over and anchors that tick to `perf_counter()`.
-
-Use `Test` several times on the target Windows computer, then check
-`pureclick_fire_log.csv` for recorded lateness and sync quality.
-
-## Test
+## Unit tests
 
 ```bash
 python -m unittest discover -s tests
 ```
+
+## Layout
+
+| File | Role |
+|---|---|
+| `pureclick.py` | Tk GUI |
+| `pureclick_core.py` | Server clock sync, precise wait, Windows click |
+| `pureclick_watch_core.py` | Color-change detection, GDI screen capture |
+| `windows_smoke_test.py` | Timing / click / capture benchmarks |
+| `docs/interpark_flow.md` | API recon notes (reference only) |
+
+## Accuracy notes
+
+HTTP `Date` is second-precision. PureClick brackets the rollover and fires from a monotonic clock under elevated timer resolution. Exact server-time hitting still depends on network jitter, Windows scheduling, browser focus, and display scaling. Check `pureclick_fire_log.csv` after Test runs.
