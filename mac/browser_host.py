@@ -173,6 +173,12 @@ def apply_state(window: webview.Window) -> None:
         install_document_start_script(window)
         scripts.append(load_script())
 
+    # The whole-venue trigger the panel watches on the page's behalf. Pushed as
+    # data, not as a command: it must not reload the autopilot or restart a run.
+    trigger = state.get("watch_trigger")
+    if isinstance(trigger, dict):
+        scripts.append(f"window.PureClick?.setWatchTrigger?.({json.dumps(trigger)});")
+
     command = state.get("command")
     if command and command in _COMMAND_JS:
         scripts.append(_COMMAND_JS[command])

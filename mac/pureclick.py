@@ -30,6 +30,7 @@ from pureclick_seat_core import (  # noqa: E402
     serialize_preferences,
 )
 from pureclick_showinfo import seat_table_lines, fetch_round_remains, fetch_show_catalog  # noqa: E402
+from pureclick_watch_trigger import TriggerState, next_trigger_state  # noqa: E402
 from pureclick_zone_map import (  # noqa: E402
     block_keys_in_watch_rect,
     is_click,
@@ -199,6 +200,11 @@ class PureClickMacApp(tk.Tk):
         self.block_names = tk.StringVar(value="")
         self.discord = tk.StringVar(value="")
         self.product_url = tk.StringVar(value="")
+        # The whole-venue trigger the panel keeps for the page (see
+        # _start_trigger_worker); nothing runs until 감시 시작.
+        self._trigger_state: TriggerState | None = None
+        self._trigger_on = False
+        self._trigger_thread: threading.Thread | None = None
         self.goods_code = tk.StringVar(value="")
         self.place_code = tk.StringVar(value="")
         self.play_date = tk.StringVar(value="")
@@ -523,6 +529,7 @@ class PureClickMacApp(tk.Tk):
 
     def stop_all(self) -> None:
         try:
+            self._stop_trigger_worker()
             self.browser.send_command("stop_all", clear_arm=True)
             self.status.set("정지 요청됨")
         except Exception as exc:
@@ -1244,13 +1251,67 @@ class PureClickMacApp(tk.Tk):
 
 
 
+    # How often the panel asks "did anything free anywhere?". One request, ~132ms
+    # measured, against a whole-venue sweep that costs 17 requests and ~4.4s on a
+    # 34-block house. Paced well below what the endpoint can take, because the
+    # point is to spend less, not more.
+    TRIGGER_POLL_MS = 500
+
     def start_catch(self) -> None:
         try:
             self._push_seat_config(command="run_catch", clear_arm=True)
             self.status.set("취켓팅 감시 중…")
             self._note("seatStatus 변화 감시")
+            self._trigger_state = None
+            self._trigger_on = True
+            self._start_trigger_worker()
         except Exception as exc:
             self.status.set(f"오류: {exc}")
+
+    def _start_trigger_worker(self) -> None:
+        """Watch the whole-venue remaining count for the page, which cannot.
+
+        The feed is served from api-ticketfront.interpark.com with no
+        Access-Control-Allow-Origin, so an in-page fetch cannot read it — the
+        same wall the in-page clock sync hits on the Date header. Python has no
+        such restriction, so the panel does the looking and pushes the verdict
+        across the bridge.
+        """
+        if getattr(self, "_trigger_thread", None) and self._trigger_thread.is_alive():
+            return
+        self._trigger_thread = threading.Thread(target=self._trigger_worker, daemon=True)
+        self._trigger_thread.start()
+
+    def _trigger_worker(self) -> None:
+        while getattr(self, "_trigger_on", False):
+            total = None
+            hide = bool((self._show_info_data or {}).get("hide_remain_seat"))
+            if not hide:
+                try:
+                    goods = parse_goods_code(self.goods_code.get())
+                    grades, _, _ = fetch_round_remains(
+                        goods,
+                        self.play_date.get(),
+                        place_code=self.place_code.get(),
+                        play_seq=self.play_seq.get() or None,
+                        timeout=3.0,
+                    )
+                    total = sum(grade.remain for grade in grades)
+                except Exception:
+                    # A failed look must leave the watch sweeping as before.
+                    total = None
+            self._trigger_state = next_trigger_state(
+                self._trigger_state, total, hide_remain=hide
+            )
+            try:
+                self.browser.push_trigger(self._trigger_state.to_mapping())
+            except Exception:
+                pass
+            time.sleep(self.TRIGGER_POLL_MS / 1000)
+
+    def _stop_trigger_worker(self) -> None:
+        self._trigger_on = False
+        self._trigger_state = None
 
     def arm(self, *, dry_run: bool = False) -> None:
         self._start_worker(lambda: self._arm_worker(dry_run=dry_run))
@@ -1573,6 +1634,10 @@ class PureClickMacApp(tk.Tk):
         # A drawn area holding no seats is silently replaced with the whole
         # venue — seen as "감시 구역: 지정됨 · 0석" while the watch swept
         # everything. An area that does nothing has to say so.
+        note = str(seat.get("triggerNote") or "").strip()
+        if seat.get("running") and note:
+            return note
+
         if seat.get("watchRectIgnored"):
             return "감시 구역에 좌석이 없습니다 · 전체를 감시하는 중 — [범위 정하기]에서 다시 그어 주세요"
 

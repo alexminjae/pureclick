@@ -279,6 +279,9 @@
     pageFreed: [],
     // What travelling to a seat actually costs, by kind of move.
     mapMoves: {},
+    // The panel's whole-venue "did anything free?" verdict.
+    watchTrigger: null,
+    triggerActedAt: 0,
     syncedSummary: null,
     lastProbe: null,
     lastBlocks: null,
@@ -2978,6 +2981,24 @@
     return candidates[0] || null;
   }
 
+  /**
+   * Has the venue moved since we last swept because of it?
+   *
+   * Only ever *adds* a sweep. When the trigger is unusable — the show hides its
+   * remaining counts, the round is not on sale (measured: rounds reporting
+   * remainCnt 0 with 600+ seats still on the map), or the panel could not
+   * reach the feed — this answers false and the rolling sweep carries on
+   * exactly as before. Being unable to see is not the same as seeing nothing.
+   */
+  function triggerFired() {
+    const trigger = seatState.watchTrigger;
+    if (!trigger || trigger.usable !== true) return false;
+    const changedAt = Number(trigger.changed_at) || 0;
+    if (!changedAt || changedAt <= seatState.triggerActedAt) return false;
+    seatState.triggerActedAt = changedAt;
+    return true;
+  }
+
   function clickableAmong(candidates) {
     const rendered = liveSeatIndex();
     seatState.domCircleCount = rendered.size;
@@ -5349,7 +5370,7 @@
     }
   }
 
-  async function pollFreedSeats(initData, blockKeys, config) {
+  async function pollFreedSeats(initData, blockKeys, config, { burst = false } = {}) {
     if (!blockKeys.length) return [];
     if (!seatState.lastBlocks?.length) {
       const collected = [];
@@ -5385,7 +5406,12 @@
     // during which nothing can be caught at all. Sweeping a whole stadium
     // faster genuinely costs more requests, so the budget is what is held
     // constant and the sweep time follows from how much is being watched.
-    const perTick = Math.min(CATCH_MAX_REQUESTS_PER_TICK, Math.ceil(keys.length / 2));
+    // A burst spends the whole sweep at once. That is affordable precisely
+    // because the trigger means we spent almost nothing while the venue was
+    // quiet — the budget is an average, and this is where it gets spent.
+    const perTick = burst
+      ? Math.ceil(keys.length / 2)
+      : Math.min(CATCH_MAX_REQUESTS_PER_TICK, Math.ceil(keys.length / 2));
     const take = perTick * 2;
     const cursor = keys.length <= take ? 0 : seatState.catchCursor % keys.length;
     const batch = keys.length <= take ? keys : keys.slice(cursor, cursor + take);
@@ -5617,6 +5643,9 @@
         sweepTicks: seatState.catchSweepTicks || 0,
         observedTickMs: seatState.observedTickMs || 0,
         mapMoves: seatState.mapMoves || {},
+        triggerUsable: seatState.watchTrigger?.usable === true,
+        triggerNote: String(seatState.watchTrigger?.note || ""),
+        triggerBursts: seatState.triggerBursts || 0,
         heldSeats: seatState.heldSeatIds.size,
         freeSeats: freeSeatCount(),
         blocks: (seatState.lastBlocks || []).length,
@@ -5779,6 +5808,8 @@
     seatState.pageStatusFreed = 0;
     seatState.observedTickMs = 0;
     seatState.mapMoves = {};
+    seatState.triggerActedAt = 0;
+    seatState.triggerBursts = 0;
     seatState.consecutiveRejects = 0;
     seatState.skippedByMap = 0;
     // Fresh per run, so 무작위 aims somewhere else next time while staying
@@ -6078,9 +6109,11 @@
         // come round to it.
         const tickStartedPerf = performance.now();
         const overheard = seatState.pageFreed.splice(0);
+        const burst = triggerFired();
+        if (burst) seatState.triggerBursts = (seatState.triggerBursts || 0) + 1;
         const freed = overheard.length
           ? overheard
-          : await pollFreedSeats(initData, scoped, config);
+          : await pollFreedSeats(initData, scoped, config, { burst });
         if (overheard.length) seatState.lastFreedVia = "page";
         else if (freed.length) seatState.lastFreedVia = "poll";
         // What a tick actually costs, rather than what the sleep alone says.
@@ -6732,9 +6765,24 @@
         ensureSeatRendered,
         applyBlockMask,
         clickableAmong,
+        triggerFired,
         aimForCandidates,
         noteMapMove,
         notePageSeatStatus,
+      },
+      /**
+       * Take the panel's whole-venue trigger.
+       *
+       * The remaining-seat feed answers "did anything free anywhere?" in one
+       * request (~132ms measured) where sweeping a 34-block venue takes 17 and
+       * about 4.4 seconds. It is served from another origin with no
+       * Access-Control-Allow-Origin, so the page cannot read it and the panel
+       * looks on its behalf.
+       *
+       * Data, never a command: it must not restart a run or reload anything.
+       */
+      setWatchTrigger: (trigger) => {
+        if (trigger && typeof trigger === "object") seatState.watchTrigger = trigger;
       },
       auditBlocks: () => auditBlocks(),
       sketchCache: { parkSketch, parkedSketchFor, restoreParkedSketch, currentSketchKey },

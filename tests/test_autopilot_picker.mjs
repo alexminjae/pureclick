@@ -296,6 +296,96 @@ const tests = {
     }
   },
 
+  // --- The whole-venue trigger ---------------------------------------------
+
+  "the trigger fires once per change, and only when it can see"() {
+    // Detection costs one seatStatus request per two blocks — 58ms each, hard
+    // capped at two keys — so a 34-block venue spends 17 requests and ~4.4s to
+    // answer a question the remaining-seat feed answers in one and ~132ms.
+    // Measured agreement: round 097 read 202 both ways.
+    const { race } = sandbox.window.PureClick;
+    const state = race.state;
+    const set = (trigger) => {
+      state.watchTrigger = trigger;
+      return race.triggerFired();
+    };
+    state.triggerActedAt = 0;
+    try {
+      assert.equal(set({ usable: true, changed_at: 0 }), false, "no change yet is not an event");
+      assert.equal(set({ usable: true, changed_at: 500 }), true, "a change fires");
+      assert.equal(set({ usable: true, changed_at: 500 }), false, "and only once");
+      assert.equal(set({ usable: true, changed_at: 900 }), true, "the next one fires again");
+
+      // Every way the trigger can be blind must leave the sweep untouched: the
+      // show hides its remains, the round is not on sale, or the panel could
+      // not reach the feed. Measured: rounds reporting remainCnt 0 still had
+      // 600+ seats on the map, so a blind trigger must never mean "stop".
+      state.triggerActedAt = 0;
+      for (const blind of [
+        { usable: false, changed_at: 9000 },
+        { changed_at: 9000 },
+        null,
+        "nonsense",
+      ]) {
+        assert.equal(set(blind), false, JSON.stringify(blind));
+      }
+    } finally {
+      state.watchTrigger = null;
+      state.triggerActedAt = 0;
+    }
+  },
+
+  "a burst sweeps the whole watch in one tick"() {
+    // The budget is an average. Spending almost nothing while the venue is
+    // quiet is what makes it affordable to spend the whole sweep at the moment
+    // something actually frees.
+    const { race } = sandbox.window.PureClick;
+    const state = race.state;
+    const blocks = [];
+    for (let i = 1; i <= 8; i += 1) {
+      blocks.push({
+        blockKey: `001:00${i}`,
+        mask: null,
+        seats: [{ seatInfoId: `s${i}`, seatGrade: "1", seatGradeName: "R석", rowNo: "A",
+                  seatNo: "1", isExposable: true, posLeft: 10, posTop: 10 }],
+      });
+    }
+    const originalFetch = sandbox.fetch;
+    const asked = [];
+    sandbox.fetch = async (url) => {
+      const keys = [...String(url).matchAll(/blockKeys=([^&]+)/g)].map((m) => decodeURIComponent(m[1]));
+      asked.push(keys);
+      return { ok: true, status: 200, json: async () => keys.map(() => "0") };
+    };
+    const initData = { goods: { goodsCode: "G", placeCode: "P" }, playSeq: { playSeq: "001" } };
+    state.lastBlocks = blocks;
+    try {
+      state.catchCursor = 0;
+      asked.length = 0;
+      return (async () => {
+        const watched = blocks.map((block) => block.blockKey);
+        await race.pollFreedSeats(initData, watched, {});
+        const paced = asked.flat().length;
+
+        state.catchCursor = 0;
+        asked.length = 0;
+        await race.pollFreedSeats(initData, watched, {}, { burst: true });
+        const burst = asked.flat().length;
+
+        assert.equal(paced, 2, "a normal tick looks at two blocks");
+        assert.equal(burst, 8, "a burst looks at all of them");
+        assert.ok(burst > paced, "or the trigger buys nothing");
+      })().finally(() => {
+        sandbox.fetch = originalFetch;
+        state.lastBlocks = [];
+        state.catchCursor = 0;
+      });
+    } catch (error) {
+      sandbox.fetch = originalFetch;
+      throw error;
+    }
+  },
+
   "a seat in the open 구역 beats a nearer one we would have to travel to"() {
     // Leaving a 구역 and entering another is the most expensive thing the loop
     // does — up to eight zoom-out clicks at 250ms each, then an entry that

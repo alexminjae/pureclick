@@ -141,6 +141,15 @@ class BrowserBridge:
         if not self.running:
             self.start()
 
+    def push_trigger(self, trigger: dict[str, Any]) -> None:
+        """Publish the whole-venue "did anything free?" verdict.
+
+        Written on its own key and only when it changes, so a quiet venue does
+        not rewrite the state file twice a second — and so it never disturbs the
+        seat config, which the page reloads when that changes.
+        """
+        merge_if_changed(self.state_path, "watch_trigger", trigger)
+
     def send_command(self, command: str, *, clear_arm: bool = False) -> None:
         self.push(command=command, clear_arm=clear_arm)
 
