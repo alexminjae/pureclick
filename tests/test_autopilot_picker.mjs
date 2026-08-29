@@ -435,6 +435,96 @@ const tests = {
     }
   },
 
+  // --- Overhearing the page ------------------------------------------------
+  //
+  // The 예매 창 fetches seatStatus for its own drawing. The network watch
+  // covered /onestop/api/seats/* but seatStatus sits beside that path, not
+  // under it, so the one kind of traffic worth overhearing was the one kind
+  // not matched. These observations cost no request, so they are not paced by
+  // the gateway budget that caps our own sweep.
+
+  "a seat the page's own traffic shows opening is caught without a request"() {
+    const { race } = sandbox.window.PureClick;
+    const state = race.state;
+    const block = {
+      blockKey: "001:001",
+      // One seat taken, one free: the mask we start from.
+      mask: [false, true],
+      seats: [
+        { seatInfoId: "s1", seatGrade: "1", seatGradeName: "R석", rowNo: "A", seatNo: "1",
+          isExposable: true, posLeft: 10, posTop: 10 },
+        { seatInfoId: "s2", seatGrade: "1", seatGradeName: "R석", rowNo: "A", seatNo: "2",
+          isExposable: true, posLeft: 20, posTop: 10 },
+      ],
+    };
+    state.lastBlocks = [block];
+    state.pageFreed.length = 0;
+    state.pageStatusSeen = 0;
+    try {
+      // Four seats per hex character, most-significant bit first: "C" = 1100,
+      // so both of this block's two seats are free. s1 just flipped.
+      race.notePageSeatStatus(
+        "https://tickets.interpark.com/onestop/api/seatStatus?goodsCode=G&blockKeys=001%3A001",
+        JSON.stringify(["C"]),
+      );
+      assert.equal(state.pageStatusSeen, 1, "the response must be counted");
+      assert.deepEqual(
+        state.pageFreed.map((seat) => seat.seatInfoId), ["s1"],
+        "only the seat that changed is reported, not every free seat",
+      );
+      assert.equal(block.mask[0], true, "and the stored mask moves with it");
+    } finally {
+      state.lastBlocks = [];
+      state.pageFreed.length = 0;
+    }
+  },
+
+  "a first sighting is not an opening"() {
+    // Without a previous mask every free seat would read as newly freed, and
+    // the watch would fire on the whole venue the moment it started.
+    const { race } = sandbox.window.PureClick;
+    const state = race.state;
+    const block = {
+      blockKey: "001:001",
+      mask: null,
+      seats: [{ seatInfoId: "s1", seatGrade: "1", seatGradeName: "R석", rowNo: "A",
+                seatNo: "1", isExposable: true, posLeft: 10, posTop: 10 }],
+    };
+    state.lastBlocks = [block];
+    state.pageFreed.length = 0;
+    try {
+      race.notePageSeatStatus(
+        "/onestop/api/seatStatus?blockKeys=001%3A001", JSON.stringify(["8"]),
+      );
+      assert.deepEqual(state.pageFreed, [], "nothing opened; we simply had not looked before");
+      assert.equal(block.mask[0], true, "but the baseline is now recorded");
+    } finally {
+      state.lastBlocks = [];
+      state.pageFreed.length = 0;
+    }
+  },
+
+  "unreadable page traffic is ignored rather than thrown from"() {
+    // This runs inside a network callback on the booking page. Throwing there
+    // would surface as a page error on traffic that is none of our business.
+    const { race } = sandbox.window.PureClick;
+    const state = race.state;
+    state.lastBlocks = [{ blockKey: "001:001", mask: [false], seats: [] }];
+    try {
+      for (const [url, body] of [
+        ["/onestop/api/seatStatus?blockKeys=001%3A001", "not json"],
+        ["/onestop/api/seatStatus", JSON.stringify(["1"])],
+        ["::::", JSON.stringify(["1"])],
+      ]) {
+        race.notePageSeatStatus(url, body);
+      }
+      assert.deepEqual(state.pageFreed, []);
+    } finally {
+      state.lastBlocks = [];
+      state.pageFreed.length = 0;
+    }
+  },
+
   "a sold-out block yields no candidates despite isExposable"() {
     // Maroon 5 shape: every seat exposable, one bit set in the live bitmap.
     const seats = Array.from({ length: 8 }, (_, i) => ({
@@ -883,6 +973,35 @@ const tests = {
     });
     assert.equal(ranked[0].seatInfoId, "back", "a placed seat beats an unplaced one");
     assert.equal(ranked.length, 2, "but the unplaced seat is still catchable");
+  },
+
+  // --- Getting into the queue --------------------------------------------
+
+  // acquireWaitingUrl is built to start before the open and retry across the
+  // boundary, because one perfectly-timed request loses to a clock error of a
+  // few tens of milliseconds or one dropped packet. That lead was dead code:
+  // runArmScheduler awaited the full deadline before ever calling it, so its
+  // pre-wait loop was always already past and the first request went out *at*
+  // the open, never before it.
+  "the entry scheduler stops short of the open by the retry loop's lead"() {
+    const { race } = sandbox.window.PureClick;
+    const target = 1_800_000_000;
+    const start = race.armEntryStartUnix({ target_server_unix: target });
+
+    assert.ok(start < target, "must be ready before the open, not at it");
+    // Unix seconds are floats, so this lands at 400.0000009 rather than 400.
+    assert.ok(
+      Math.abs((target - start) * 1000 - race.ENTRY_LEAD_MS) < 0.01,
+      `head start ${(target - start) * 1000}ms must match the loop's ${race.ENTRY_LEAD_MS}ms lead`,
+    );
+    assert.ok(race.ENTRY_LEAD_MS > 0, "a zero lead is the bug this replaced");
+  },
+
+  "an entry with no target time has no start time to compute"() {
+    const { race } = sandbox.window.PureClick;
+    for (const arm of [{}, { target_server_unix: null }, { target_server_unix: "soon" }]) {
+      assert.equal(race.armEntryStartUnix(arm), null, JSON.stringify(arm));
+    }
   },
 
   "grade preference still outranks the seat order"() {

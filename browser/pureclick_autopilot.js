@@ -239,6 +239,10 @@
   // One seatStatus call covers two blocks. Holding requests-per-second steady
   // is what keeps the gateway quiet, so this and the interval below are the
   // budget; how long a sweep takes follows from how many blocks are watched.
+  // How far ahead of the open to start asking for a queue slot. The request
+  // loop is built to retry across the boundary, so being early is the point:
+  // the first request the server is willing to accept is then ours.
+  const ENTRY_LEAD_MS = 400;
   const CATCH_MIN_POLL_MS = 200;
   const CATCH_MAX_REQUESTS_PER_TICK = 1;
   const CATCH_LIVE_TRIES = 8;
@@ -271,6 +275,8 @@
     // just took is not gone for good: holds expire and carts are abandoned, so
     // it rejoins the pool rather than being blacklisted for the run.
     takenUntil: new Map(),
+    // Seats the page's own traffic showed opening, waiting for the loop.
+    pageFreed: [],
     syncedSummary: null,
     lastProbe: null,
     lastBlocks: null,
@@ -1630,6 +1636,10 @@
   }
 
   async function enterFromNolPage(arm) {
+    // Past here we are pressing the page's own buttons rather than talking to
+    // the queue API, and those only work once the show is actually open.
+    await waitUntilServerUnix(Number(arm.target_server_unix));
+
     if (clickFirstMatching(/^예매하기$|^본인인증 후 예매하기$/)) {
       await sleep(250);
       const modalBook = [...document.querySelectorAll("button, a")].find((el) =>
@@ -1664,7 +1674,15 @@
    * round-trip interval means the first request the server is willing to accept
    * is ours, without depending on hitting one exact instant.
    */
-  async function acquireWaitingUrl(arm, { leadMs = 400, intervalMs = 80, windowMs = 15000 } = {}) {
+  // When the scheduler should stop waiting: early by exactly the lead the
+  // request loop is built to use.
+  function armEntryStartUnix(arm) {
+    const target = Number(arm?.target_server_unix);
+    if (!Number.isFinite(target) || target <= 0) return null;
+    return target - ENTRY_LEAD_MS / 1000;
+  }
+
+  async function acquireWaitingUrl(arm, { leadMs = ENTRY_LEAD_MS, intervalMs = 80, windowMs = 15000 } = {}) {
     const target = Number(arm.target_server_unix) || serverTimeUnix();
     const startAt = target - leadMs / 1000;
     const giveUpAt = target + windowMs / 1000;
@@ -1688,6 +1706,7 @@
         }
         if (isUsableWaitingAnswer(answer)) {
           armState.waitingAttempts = attempts;
+          armState.acquiredLatenessMs = Math.round((serverTimeUnix() - target) * 1000);
           log(`waiting acquired after ${attempts} attempt(s)`);
           return answer;
         }
@@ -1782,6 +1801,11 @@
       return { ...openBookSession(arm), waitingUrl, latenessMs };
     }
 
+    // The queue API can fail fast — a throw, or a terminal answer — and leave
+    // us here while the countdown is still running. The page's own buttons do
+    // not work before the open, so wait the rest of it out.
+    await waitUntilServerUnix(Number(arm.target_server_unix));
+
     if (clickFirstMatching(/^예매하기$|^본인인증 후 예매하기$/)) {
       updateOverlay("예매하기 클릭", "warn");
       return { clicked: true, waitingUrl, latenessMs };
@@ -1810,7 +1834,9 @@
     armState.clockOffsetMs = Math.round((clockState.offsetSeconds || 0) * 1000);
     const remaining = arm.target_server_unix - serverTimeUnix();
     updateOverlay(`${arm.dry_run ? "테스트 " : ""}대기열 예약<br>${Math.max(0, remaining).toFixed(1)}초`, "info");
-    await waitUntilServerUnix(Number(arm.target_server_unix));
+    // Stop short of the open by exactly the lead the request loop expects.
+    // Waiting out the full deadline here is what made that lead dead code.
+    await waitUntilServerUnix(armEntryStartUnix(arm) ?? Number(arm.target_server_unix));
 
     const firedPerf = performance.now();
     try {
@@ -4235,6 +4261,7 @@
     // Always refresh the recorder so a script reload picks up new parsing
     // without re-wrapping fetch/XHR (which would stack wrappers forever).
     window.__pureclickNotePageSeatNet = notePageSeatNet;
+    window.__pureclickNotePageSeatStatus = notePageSeatStatus;
     // v5+ records select/preselect outcomes. Older hooks only traced; rebuild once.
     if (window.__pureclickNetWatchNotes) return;
     window.__pureclickNetWatchNotes = true;
@@ -4246,13 +4273,14 @@
         typeof nativeFetch.bind === "function" ? nativeFetch.bind(window) : nativeFetch;
       window.fetch = async function pureclickFetch(input, init) {
         const url = String(input?.url || input || "");
-        const watched = /\/onestop\/(gql|api\/seats)/.test(url);
+        const watched = /\/onestop\/(gql|api\/(seats|seatStatus|seatMeta))/.test(url);
         const response = await window.__pureclickNativeFetch.apply(window, arguments);
         if (!watched) return response;
         try {
           const body = String(init?.body || "").slice(0, 200);
           const text = await response.clone().text();
           const label = (body.match(/mutation\s+(\w+)/) || [])[1] || url.split("?")[0].split("/").pop();
+          if (label === "seatStatus") window.__pureclickNotePageSeatStatus?.(url, text);
           window.__pureclickNotePageSeatNet?.(label, response.status, text);
           traceCall(`page:${label}`, body, `HTTP ${response.status} ${text}`);
         } catch {
@@ -4274,12 +4302,13 @@
       };
       XMLHttpRequest.prototype.send = function pureclickSend(body) {
         const url = this.__pureclickUrl || "";
-        if (/\/onestop\/(gql|api\/seats)/.test(url)) {
+        if (/\/onestop\/(gql|api\/(seats|seatStatus|seatMeta))/.test(url)) {
           this.addEventListener("loadend", () => {
             try {
               const sent = String(body || "").slice(0, 200);
               const label = (sent.match(/mutation\s+(\w+)/) || [])[1] || url.split("?")[0].split("/").pop();
               const text = String(this.responseText || "");
+              if (label === "seatStatus") window.__pureclickNotePageSeatStatus?.(url, text);
               window.__pureclickNotePageSeatNet?.(label, this.status, text);
               traceCall(`page:${label}`, sent, `HTTP ${this.status} ${text.slice(0, 400)}`);
             } catch {
@@ -5412,25 +5441,82 @@
       masks.push(...parseSeatStatus(await fetchSeatStatus(initData, pair)));
     }
     batch.forEach((key, index) => {
-      const block = byKey.get(String(key));
-      const mask = masks[index] || null;
-      if (!block || !mask) return;
-      const previous = block.mask;
-      block.mask = mask;
-      if (!previous) return;
-      for (let pos = 0; pos < Math.min(previous.length, mask.length); pos += 1) {
-        if (!mask[pos] || previous[pos]) continue;
-        const seat = block.seats[pos];
-        if (!seat?.isExposable || !seat?.seatGrade || !seat?.seatInfoId) continue;
-        if (seat.seatGroupId && config.allow_group_seats === false) continue;
-        const candidate = toCandidate(seat, block.blockKey);
-        if (!seatInWatchRect(candidate, normalizeWatchRect(config.watch_rect))) continue;
-        noteBitmapSawFree(candidate.seatInfoId);
-        freed.push(candidate);
-      }
+      freed.push(...applyBlockMask(byKey.get(String(key)), masks[index] || null, config));
     });
     if (freed.length) log("catch: freed seats", freed.map((seat) => seat.label));
     return freed;
+  }
+
+  /**
+   * Fold one block's fresh availability bitmap in, and report what just opened.
+   *
+   * Split out of pollFreedSeats so the page's own seatStatus traffic can go
+   * through exactly the same path. A seat that frees is a seat that frees; it
+   * must not be recognised differently depending on who asked.
+   */
+  function applyBlockMask(block, mask, config) {
+    if (!block || !mask) return [];
+    const previous = block.mask;
+    block.mask = mask;
+    // Nothing to compare against yet: a first sighting is not an opening.
+    if (!previous) return [];
+    const freed = [];
+    const rect = normalizeWatchRect(config.watch_rect);
+    for (let pos = 0; pos < Math.min(previous.length, mask.length); pos += 1) {
+      if (!mask[pos] || previous[pos]) continue;
+      const seat = block.seats[pos];
+      if (!seat?.isExposable || !seat?.seatGrade || !seat?.seatInfoId) continue;
+      if (seat.seatGroupId && config.allow_group_seats === false) continue;
+      const candidate = toCandidate(seat, block.blockKey);
+      if (!seatInWatchRect(candidate, rect)) continue;
+      noteBitmapSawFree(candidate.seatInfoId);
+      freed.push(candidate);
+    }
+    return freed;
+  }
+
+  /**
+   * Read the page's own seatStatus responses.
+   *
+   * The 예매 창 fetches availability for its own drawing. Every one of those is
+   * an observation we were throwing away while paying for our own — and it
+   * arrives without costing a request, so it cannot contribute to the gateway
+   * lockout that caps how fast we are allowed to poll.
+   *
+   * Whether it fires at all, and how often, is a property of the site rather
+   * than something to assume: `pageStatusSeen` counts them so a single watch
+   * settles it.
+   */
+  function notePageSeatStatus(url, text) {
+    if (!seatState.lastBlocks?.length) return;
+    let keys;
+    try {
+      keys = new URL(url, location.origin).searchParams.getAll("blockKeys");
+    } catch (error) {
+      return;
+    }
+    if (!keys.length) return;
+    let masks;
+    try {
+      masks = parseSeatStatus(JSON.parse(text));
+    } catch (error) {
+      return;
+    }
+    if (!masks?.length) return;
+
+    seatState.pageStatusSeen = (seatState.pageStatusSeen || 0) + 1;
+    const byKey = new Map(seatState.lastBlocks.map((block) => [String(block.blockKey), block]));
+    const config = loadSeatConfig();
+    const freed = [];
+    keys.forEach((key, index) => {
+      freed.push(...applyBlockMask(byKey.get(String(key)), masks[index] || null, config));
+    });
+    if (!freed.length) return;
+    // Handed to the loop rather than acted on here: this runs inside a network
+    // callback, and clicking from there would race whatever the loop is doing.
+    seatState.pageFreed.push(...freed);
+    seatState.pageStatusFreed = (seatState.pageStatusFreed || 0) + freed.length;
+    log("catch: page traffic showed freed seats", freed.map((seat) => seat.label));
   }
 
   // What the panel needs, and nothing else. Spreading seatState sent the whole
@@ -5553,6 +5639,11 @@
         unknownDialog: seatState.unknownDialog || "",
         overlaysDismissed: seatState.overlaysDismissed || 0,
         catchLiveTries: seatState.catchLiveTries || 0,
+        // Whether overhearing the page is worth anything is a fact about the
+        // site, not something to assume: these settle it in one watch.
+        pageStatusSeen: seatState.pageStatusSeen || 0,
+        pageStatusFreed: seatState.pageStatusFreed || 0,
+        lastFreedVia: seatState.lastFreedVia || "",
         watchedBlocks: seatState.catchWatchedBlocks || 0,
         catchLatencyMs: seatState.lastCatchLatencyMs || 0,
         domAgreedMs: seatState.lastDomAgreedMs || 0,
@@ -5717,6 +5808,9 @@
     seatState.statusFailures = 0;
     seatState.catchLiveTries = 0;
     seatState.catchLiveSignature = "";
+    seatState.pageFreed.length = 0;
+    seatState.pageStatusSeen = 0;
+    seatState.pageStatusFreed = 0;
     seatState.consecutiveRejects = 0;
     seatState.skippedByMap = 0;
     // Fresh per run, so 무작위 aims somewhere else next time while staying
@@ -6009,7 +6103,17 @@
         const watchRect = normalizeWatchRect(config.watch_rect);
         const scoped =
           (watchRect && blocksInWatchRect(seatState.lastBlocks || [], watchRect)) || statusBlockKeys;
-        const freed = await pollFreedSeats(initData, scoped, config);
+        // Anything the 예매 창's own traffic already showed opening is taken
+        // first. It cost us no request, so it is not subject to the budget
+        // that paces the sweep, and it is as fresh as the page itself — which
+        // on the block the user is looking at beats waiting for our cursor to
+        // come round to it.
+        const overheard = seatState.pageFreed.splice(0);
+        const freed = overheard.length
+          ? overheard
+          : await pollFreedSeats(initData, scoped, config);
+        if (overheard.length) seatState.lastFreedVia = "page";
+        else if (freed.length) seatState.lastFreedVia = "poll";
         const fresh = seatState.polledBlocks?.size
           ? (seatState.lastBlocks || []).filter((block) =>
               seatState.polledBlocks.has(String(block.blockKey)),
@@ -6634,6 +6738,8 @@
         withLivePlaySeq,
         adoptBlocksKey,
         stagePoint,
+        ENTRY_LEAD_MS,
+        armEntryStartUnix,
         sampledRoundKey,
         pollFreedSeats,
         liveSeatIndex,
@@ -6642,6 +6748,8 @@
         mapAreaControls,
         leaveBlockToVenue,
         ensureSeatRendered,
+        applyBlockMask,
+        notePageSeatStatus,
       },
       auditBlocks: () => auditBlocks(),
       sketchCache: { parkSketch, parkedSketchFor, restoreParkedSketch, currentSketchKey },
