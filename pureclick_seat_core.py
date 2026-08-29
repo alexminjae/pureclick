@@ -589,10 +589,21 @@ def map_move_lines(seat: dict[str, Any]) -> list[str]:
     anywhere was a 389 ms note in a comment. These are the real ones.
     """
     moves = seat.get("mapMoves")
-    if not isinstance(moves, dict) or not moves:
+    scans = seat.get("domScans") or 0
+    if (not isinstance(moves, dict) or not moves) and not scans:
         return []
 
     lines: list[str] = []
+    if scans:
+        # Reading the drawn seat map costs four passes over the document, and
+        # on 아레나 킨텍스 that document holds 21,460 seats. Whether that matters
+        # is a measurement, and this is it.
+        average = round((seat.get("domScanMs") or 0) / scans, 1)
+        lines.append(
+            f"좌석맵 읽기  {scans}회 · 평균 {average}ms · 최대 {seat.get('domScanWorstMs') or 0}ms"
+        )
+    if not isinstance(moves, dict):
+        return lines
     for key, label in MAP_MOVE_LABELS.items():
         row = moves.get(key)
         if not isinstance(row, dict):

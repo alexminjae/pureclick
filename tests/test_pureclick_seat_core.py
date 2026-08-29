@@ -402,6 +402,18 @@ class MapMoveLinesTest(unittest.TestCase):
         for status in ({}, {"mapMoves": {}}, {"mapMoves": "nonsense"}):
             self.assertEqual(map_move_lines(status), [], status)
 
+    def test_it_reports_what_reading_the_seat_map_costs(self) -> None:
+        # Four querySelectorAll passes over a document that on 아레나 킨텍스
+        # holds 21,460 seats, at 26 call sites, several per tick. Whether that
+        # is worth reducing is a measurement, not an opinion.
+        lines = map_move_lines({"domScans": 240, "domScanMs": 1080.0, "domScanWorstMs": 31})
+        self.assertEqual(lines, ["좌석맵 읽기  240회 · 평균 4.5ms · 최대 31ms"])
+
+    def test_scan_cost_shows_even_with_no_map_moves(self) -> None:
+        # A watch inside one 구역 never travels, and its scan cost is still the
+        # thing worth knowing.
+        self.assertTrue(map_move_lines({"domScans": 5, "domScanMs": 20.0, "domScanWorstMs": 6}))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2162,6 +2162,7 @@
   }
 
   function collectSeatCircles() {
+    const startedPerf = performance.now();
     const nodes = [
       ...document.querySelectorAll("circle.js-seat"),
       ...document.querySelectorAll('circle[class*="SeatMap"]'),
@@ -2173,10 +2174,17 @@
     // 58.5ms on a 14,881-seat venue against 1.0ms here, and this runs several
     // times per tick.
     const unique = [...new Set(nodes)];
-    return unique.filter((node) => {
+    const kept = unique.filter((node) => {
       const radius = Number(node.getAttribute("r") || node.r?.baseVal?.value || 0);
       return radius === 0 || (radius >= 1 && radius <= 24);
     });
+    // What this actually costs, so the remaining call sites can be judged on
+    // evidence rather than on how expensive they look.
+    const spent = performance.now() - startedPerf;
+    seatState.domScans = (seatState.domScans || 0) + 1;
+    seatState.domScanMs = (seatState.domScanMs || 0) + spent;
+    seatState.domScanWorstMs = Math.max(seatState.domScanWorstMs || 0, spent);
+    return kept;
   }
 
   function seatMapRoot() {
@@ -3290,7 +3298,18 @@
   // seats already answer would make the poll the most expensive thing the page
   // does. Sampling is enough because every seat in a drawn 구역 shares a round.
   function sampledRoundKey(limit = 12) {
-    const nodes = collectSeatCircles();
+    // Off the live DOM, not off the seat index. The index is kept by a
+    // MutationObserver, and this is the one thing that notices a 일정 change —
+    // reading a stale index would report the old round, which is precisely the
+    // failure this exists to catch (the page drawing 022 while the macro polled
+    // 017 and read 0 free, forever).
+    //
+    // But it runs on every host snapshot, four times a second, on the same
+    // thread as the catch loop. It needs a dozen seats, not the venue, so try
+    // the specific selector first and only fall back to the full four-pass
+    // scan if the page does not use it.
+    let nodes = [...document.querySelectorAll("circle.js-seat")];
+    if (nodes.length < 3) nodes = collectSeatCircles();
     if (nodes.length < 3) return null;
     // Once, outside the loop, and never allowed to throw: this runs on every
     // host snapshot, and getInitData reaches into page storage that is not
@@ -5642,6 +5661,9 @@
         wonVia: seatState.wonVia || "",
         sweepTicks: seatState.catchSweepTicks || 0,
         observedTickMs: seatState.observedTickMs || 0,
+        domScans: seatState.domScans || 0,
+        domScanMs: Math.round(seatState.domScanMs || 0),
+        domScanWorstMs: Math.round(seatState.domScanWorstMs || 0),
         mapMoves: seatState.mapMoves || {},
         triggerUsable: seatState.watchTrigger?.usable === true,
         triggerNote: String(seatState.watchTrigger?.note || ""),
@@ -5810,6 +5832,9 @@
     seatState.mapMoves = {};
     seatState.triggerActedAt = 0;
     seatState.triggerBursts = 0;
+    seatState.domScans = 0;
+    seatState.domScanMs = 0;
+    seatState.domScanWorstMs = 0;
     seatState.consecutiveRejects = 0;
     seatState.skippedByMap = 0;
     // Fresh per run, so 무작위 aims somewhere else next time while staying
