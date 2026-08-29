@@ -3,7 +3,7 @@
 
   // Bumped whenever seat-grab behaviour changes. Shown in the overlay on load /
   // 좌석 잡기 so you can tell the 예매 창 actually got the new script.
-  const AUTOPILOT_BUILD = "distance-v67";
+  const AUTOPILOT_BUILD = "trigger-v68";
 
   // ---------------------------------------------------------------------------
   // Popup shim — runs before anything else, on every frame.
