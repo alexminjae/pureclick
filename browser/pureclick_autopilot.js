@@ -1482,79 +1482,6 @@
     return true;
   }
 
-  /**
-   * Fill the booking form and stop at the payment button.
-   *
-   * The seat is already held once preselect succeeds, so nothing here is a race
-   * — correctness matters more than speed. Advancing is limited to intermediate
-   * steps; the final commit is always left to the user.
-   */
-  async function fillCheckout(config, { maxSteps = 3 } = {}) {
-    if (emptyPriceStepVisible() || seatSelectionEmpty()) {
-      return recoverEmptyPriceStep();
-    }
-    if (bookingNoticeVisible()) {
-      const confirmed = await confirmPostSelectNotices();
-      if (!confirmed || bookingNoticeVisible()) {
-        updateOverlay("선점됨. 파란 확인 버튼을 직접 눌러 주세요.", "warn");
-        return { awaitingPayment: false, blockedByNotice: true };
-      }
-    }
-    const qty = String(config.quantity || 1);
-    fillLabeledInput(/매수|수량/, qty);
-    const qtySelect = [...document.querySelectorAll("select")].find((el) =>
-      [...el.options].some((opt) => /매/.test(opt.text)),
-    );
-    if (qtySelect) {
-      const option = [...qtySelect.options].find((opt) => opt.text.includes(`${qty}매`) || opt.value === qty);
-      if (option) {
-        qtySelect.value = option.value;
-        qtySelect.dispatchEvent(new Event("change", { bubbles: true }));
-      }
-    }
-    fillLabeledInput(/생년월일|주민/, config.birth_yymmdd || "");
-    if (config.delivery) clickByExactText([config.delivery, "배송", "현장수령"]);
-    if (config.payment) clickByExactText([config.payment, "무통장입금", "신용카드"]);
-    acceptRequiredAgreements();
-
-    for (let step = 0; step < maxSteps; step += 1) {
-      await sleep(350);
-      if (emptyPriceStepVisible() || seatSelectionEmpty()) return recoverEmptyPriceStep();
-      acceptRequiredAgreements();
-      const advance = [...document.querySelectorAll("button, a, [role=button]")].find(
-        (el) => isVisible(el) && !el.disabled && isCheckoutAdvanceSafe(el),
-      );
-      if (!advance) break;
-      forceClick(advance);
-    }
-
-    if (emptyPriceStepVisible() || seatSelectionEmpty()) return recoverEmptyPriceStep();
-
-    const commit = [...document.querySelectorAll("button, a, [role=button]")].find(
-      (el) => COMMIT_BUTTON.test((el.textContent || "").trim()) && isVisible(el),
-    );
-    if (bookingNoticeVisible()) {
-      updateOverlay("선점됨. 파란 확인 버튼을 직접 눌러 주세요.", "warn");
-      seatState.awaitingPayment = false;
-      return { awaitingPayment: false, blockedByNotice: true };
-    }
-    const onPrice = location.search.includes("step=price");
-    if (!onPrice && !commit) {
-      updateOverlay(`선점 완료 ${seatState.lastSeat || ""}<br>가격 화면 대기`, "info");
-      seatState.awaitingPayment = false;
-      return { awaitingPayment: false };
-    }
-    seatState.awaitingPayment = true;
-    updateOverlay(
-      commit
-        ? `입력 완료. 결제 버튼은 직접 눌러주세요.<br>좌석: ${seatState.lastSeat || "-"}`
-        : `입력 완료. 결제 화면을 확인하세요.<br>좌석: ${seatState.lastSeat || "-"}`,
-      "ok",
-    );
-    notifyDiscord(`NOL 스나이퍼 · 결제 대기 ${seatState.lastSeat || ""}`.trim());
-    return { awaitingPayment: true, commitButtonFound: Boolean(commit) };
-  }
-
   /** Tick required consent boxes; optional marketing ones are left alone. */
   function acceptRequiredAgreements() {
     for (const box of document.querySelectorAll('input[type="checkbox"]')) {
@@ -4432,17 +4359,6 @@
     return "DEFAULT";
   }
 
-
-  function goPriceStep() {
-    if (location.pathname.includes("/onestop/seat") && !location.search.includes("step=price")) {
-      const next = new URL(location.href);
-      next.searchParams.set("step", "price");
-      location.href = next.pathname + "?" + next.searchParams.toString();
-      return true;
-    }
-    return false;
-  }
-
   async function collectApiCandidates(initData, gradeOrder, blockKeys, config = {}) {
     const allBlocks = await fetchBlockKeys(initData);
     let keys = resolveBlockKeys({ block_keys: blockKeys, block_names: config.block_names || [] }, allBlocks);
@@ -5651,6 +5567,7 @@
         domAgreedSamples: seatState.domAgreedSamples || 0,
         wonVia: seatState.wonVia || "",
         sweepTicks: seatState.catchSweepTicks || 0,
+        observedTickMs: seatState.observedTickMs || 0,
         heldSeats: seatState.heldSeatIds.size,
         freeSeats: freeSeatCount(),
         blocks: (seatState.lastBlocks || []).length,
@@ -5811,6 +5728,7 @@
     seatState.pageFreed.length = 0;
     seatState.pageStatusSeen = 0;
     seatState.pageStatusFreed = 0;
+    seatState.observedTickMs = 0;
     seatState.consecutiveRejects = 0;
     seatState.skippedByMap = 0;
     // Fresh per run, so 무작위 aims somewhere else next time while staying
@@ -6108,12 +6026,21 @@
         // that paces the sweep, and it is as fresh as the page itself — which
         // on the block the user is looking at beats waiting for our cursor to
         // come round to it.
+        const tickStartedPerf = performance.now();
         const overheard = seatState.pageFreed.splice(0);
         const freed = overheard.length
           ? overheard
           : await pollFreedSeats(initData, scoped, config);
         if (overheard.length) seatState.lastFreedVia = "page";
         else if (freed.length) seatState.lastFreedVia = "poll";
+        // What a tick actually costs, rather than what the sleep alone says.
+        // Smoothed, because one slow request should not rewrite the estimate.
+        if (!overheard.length) {
+          const spent = performance.now() - tickStartedPerf + pollMs;
+          seatState.observedTickMs = seatState.observedTickMs
+            ? Math.round(seatState.observedTickMs * 0.7 + spent * 0.3)
+            : Math.round(spent);
+        }
         const fresh = seatState.polledBlocks?.size
           ? (seatState.lastBlocks || []).filter((block) =>
               seatState.polledBlocks.has(String(block.blockKey)),

@@ -13,7 +13,6 @@ from pureclick_core import (
     fetch_server_date,
     parse_http_date,
     parse_target_time,
-    precise_wait_until,
 )
 
 
@@ -107,11 +106,6 @@ class PureClickCoreTests(unittest.TestCase):
             datetime.fromtimestamp(result.anchor_server_unix, UTC).second,
             {1, 2},
         )
-
-    def test_precise_wait_until_waits_until_deadline(self) -> None:
-        deadline = time.perf_counter() + 0.030
-        self.assertTrue(precise_wait_until(deadline))
-        self.assertGreaterEqual(time.perf_counter(), deadline)
 
 
 if __name__ == "__main__":

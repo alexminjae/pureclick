@@ -1,29 +1,45 @@
 # PureClick
 
-Interpark / NOL ticket assistant — **Mac NOL Sniper** (embedded browser) and **Windows** (native click + screen watch).
+NOL / Interpark ticket assistant for macOS. Two jobs, and nothing else:
 
-| Edition | Folder | Run |
-|---|---|---|
-| **Mac** | `mac/` | `./mac/run_pureclick.sh` |
-| **Windows** | repo root | `run_pureclick.bat` |
+- **오픈 대기** — be first into the queue the instant a show opens
+- **취켓팅** — watch an area of the seat map you drew and take whatever
+  cancellation appears in it, at any grade
 
-## Mac · API-driven (recommended for testing)
-
-Embedded browser with waiting-API queue entry and seat select autopilot. See [mac/README.md](mac/README.md).
+## Run
 
 ```bash
 cd mac && ./run_pureclick.sh
 ```
 
-## Windows · Native click + screen watch
+Two windows open: the 조작판 (control panel) and the 예매 창 (an embedded
+browser). You log in and type any 보안문자 yourself in the 예매 창; everything
+else is driven from inside that page.
 
-Phase 1 timed click + Phase 2 color-change cancellation watch. See root `pureclick.py`.
+## Shape
 
-```powershell
-python pureclick.py
+| | |
+|---|---|
+| `mac/pureclick.py` | the panel — tkinter, the server clock, the arm scheduler |
+| `mac/browser_host.py` | the 예매 창 — pywebview, injects the autopilot at document start |
+| `browser/pureclick_autopilot.js` | everything that happens inside the page |
+| `pureclick_*.py` | pure logic, at the repo root, shared by both and unit-tested |
+| `research/` | probes and captured site data behind the decisions above |
+
+The panel and the browser host are separate processes that talk through a
+flock-guarded JSON file (`mac/.pureclick_browser_state.json`). Measured at
+0.55 ms a read, which is why it is a file and not something cleverer.
+
+## Tests
+
+```bash
+python3 -m pytest tests/ -q          # the Python side
+node tests/test_autopilot_picker.mjs # the in-page logic
 ```
 
-## Docs
+## Windows
 
-[docs/interpark_flow.md](docs/interpark_flow.md) — API endpoints and booking flow.
-
+Removed. It was a native screen-clicker with a colour-change watch, and it had
+been superseded by the embedded-browser design — it could not run on macOS, and
+its tests were still counted in the suite. It is in the history if it is ever
+wanted back.

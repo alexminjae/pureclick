@@ -1574,10 +1574,13 @@ class PureClickMacApp(tk.Tk):
         # moment it opened to the moment we clicked it.
         caught = seat.get("catchLatencyMs") or 0
         if caught:
+            via_freed = {"page": " · 예매 창 통신으로 먼저 발견", "poll": ""}.get(
+                str(seat.get("lastFreedVia") or ""), ""
+            )
             won = {"api": "API 선점", "click": "맵 클릭"}.get(str(seat.get("wonVia") or ""), "")
             verdict = "빠릅니다" if caught <= 400 else "느립니다 — 범위를 좁혀 보세요"
             tail = f" · {won}" if won else ""
-            return f"빈자리 발견 후 {caught}ms 만에 잡음{tail} · {verdict}"
+            return f"빈자리 발견 후 {caught}ms 만에 잡음{tail}{via_freed} · {verdict}"
 
         # The gap this whole design turns on: how long the 예매 창 takes to agree
         # that a seat the server already freed is actually free. If this is
@@ -1599,13 +1602,18 @@ class PureClickMacApp(tk.Tk):
         watched = seat.get("watchedBlocks") or 0
         ticks = seat.get("sweepTicks") or 0
         if seat.get("running") and watched and ticks:
-            sweep = ticks * cls.CATCH_TICK_MS
+            # The measured tick, not the configured sleep. A tick is the sleep
+            # *plus* the request, and seatStatus costs ~58ms — so reporting
+            # ticks x 200ms understated every sweep by about a third, in the
+            # one number you read when deciding whether to narrow the range.
+            tick = seat.get("observedTickMs") or cls.CATCH_TICK_MS
+            sweep = ticks * tick
             note = f"감시 {watched}구역 · 한 바퀴 {sweep}ms"
             # A sweep this long is the race, not a detail. Watching the whole
             # venue means a seat freeing just behind the cursor waits a full
             # lap before we even look at it.
             if sweep >= 1000:
-                note += f" · 범위를 정하면 {cls.CATCH_TICK_MS}ms로 줄어듭니다"
+                note += f" · 범위를 정하면 {tick}ms로 줄어듭니다"
             return note
 
         # Everything after the first ' · ' is the explanation the toast carries.
