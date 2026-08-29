@@ -1,0 +1,11 @@
+{
+  "common": {
+    "messageId": null,
+    "message": "success",
+    "requestUri": "/v1/goods/26011315/playSeq",
+    "gtid": "",
+    "timestamp": null,
+    "internalHttpStatusCode": 200
+  },
+  "data": "class java.lang.IllegalArgumentException"
+}

@@ -1,0 +1,218 @@
+{
+  "EARLY ENTRY PACKAGE": {
+    "기본가": [
+      {
+        "goodsCode": "26011315",
+        "placeCode": "26000914",
+        "seatGrade": "1",
+        "seatGradeName": "EARLY ENTRY PACKAGE",
+        "priceGrade": "01",
+        "priceGradeName": "일반",
+        "priceTypeName": "기본가",
+        "priceTypeCode": "02",
+        "startDate": "",
+        "endDate": "",
+        "salesPrice": 350000,
+        "discountRate": 0,
+        "sortNo": 0,
+        "subSortNo": 0,
+        "mainCount": 0,
+        "originPrice": 0,
+        "isDuplicationDiscount ": false,
+        "isManagerInsert ": false
+      }
+    ]
+  },
+  "LOVE IS LIKE VIP PACKAGE": {
+    "기본가": [
+      {
+        "goodsCode": "26011315",
+        "placeCode": "26000914",
+        "seatGrade": "2",
+        "seatGradeName": "LOVE IS LIKE VIP PACKAGE",
+        "priceGrade": "01",
+        "priceGradeName": "일반",
+        "priceTypeName": "기본가",
+        "priceTypeCode": "02",
+        "startDate": "",
+        "endDate": "",
+        "salesPrice": 425000,
+        "discountRate": 0,
+        "sortNo": 0,
+        "subSortNo": 0,
+        "mainCount": 0,
+        "originPrice": 0,
+        "isDuplicationDiscount ": false,
+        "isManagerInsert ": false
+      }
+    ]
+  },
+  "스탠딩 P": {
+    "기본가": [
+      {
+        "goodsCode": "26011315",
+        "placeCode": "26000914",
+        "seatGrade": "3",
+        "seatGradeName": "스탠딩 P",
+        "priceGrade": "01",
+        "priceGradeName": "일반",
+        "priceTypeName": "기본가",
+        "priceTypeCode": "02",
+        "startDate": "",
+        "endDate": "",
+        "salesPrice": 167000,
+        "discountRate": 0,
+        "sortNo": 0,
+        "subSortNo": 0,
+        "mainCount": 0,
+        "originPrice": 0,
+        "isDuplicationDiscount ": false,
+        "isManagerInsert ": false
+      }
+    ]
+  },
+  "스탠딩 R": {
+    "기본가": [
+      {
+        "goodsCode": "26011315",
+        "placeCode": "26000914",
+        "seatGrade": "4",
+        "seatGradeName": "스탠딩 R",
+        "priceGrade": "01",
+        "priceGradeName": "일반",
+        "priceTypeName": "기본가",
+        "priceTypeCode": "02",
+        "startDate": "",
+        "endDate": "",
+        "salesPrice": 143000,
+        "discountRate": 0,
+        "sortNo": 0,
+        "subSortNo": 0,
+        "mainCount": 0,
+        "originPrice": 0,
+        "isDuplicationDiscount ": false,
+        "isManagerInsert ": false
+      }
+    ]
+  },
+  "지정석 P": {
+    "기본가": [
+      {
+        "goodsCode": "26011315",
+        "placeCode": "26000914",
+        "seatGrade": "5",
+        "seatGradeName": "지정석 P",
+        "priceGrade": "01",
+        "priceGradeName": "일반",
+        "priceTypeName": "기본가",
+        "priceTypeCode": "02",
+        "startDate": "",
+        "endDate": "",
+        "salesPrice": 242000,
+        "discountRate": 0,
+        "sortNo": 0,
+        "subSortNo": 0,
+        "mainCount": 0,
+        "originPrice": 0,
+        "isDuplicationDiscount ": false,
+        "isManagerInsert ": false
+      }
+    ]
+  },
+  "지정석 R": {
+    "기본가": [
+      {
+        "goodsCode": "26011315",
+        "placeCode": "26000914",
+        "seatGrade": "6",
+        "seatGradeName": "지정석 R",
+        "priceGrade": "01",
+        "priceGradeName": "일반",
+        "priceTypeName": "기본가",
+        "priceTypeCode": "02",
+        "startDate": "",
+        "endDate": "",
+        "salesPrice": 220000,
+        "discountRate": 0,
+        "sortNo": 0,
+        "subSortNo": 0,
+        "mainCount": 0,
+        "originPrice": 0,
+        "isDuplicationDiscount ": false,
+        "isManagerInsert ": false
+      }
+    ]
+  },
+  "지정석 S": {
+    "기본가": [
+      {
+        "goodsCode": "26011315",
+        "placeCode": "26000914",
+        "seatGrade": "7",
+        "seatGradeName": "지정석 S",
+        "priceGrade": "01",
+        "priceGradeName": "일반",
+        "priceTypeName": "기본가",
+        "priceTypeCode": "02",
+        "startDate": "",
+        "endDate": "",
+        "salesPrice": 187000,
+        "discountRate": 0,
+        "sortNo": 0,
+        "subSortNo": 0,
+        "mainCount": 0,
+        "originPrice": 0,
+        "isDuplicationDiscount ": false,
+        "isManagerInsert ": false
+      }
+    ]
+  },
+  "지정석 A": {
+    "기본가": [
+      {
+        "goodsCode": "26011315",
+        "placeCode": "26000914",
+        "seatGrade": "8",
+        "seatGradeName": "지정석 A",
+        "priceGrade": "01",
+        "priceGradeName": "일반",
+        "priceTypeName": "기본가",
+        "priceTypeCode": "02",
+        "startDate": "",
+        "endDate": "",
+        "salesPrice": 154000,
+        "discountRate": 0,
+        "sortNo": 0,
+        "subSortNo": 0,
+        "mainCount": 0,
+        "originPrice": 0,
+        "isDuplicationDiscount ": false,
+        "isManagerInsert ": false
+      }
+    ]
+  },
+  "지정석 B": {
+    "기본가": [
+      {
+        "goodsCode": "26011315",
+        "placeCode": "26000914",
+        "seatGrade": "9",
+        "seatGradeName": "지정석 B",
+        "priceGrade": "01",
+        "priceGradeName": "일반",
+        "priceTypeName": "기본가",
+        "priceTypeCode": "02",
+        "startDate": "",
+        "endDate": "",
+        "salesPrice": 132000,
+        "discountRate": 0,
+        "sortNo": 0,
+        "subSortNo": 0,
+        "mainCount": 0,
+        "originPrice": 0,
+        "isDuplicationDiscount ": false,
+        "isManagerInsert ": false
+      }
+    ]
+  }
+}

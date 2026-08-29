@@ -1,0 +1,250 @@
+[
+  {
+    "name": "소극장 화성예술의전당",
+    "goodsCode": "26012391",
+    "blocks": 11,
+    "seats": 1450,
+    "exposable": 0,
+    "graded": 0,
+    "grouped": 0,
+    "grades": {
+      "NULL": 1450
+    },
+    "populated_fields": {
+      "seatInfoId": 1450,
+      "floor": 1450,
+      "rowNo": 1450,
+      "seatNo": 1450,
+      "posLeft": 1450,
+      "posTop": 1450,
+      "rowIdx": 1450,
+      "colIdx": 1450,
+      "isExposable": 1450
+    },
+    "sample": {
+      "seatInfoId": "26012391:25001622:001:1278",
+      "seatGrade": null,
+      "seatGradeName": null,
+      "floor": "객석1층",
+      "rowNo": "OP구역 1열",
+      "seatNo": "1",
+      "salesPrice": null,
+      "seatGroupId": null,
+      "posLeft": 80.711,
+      "posTop": 40.705,
+      "rowIdx": 0,
+      "colIdx": 1,
+      "isExposable": false
+    }
+  },
+  {
+    "name": "아레나 킨텍스",
+    "goodsCode": "26011315",
+    "blocks": 24,
+    "seats": 21460,
+    "exposable": 960,
+    "graded": 960,
+    "grouped": 0,
+    "grades": {
+      "NULL": 20500,
+      "EARLY ENTRY PACKAGE": 500,
+      "스탠딩 P": 460
+    },
+    "populated_fields": {
+      "seatInfoId": 21460,
+      "rowNo": 21460,
+      "seatNo": 21460,
+      "posLeft": 21460,
+      "posTop": 21460,
+      "rowIdx": 21460,
+      "colIdx": 21460,
+      "isExposable": 21460,
+      "seatGrade": 960,
+      "seatGradeName": 960,
+      "salesPrice": 960
+    },
+    "sample": {
+      "seatInfoId": "26011315:26000914:001:7465",
+      "seatGrade": "1",
+      "seatGradeName": "EARLY ENTRY PACKAGE",
+      "floor": "",
+      "rowNo": "A구역 입장번호",
+      "seatNo": "1",
+      "salesPrice": 350000,
+      "seatGroupId": null,
+      "posLeft": 396,
+      "posTop": 83,
+      "rowIdx": 0,
+      "colIdx": 0,
+      "isExposable": true
+    }
+  },
+  {
+    "name": "콘서트홀 예술의전당",
+    "goodsCode": "26012258",
+    "blocks": 0,
+    "seats": 0
+  },
+  {
+    "name": "야구장 잠실",
+    "goodsCode": "26004566",
+    "blocks": 1,
+    "seats": 256,
+    "exposable": 0,
+    "graded": 0,
+    "grouped": 0,
+    "grades": {
+      "NULL": 256
+    },
+    "populated_fields": {
+      "seatInfoId": 256,
+      "rowNo": 256,
+      "seatNo": 256,
+      "posLeft": 256,
+      "posTop": 256,
+      "rowIdx": 256,
+      "colIdx": 256,
+      "isExposable": 256
+    },
+    "sample": {
+      "seatInfoId": "26004566:26000084:001:1",
+      "seatGrade": null,
+      "seatGradeName": null,
+      "floor": "",
+      "rowNo": "1열",
+      "seatNo": "1",
+      "salesPrice": null,
+      "seatGroupId": null,
+      "posLeft": 976.002,
+      "posTop": 1168.039,
+      "rowIdx": 0,
+      "colIdx": 49,
+      "isExposable": false
+    }
+  },
+  {
+    "name": "대극장 극장용",
+    "goodsCode": "26005128",
+    "blocks": 3,
+    "seats": 835,
+    "exposable": 773,
+    "graded": 773,
+    "grouped": 0,
+    "grades": {
+      "VIP석": 379,
+      "S석": 243,
+      "R석": 151,
+      "NULL": 62
+    },
+    "populated_fields": {
+      "seatInfoId": 835,
+      "rowNo": 835,
+      "seatNo": 835,
+      "posLeft": 835,
+      "posTop": 835,
+      "rowIdx": 835,
+      "colIdx": 835,
+      "isExposable": 835,
+      "floor": 805,
+      "seatGrade": 773,
+      "seatGradeName": 773,
+      "salesPrice": 773
+    },
+    "sample": {
+      "seatInfoId": "26005128:17000549:001:1",
+      "seatGrade": "1",
+      "seatGradeName": "VIP석",
+      "floor": "1층",
+      "rowNo": "A열",
+      "seatNo": "10",
+      "salesPrice": 77000,
+      "seatGroupId": null,
+      "posLeft": 98.107,
+      "posTop": 68.81,
+      "rowIdx": 0,
+      "colIdx": 10,
+      "isExposable": true
+    }
+  },
+  {
+    "name": "체육관 장충 ROADFC",
+    "goodsCode": "26011375",
+    "blocks": 34,
+    "seats": 3699,
+    "exposable": 44,
+    "graded": 44,
+    "grouped": 0,
+    "grades": {
+      "NULL": 3655,
+      "VIP 플로어(5열)": 16,
+      "VIP 플로어(3열)": 14,
+      "VIP 플로어(4열)": 14
+    },
+    "populated_fields": {
+      "seatInfoId": 3699,
+      "rowNo": 3699,
+      "seatNo": 3699,
+      "posLeft": 3699,
+      "posTop": 3699,
+      "rowIdx": 3699,
+      "colIdx": 3699,
+      "isExposable": 3699,
+      "seatGrade": 44,
+      "seatGradeName": 44,
+      "salesPrice": 44
+    },
+    "sample": {
+      "seatInfoId": "26011375:26000917:001:4669",
+      "seatGrade": "1",
+      "seatGradeName": "VIP 플로어(3열)",
+      "floor": "",
+      "rowNo": "1구역 3열",
+      "seatNo": "10",
+      "salesPrice": 220000,
+      "seatGroupId": null,
+      "posLeft": 205,
+      "posTop": 396.057,
+      "rowIdx": 0,
+      "colIdx": 10,
+      "isExposable": true
+    }
+  },
+  {
+    "name": "전용관 터치파이브",
+    "goodsCode": "24014659",
+    "blocks": 5,
+    "seats": 259,
+    "exposable": 0,
+    "graded": 0,
+    "grouped": 0,
+    "grades": {
+      "NULL": 259
+    },
+    "populated_fields": {
+      "seatInfoId": 259,
+      "floor": 259,
+      "rowNo": 259,
+      "seatNo": 259,
+      "posLeft": 259,
+      "posTop": 259,
+      "rowIdx": 259,
+      "colIdx": 259,
+      "isExposable": 259
+    },
+    "sample": {
+      "seatInfoId": "24014659:24001280:001:1",
+      "seatGrade": null,
+      "seatGradeName": null,
+      "floor": "1층",
+      "rowNo": "A구역",
+      "seatNo": "1",
+      "salesPrice": null,
+      "seatGroupId": null,
+      "posLeft": 51,
+      "posTop": 43.116,
+      "rowIdx": 0,
+      "colIdx": 2,
+      "isExposable": false
+    }
+  }
+]

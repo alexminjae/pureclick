@@ -1,0 +1,75 @@
+{
+  "common": {
+    "messageId": "",
+    "message": "success",
+    "requestUri": "/v1/goods/26011315/tab/addition",
+    "gtid": "",
+    "timestamp": 20260825163522,
+    "internalHttpStatusCode": 200
+  },
+  "data": {
+    "cancelFee": {
+      "groupId": "00000",
+      "groupName": "인터파크(TIMS)",
+      "goodsCode": "26011315",
+      "placeCode": "26000914",
+      "payType": "M",
+      "penaltyRate": 0,
+      "penaltyCommission": 4000,
+      "isFixPenalty": false,
+      "isUsed": true
+    },
+    "periodCancelFee": [
+      {
+        "groupId": "00000",
+        "groupName": "인터파크(TIMS)",
+        "goodsCode": "26011315",
+        "placeCode": "26000914",
+        "penaltyCalculationDay": 9,
+        "payType": "P",
+        "penaltyRate": 10,
+        "penaltyCommission": 0,
+        "seasonType": "",
+        "isCancelTodayBooking": false,
+        "isUsed": true
+      },
+      {
+        "groupId": "00000",
+        "groupName": "인터파크(TIMS)",
+        "goodsCode": "26011315",
+        "placeCode": "26000914",
+        "penaltyCalculationDay": 6,
+        "payType": "P",
+        "penaltyRate": 20,
+        "penaltyCommission": 0,
+        "seasonType": "",
+        "isCancelTodayBooking": false,
+        "isUsed": true
+      },
+      {
+        "groupId": "00000",
+        "groupName": "인터파크(TIMS)",
+        "goodsCode": "26011315",
+        "placeCode": "26000914",
+        "penaltyCalculationDay": 2,
+        "payType": "P",
+        "penaltyRate": 30,
+        "penaltyCommission": 0,
+        "seasonType": "",
+        "isCancelTodayBooking": false,
+        "isUsed": true
+      }
+    ],
+    "notification": {
+      "goodsCode": "26011315",
+      "placeCode": "26000914",
+      "bookingCommission": "장당 2,000원",
+      "vocTelNo": "1544-1555",
+      "corporationName": "(주)라이브네이션코리아",
+      "deliveryFee": "3700",
+      "leadRole": "",
+      "deliveryCode": "68001",
+      "deliveryName": "배송"
+    }
+  }
+}

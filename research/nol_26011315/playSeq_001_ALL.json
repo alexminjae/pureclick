@@ -1,0 +1,77 @@
+{
+  "common": {
+    "messageId": null,
+    "message": "success",
+    "requestUri": "/v1/goods/26011315/playSeq/PlaySeq/001/ALL",
+    "gtid": "",
+    "timestamp": null,
+    "internalHttpStatusCode": 200
+  },
+  "data": {
+    "playSeq": null,
+    "playDate": null,
+    "playTime": null,
+    "bookableDate": null,
+    "bookingEndDate": null,
+    "cancelableDate": null,
+    "remainSeat": [
+      {
+        "playSeq": "001",
+        "seatGrade": "1",
+        "seatGradeName": "EARLY ENTRY PACKAGE",
+        "remainCnt": 0
+      },
+      {
+        "playSeq": "001",
+        "seatGrade": "2",
+        "seatGradeName": "LOVE IS LIKE VIP PACKAGE",
+        "remainCnt": 0
+      },
+      {
+        "playSeq": "001",
+        "seatGrade": "3",
+        "seatGradeName": "스탠딩 P",
+        "remainCnt": 0
+      },
+      {
+        "playSeq": "001",
+        "seatGrade": "4",
+        "seatGradeName": "스탠딩 R",
+        "remainCnt": 0
+      },
+      {
+        "playSeq": "001",
+        "seatGrade": "5",
+        "seatGradeName": "지정석 P",
+        "remainCnt": 0
+      },
+      {
+        "playSeq": "001",
+        "seatGrade": "6",
+        "seatGradeName": "지정석 R",
+        "remainCnt": 0
+      },
+      {
+        "playSeq": "001",
+        "seatGrade": "7",
+        "seatGradeName": "지정석 S",
+        "remainCnt": 0
+      },
+      {
+        "playSeq": "001",
+        "seatGrade": "8",
+        "seatGradeName": "지정석 A",
+        "remainCnt": 0
+      },
+      {
+        "playSeq": "001",
+        "seatGrade": "9",
+        "seatGradeName": "지정석 B",
+        "remainCnt": 0
+      }
+    ],
+    "casting": [],
+    "limitMaxStayDate": 0,
+    "playSeqList": null
+  }
+}

@@ -10,3 +10,7 @@ pureclick_fire_log.csv
 pureclick_seat_config.json
 pureclick_watch_config.json
 mac/.pureclick_browser_state.json
+mac/.pureclick_browser_state.json.lock
+mac/pureclick_seat_config.json
+mac/pureclick_arm_config.json
+mac/.pureclick_cookies.json

@@ -1,0 +1,1812 @@
+{
+  "surveyed_at": "2026-08-26T08:59:29+0900",
+  "count": 40,
+  "flow_breakdown": {
+    "onestop-reserved": 19,
+    "legacy-poticket": 8,
+    "onestop-general-admission": 8,
+    "onestop-sports": 5
+  },
+  "genre_breakdown": {
+    "01011 뮤지컬": 9,
+    "01003 콘서트": 5,
+    "01007 스포츠": 5,
+    "01008 전시/행사": 6,
+    "01004 클래식/오페라": 4,
+    "01005 무용/전통예술": 1,
+    "01009 연극": 5,
+    "01015 레저": 5
+  },
+  "shows": [
+    {
+      "goodsCode": "26012217",
+      "bucket": "musical",
+      "goodsName": "뮤지컬 드라큘라 (Dracula：The Musical) - 대구",
+      "placeName": "계명아트센터",
+      "genreCode": "01011",
+      "placeCode": "21000456",
+      "genreName": "뮤지컬",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": true,
+      "isPaymentSeparate": true,
+      "playStartDate": "20261027",
+      "playEndDate": "20261101",
+      "ticketOpenDate": "202608251400",
+      "hideRemainSeat": true,
+      "hasWaitingFlag": true,
+      "flow": "onestop-reserved",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 4,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "VIP석",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "R석",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "3",
+          "seatGradeName": "S석",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "4",
+          "seatGradeName": "A석",
+          "remainCnt": 0
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "26007505",
+      "bucket": "musical",
+      "goodsName": "뮤지컬 〈웨스턴 스토리〉 기깔나는 코믹 서부극",
+      "placeName": "NOL 유니플렉스 1관",
+      "genreCode": "01011",
+      "placeCode": "25001547",
+      "genreName": "뮤지컬",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260701",
+      "playEndDate": "20260927",
+      "ticketOpenDate": "202605221100",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": true,
+      "flow": "onestop-reserved",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 4,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "R석",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "S석",
+          "remainCnt": 9
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "3",
+          "seatGradeName": "A석",
+          "remainCnt": 24
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "7",
+          "seatGradeName": "시야제한석",
+          "remainCnt": 0
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "L0000142",
+      "bucket": "musical",
+      "goodsName": "뮤지컬 드라큘라 (Dracula：The Musical)",
+      "placeName": "LG아트센터 서울 LG SIGNATURE 홀",
+      "genreCode": "01011",
+      "placeCode": "L0000001",
+      "genreName": "뮤지컬",
+      "isIngredientOnestop": false,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260710",
+      "playEndDate": "20261018",
+      "ticketOpenDate": "202605141100",
+      "hideRemainSeat": true,
+      "hasWaitingFlag": false,
+      "flow": "legacy-poticket",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 0,
+      "remain_sample": [],
+      "playSeq_count": 0
+    },
+    {
+      "goodsCode": "26012259",
+      "bucket": "musical",
+      "goodsName": "뮤지컬 〈렛미플라이〉",
+      "placeName": "두산아트센터 연강홀",
+      "genreCode": "01011",
+      "placeCode": "17001136",
+      "genreName": "뮤지컬",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20261006",
+      "playEndDate": "20270103",
+      "ticketOpenDate": "202608251400",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": true,
+      "flow": "onestop-reserved",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 2,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "R석",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "S석",
+          "remainCnt": 4
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "26007442",
+      "bucket": "musical",
+      "goodsName": "뮤지컬 〈디어 에반 핸슨〉 (Musical Dear Evan Hansen)",
+      "placeName": "충무아트센터 대극장",
+      "genreCode": "01011",
+      "placeCode": "25000361",
+      "genreName": "뮤지컬",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260801",
+      "playEndDate": "20261101",
+      "ticketOpenDate": "202605271400",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": true,
+      "flow": "onestop-reserved",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 4,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "VIP석",
+          "remainCnt": 1
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "R석",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "3",
+          "seatGradeName": "S석",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "4",
+          "seatGradeName": "A석",
+          "remainCnt": 0
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "26011968",
+      "bucket": "concert",
+      "goodsName": "2026 10CM FAN CONCERT 〈THE MISSING TRACKS〉 사라진 곡들의 행방 - CASE No.1010",
+      "placeName": "올림픽공원 올림픽홀",
+      "genreCode": "01003",
+      "placeCode": "26001002",
+      "genreName": "콘서트",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": true,
+      "isPaymentSeparate": true,
+      "playStartDate": "20261010",
+      "playEndDate": "20261010",
+      "ticketOpenDate": "202608272000",
+      "hideRemainSeat": true,
+      "hasWaitingFlag": false,
+      "flow": "onestop-reserved",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 1,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "지정석",
+          "remainCnt": 0
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "26009868",
+      "bucket": "concert",
+      "goodsName": "2026 임영웅 콘서트 ［IM HERO - THE STADIUM 2］",
+      "placeName": "고양종합운동장 주경기장",
+      "genreCode": "01003",
+      "placeCode": "26000805",
+      "genreName": "콘서트",
+      "isIngredientOnestop": false,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": true,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260904",
+      "playEndDate": "20260906",
+      "ticketOpenDate": "202608062000",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "legacy-poticket",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 4,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "들꽃석",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "무지개석",
+          "remainCnt": 1
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "3",
+          "seatGradeName": "별빛석",
+          "remainCnt": 209
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "4",
+          "seatGradeName": "온기석(시야방해석)",
+          "remainCnt": 272
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "26010333",
+      "bucket": "concert",
+      "goodsName": "옥토버페스트 서울 2026 일반석",
+      "placeName": "문화비축기지",
+      "genreCode": "01003",
+      "placeCode": "26000831",
+      "genreName": "콘서트",
+      "isIngredientOnestop": true,
+      "isReservedSeat": false,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260912",
+      "playEndDate": "20260921",
+      "ticketOpenDate": "202607160900",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "onestop-general-admission",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 2,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "금토일 입장권",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "002",
+          "seatGrade": "2",
+          "seatGradeName": "금토일 입장권",
+          "remainCnt": 0
+        }
+      ],
+      "playSeq_count": 2
+    },
+    {
+      "goodsCode": "26012221",
+      "bucket": "concert",
+      "goodsName": "WHO ASKED？ TOUR DOMi ＆ JD BECK LIVE IN SEOUL",
+      "placeName": "공감센터 공감홀",
+      "genreCode": "01003",
+      "placeCode": "16000412",
+      "genreName": "콘서트",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": true,
+      "isPaymentSeparate": true,
+      "playStartDate": "20261212",
+      "playEndDate": "20261212",
+      "ticketOpenDate": "202608251900",
+      "hideRemainSeat": true,
+      "hasWaitingFlag": true,
+      "flow": "onestop-reserved",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 2,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "R석",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "S석",
+          "remainCnt": 0
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "26011315",
+      "bucket": "concert",
+      "goodsName": "마룬5 내한공연",
+      "placeName": "킨텍스 제1전시장 4,5홀",
+      "genreCode": "01003",
+      "placeCode": "26000914",
+      "genreName": "콘서트",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": true,
+      "isPaymentSeparate": true,
+      "playStartDate": "20270127",
+      "playEndDate": "20270127",
+      "ticketOpenDate": "202608141200",
+      "hideRemainSeat": true,
+      "hasWaitingFlag": true,
+      "flow": "onestop-reserved",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 9,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "EARLY ENTRY PACKAGE",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "LOVE IS LIKE VIP PACKAGE",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "3",
+          "seatGradeName": "스탠딩 P",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "4",
+          "seatGradeName": "스탠딩 R",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "5",
+          "seatGradeName": "지정석 P",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "6",
+          "seatGradeName": "지정석 R",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "7",
+          "seatGradeName": "지정석 S",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "8",
+          "seatGradeName": "지정석 A",
+          "remainCnt": 0
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "26004566",
+      "bucket": "sports",
+      "goodsName": "두산 vs LG (9.1)",
+      "placeName": "잠실야구장",
+      "genreCode": "01007",
+      "placeCode": "26000084",
+      "genreName": "스포츠",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": true,
+      "isCaptcha": true,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260901",
+      "playEndDate": "20260901",
+      "ticketOpenDate": "202608251100",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "onestop-sports",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 36,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "DB손해보험존(1루 테이블석)",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "3",
+          "seatGradeName": "쓰리디즘 글라스존(1루 테이블석)",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "4",
+          "seatGradeName": "메디힐존(3루 테이블석)",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "5",
+          "seatGradeName": "KMI한국의학연구소존(3루 테이블석)",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "6",
+          "seatGradeName": "NOL존(1루 익사이팅존)",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "7",
+          "seatGradeName": "NOL존(3루 익사이팅존)",
+          "remainCnt": 2
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "8",
+          "seatGradeName": "H.Point존(1루 블루석)",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "9",
+          "seatGradeName": "H.Point존(3루 블루석)",
+          "remainCnt": 38
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "26002676",
+      "bucket": "sports",
+      "goodsName": "부천FC1995 vs FC안양 (8.29)",
+      "placeName": "부천종합운동장",
+      "genreCode": "01007",
+      "placeCode": "26000262",
+      "genreName": "스포츠",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": true,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260829",
+      "playEndDate": "20260829",
+      "ticketOpenDate": "202608251400",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "onestop-sports",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 12,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "다이나믹석(일반석)",
+          "remainCnt": 997
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "1995석(스탠딩석)",
+          "remainCnt": 344
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "3",
+          "seatGradeName": "W1석(일반석)",
+          "remainCnt": 1916
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "4",
+          "seatGradeName": "다이나믹 테이블석(2인)",
+          "remainCnt": 14
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "5",
+          "seatGradeName": "원정석¹",
+          "remainCnt": 1258
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "6",
+          "seatGradeName": "원정석²",
+          "remainCnt": 254
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "7",
+          "seatGradeName": "W2석(일반석)",
+          "remainCnt": 1154
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "8",
+          "seatGradeName": "프리미엄 테이블석(2인)",
+          "remainCnt": 18
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "26004295",
+      "bucket": "sports",
+      "goodsName": "키움 vs SSG (9.1)",
+      "placeName": "고척스카이돔",
+      "genreCode": "01007",
+      "placeCode": "25001684",
+      "genreName": "스포츠",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": true,
+      "isCaptcha": true,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260901",
+      "playEndDate": "20260901",
+      "ticketOpenDate": "202608251400",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "onestop-sports",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 35,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "LEXUS 1루 1층 테이블석",
+          "remainCnt": 38
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "3",
+          "seatGradeName": "LEXUS 3루 1층 테이블석",
+          "remainCnt": 30
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "4",
+          "seatGradeName": "LEXUS 중앙 1층 테이블석",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "5",
+          "seatGradeName": "NAVER 1루 2층 테이블석(홈팀)",
+          "remainCnt": 15
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "6",
+          "seatGradeName": "NAVER 3루 2층 테이블석(원정팀)",
+          "remainCnt": 9
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "7",
+          "seatGradeName": "1루 내야커플석(홈팀)",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "8",
+          "seatGradeName": "3루 내야커플석(원정팀)",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "9",
+          "seatGradeName": "1루 외야커플석(홈팀)",
+          "remainCnt": 2
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "26004565",
+      "bucket": "sports",
+      "goodsName": "두산 vs 키움 (8.30)",
+      "placeName": "잠실야구장",
+      "genreCode": "01007",
+      "placeCode": "26000084",
+      "genreName": "스포츠",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": true,
+      "isCaptcha": true,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260830",
+      "playEndDate": "20260830",
+      "ticketOpenDate": "202608231100",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "onestop-sports",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 36,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "DB손해보험존(1루 테이블석)",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "3",
+          "seatGradeName": "쓰리디즘 글라스존(1루 테이블석)",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "4",
+          "seatGradeName": "메디힐존(3루 테이블석)",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "5",
+          "seatGradeName": "KMI한국의학연구소존(3루 테이블석)",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "6",
+          "seatGradeName": "NOL존(1루 익사이팅존)",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "7",
+          "seatGradeName": "NOL존(3루 익사이팅존)",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "8",
+          "seatGradeName": "H.Point존(1루 블루석)",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "9",
+          "seatGradeName": "H.Point존(3루 블루석)",
+          "remainCnt": 145
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "26004292",
+      "bucket": "sports",
+      "goodsName": "키움 vs 삼성 (8.25)",
+      "placeName": "고척스카이돔",
+      "genreCode": "01007",
+      "placeCode": "25001684",
+      "genreName": "스포츠",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": true,
+      "isCaptcha": false,
+      "isPaymentSeparate": false,
+      "playStartDate": "20260825",
+      "playEndDate": "20260825",
+      "ticketOpenDate": "202608181400",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "onestop-sports",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 35,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "LEXUS 1루 1층 테이블석",
+          "remainCnt": 6
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "3",
+          "seatGradeName": "LEXUS 3루 1층 테이블석",
+          "remainCnt": 4
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "4",
+          "seatGradeName": "LEXUS 중앙 1층 테이블석",
+          "remainCnt": 10
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "5",
+          "seatGradeName": "NAVER 1루 2층 테이블석(홈팀)",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "6",
+          "seatGradeName": "NAVER 3루 2층 테이블석(원정팀)",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "7",
+          "seatGradeName": "1루 내야커플석(홈팀)",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "8",
+          "seatGradeName": "3루 내야커플석(원정팀)",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "9",
+          "seatGradeName": "1루 외야커플석(홈팀)",
+          "remainCnt": 0
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "26010709",
+      "bucket": "exhibit",
+      "goodsName": "［얼리버드］ 스페인 미술 500년: 빛과 어둠의 연대기",
+      "placeName": "예술의전당 한가람디자인미술관",
+      "genreCode": "01008",
+      "placeCode": "06000315",
+      "genreName": "전시/행사",
+      "isIngredientOnestop": true,
+      "isReservedSeat": false,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260922",
+      "playEndDate": "20261129",
+      "ticketOpenDate": "202608041000",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "onestop-general-admission",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 0,
+      "remain_sample": [],
+      "playSeq_count": 0
+    },
+    {
+      "goodsCode": "26005868",
+      "bucket": "exhibit",
+      "goodsName": "［단독 10%할인］ 키크니 특별전 : 그렸고 그런사이",
+      "placeName": "동대문디자인플라자 뮤지엄 전시 1관",
+      "genreCode": "01008",
+      "placeCode": "23001389",
+      "genreName": "전시/행사",
+      "isIngredientOnestop": true,
+      "isReservedSeat": false,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260425",
+      "playEndDate": "20260906",
+      "ticketOpenDate": "202604250000",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "onestop-general-admission",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 0,
+      "remain_sample": [],
+      "playSeq_count": 0
+    },
+    {
+      "goodsCode": "26010853",
+      "bucket": "exhibit",
+      "goodsName": "［입장권］ 2026 송도맥주축제: 환상의 나라 비어랜드(일자지정)",
+      "placeName": "송도달빛축제공원",
+      "genreCode": "01008",
+      "placeCode": "26000799",
+      "genreName": "전시/행사",
+      "isIngredientOnestop": true,
+      "isReservedSeat": false,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260822",
+      "playEndDate": "20260830",
+      "ticketOpenDate": "202607240900",
+      "hideRemainSeat": true,
+      "hasWaitingFlag": false,
+      "flow": "onestop-general-admission",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 1,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "입장권",
+          "remainCnt": 0
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "26009468",
+      "bucket": "exhibit",
+      "goodsName": "스튜디오 지브리展 in Jeju",
+      "placeName": "제주 동화마을 아트센터",
+      "genreCode": "01008",
+      "placeCode": "26000545",
+      "genreName": "전시/행사",
+      "isIngredientOnestop": true,
+      "isReservedSeat": false,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260711",
+      "playEndDate": "20270711",
+      "ticketOpenDate": "202607102000",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "onestop-general-admission",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 0,
+      "remain_sample": [],
+      "playSeq_count": 0
+    },
+    {
+      "goodsCode": "26010702",
+      "bucket": "exhibit",
+      "goodsName": "［얼리버드40%할인］ 봉주르, 장자크 상페",
+      "placeName": "마이아트뮤지엄 원그로브점",
+      "genreCode": "01008",
+      "placeCode": "25001041",
+      "genreName": "전시/행사",
+      "isIngredientOnestop": true,
+      "isReservedSeat": false,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260910",
+      "playEndDate": "20261018",
+      "ticketOpenDate": "202607240900",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "onestop-general-admission",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 0,
+      "remain_sample": [],
+      "playSeq_count": 0
+    },
+    {
+      "goodsCode": "26011976",
+      "bucket": "classic",
+      "goodsName": "2026 서울시향 퇴근길 토크 콘서트 III : 북유럽의 밤",
+      "placeName": "대한성공회 서울주교좌성당",
+      "genreCode": "01004",
+      "placeCode": "25000460",
+      "genreName": "클래식/오페라",
+      "isIngredientOnestop": true,
+      "isReservedSeat": false,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20261001",
+      "playEndDate": "20261001",
+      "ticketOpenDate": "202608251600",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "onestop-general-admission",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 1,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "비지정석",
+          "remainCnt": 0
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "26009073",
+      "bucket": "classic",
+      "goodsName": "국립심포니콘서트오케스트라 〈브람스, 교향곡 1번〉",
+      "placeName": "예술의전당 콘서트홀",
+      "genreCode": "01004",
+      "placeCode": "25001214",
+      "genreName": "클래식/오페라",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": false,
+      "playStartDate": "20260825",
+      "playEndDate": "20260825",
+      "ticketOpenDate": "202606241400",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "onestop-reserved",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 3,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "R석",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "S석",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "3",
+          "seatGradeName": "A석",
+          "remainCnt": 0
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "26012391",
+      "bucket": "classic",
+      "goodsName": "팝페라 테너 임형주 초청 독창회 〈Dream of Love〉 - 화성",
+      "placeName": "화성예술의전당 동탄아트홀",
+      "genreCode": "01004",
+      "placeCode": "25001622",
+      "genreName": "클래식/오페라",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260918",
+      "playEndDate": "20260918",
+      "ticketOpenDate": "202608241400",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": true,
+      "flow": "onestop-reserved",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 4,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "VIP석",
+          "remainCnt": 211
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "R석",
+          "remainCnt": 379
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "3",
+          "seatGradeName": "S석",
+          "remainCnt": 187
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "4",
+          "seatGradeName": "A석(행복석)",
+          "remainCnt": 2
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "26010622",
+      "bucket": "classic",
+      "goodsName": "유니버설발레단 〈잠자는 숲속의 미녀〉",
+      "placeName": "예술의전당 오페라극장",
+      "genreCode": "01005",
+      "placeCode": "26000046",
+      "genreName": "무용/전통예술",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20261002",
+      "playEndDate": "20261004",
+      "ticketOpenDate": "202607301400",
+      "hideRemainSeat": true,
+      "hasWaitingFlag": false,
+      "flow": "onestop-reserved",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 5,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "R석",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "S석",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "3",
+          "seatGradeName": "A석",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "4",
+          "seatGradeName": "B석",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "5",
+          "seatGradeName": "C석",
+          "remainCnt": 0
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "26012258",
+      "bucket": "classic",
+      "goodsName": "피아니스트 임동혁과 함께하는 차이코프스키",
+      "placeName": "예술의전당 콘서트홀",
+      "genreCode": "01004",
+      "placeCode": "25001214",
+      "genreName": "클래식/오페라",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20261022",
+      "playEndDate": "20261022",
+      "ticketOpenDate": "202608201700",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "onestop-reserved",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 5,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "R석",
+          "remainCnt": 718
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "S석",
+          "remainCnt": 548
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "3",
+          "seatGradeName": "A석",
+          "remainCnt": 278
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "4",
+          "seatGradeName": "B석",
+          "remainCnt": 332
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "5",
+          "seatGradeName": "C석",
+          "remainCnt": 168
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "26012450",
+      "bucket": "kids",
+      "goodsName": "뮤지컬 〈할머니의 여름휴가〉-과천",
+      "placeName": "과천시민회관 대극장",
+      "genreCode": "01011",
+      "placeCode": "24000067",
+      "genreName": "뮤지컬",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260919",
+      "playEndDate": "20260919",
+      "ticketOpenDate": "202608251400",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": true,
+      "flow": "onestop-reserved",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 4,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "R석",
+          "remainCnt": 310
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "S석",
+          "remainCnt": 115
+        },
+        {
+          "playSeq": "002",
+          "seatGrade": "1",
+          "seatGradeName": "R석",
+          "remainCnt": 324
+        },
+        {
+          "playSeq": "002",
+          "seatGrade": "2",
+          "seatGradeName": "S석",
+          "remainCnt": 127
+        }
+      ],
+      "playSeq_count": 2
+    },
+    {
+      "goodsCode": "26010948",
+      "bucket": "kids",
+      "goodsName": "키자니아GO - 현대백화점 충청점",
+      "placeName": "현대백화점 충청점 7층 문화홀",
+      "genreCode": "01008",
+      "placeCode": "18001716",
+      "genreName": "전시/행사",
+      "isIngredientOnestop": true,
+      "isReservedSeat": false,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260814",
+      "playEndDate": "20260906",
+      "ticketOpenDate": "202607270900",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "onestop-general-admission",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 144,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "승무원 교육센터",
+          "remainCnt": 1
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "플라워 아틀리에",
+          "remainCnt": 2
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "3",
+          "seatGradeName": "경찰서",
+          "remainCnt": 1
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "4",
+          "seatGradeName": "동물병원",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "5",
+          "seatGradeName": "마술학교",
+          "remainCnt": 1
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "6",
+          "seatGradeName": "건축사무소",
+          "remainCnt": 5
+        },
+        {
+          "playSeq": "002",
+          "seatGrade": "1",
+          "seatGradeName": "승무원 교육센터",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "002",
+          "seatGrade": "2",
+          "seatGradeName": "플라워 아틀리에",
+          "remainCnt": 2
+        }
+      ],
+      "playSeq_count": 24
+    },
+    {
+      "goodsCode": "26005128",
+      "bucket": "kids",
+      "goodsName": "뮤지컬 〈할머니의 여름휴가 : 씨씨상점〉",
+      "placeName": "국립중앙박물관 극장 용",
+      "genreCode": "01011",
+      "placeCode": "17000549",
+      "genreName": "뮤지컬",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260704",
+      "playEndDate": "20260830",
+      "ticketOpenDate": "202604031100",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": true,
+      "flow": "onestop-reserved",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 9,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "VIP석",
+          "remainCnt": 305
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "R석",
+          "remainCnt": 129
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "3",
+          "seatGradeName": "S석",
+          "remainCnt": 236
+        },
+        {
+          "playSeq": "002",
+          "seatGrade": "1",
+          "seatGradeName": "VIP석",
+          "remainCnt": 307
+        },
+        {
+          "playSeq": "002",
+          "seatGrade": "2",
+          "seatGradeName": "R석",
+          "remainCnt": 148
+        },
+        {
+          "playSeq": "002",
+          "seatGrade": "3",
+          "seatGradeName": "S석",
+          "remainCnt": 240
+        },
+        {
+          "playSeq": "003",
+          "seatGrade": "1",
+          "seatGradeName": "VIP석",
+          "remainCnt": 318
+        },
+        {
+          "playSeq": "003",
+          "seatGrade": "2",
+          "seatGradeName": "R석",
+          "remainCnt": 141
+        }
+      ],
+      "playSeq_count": 3
+    },
+    {
+      "goodsCode": "26010335",
+      "bucket": "kids",
+      "goodsName": "쇼뮤지컬 〈프린세스 캐치! 티니핑〉 - 능동",
+      "placeName": "티켓링크 1975 씨어터 (구 어린이회관 문화관)",
+      "genreCode": "01011",
+      "placeCode": "25001049",
+      "genreName": "뮤지컬",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260924",
+      "playEndDate": "20260927",
+      "ticketOpenDate": "202607201100",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": true,
+      "flow": "onestop-reserved",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 2,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "전석",
+          "remainCnt": 130
+        },
+        {
+          "playSeq": "002",
+          "seatGrade": "1",
+          "seatGradeName": "전석",
+          "remainCnt": 141
+        }
+      ],
+      "playSeq_count": 2
+    },
+    {
+      "goodsCode": "26011029",
+      "bucket": "kids",
+      "goodsName": "［관객 20만돌파기념 슈퍼위크］ 베베핀 뮤지컬 〈두근두근 새친구〉 - 극장 용",
+      "placeName": "국립중앙박물관 극장 용",
+      "genreCode": "01011",
+      "placeCode": "17000549",
+      "genreName": "뮤지컬",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260904",
+      "playEndDate": "20260906",
+      "ticketOpenDate": "202608041000",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": true,
+      "flow": "onestop-reserved",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 4,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "VIP석",
+          "remainCnt": 121
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "R석",
+          "remainCnt": 117
+        },
+        {
+          "playSeq": "002",
+          "seatGrade": "1",
+          "seatGradeName": "VIP석",
+          "remainCnt": 123
+        },
+        {
+          "playSeq": "002",
+          "seatGrade": "2",
+          "seatGradeName": "R석",
+          "remainCnt": 117
+        }
+      ],
+      "playSeq_count": 2
+    },
+    {
+      "goodsCode": "26006175",
+      "bucket": "drama",
+      "goodsName": "죽은 시인의 사회",
+      "placeName": "NOL 씨어터 대학로 우리카드홀",
+      "genreCode": "01009",
+      "placeCode": "25001669",
+      "genreName": "연극",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260718",
+      "playEndDate": "20260913",
+      "ticketOpenDate": "202604281400",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": true,
+      "flow": "onestop-reserved",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 3,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "VIP석",
+          "remainCnt": 10
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "R석",
+          "remainCnt": 0
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "3",
+          "seatGradeName": "S석",
+          "remainCnt": 19
+        }
+      ],
+      "playSeq_count": 1
+    },
+    {
+      "goodsCode": "26007583",
+      "bucket": "drama",
+      "goodsName": "연극 〈더 헬멧〉",
+      "placeName": "홍익대 대학로 아트센터 소극장",
+      "genreCode": "01009",
+      "placeCode": "26000580",
+      "genreName": "연극",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260709",
+      "playEndDate": "20261011",
+      "ticketOpenDate": "202605271100",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": true,
+      "flow": "onestop-reserved",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 4,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "SMALL ROOM",
+          "remainCnt": 6
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "BIG ROOM",
+          "remainCnt": 10
+        },
+        {
+          "playSeq": "002",
+          "seatGrade": "1",
+          "seatGradeName": "SMALL ROOM",
+          "remainCnt": 2
+        },
+        {
+          "playSeq": "002",
+          "seatGrade": "2",
+          "seatGradeName": "BIG ROOM",
+          "remainCnt": 14
+        }
+      ],
+      "playSeq_count": 2
+    },
+    {
+      "goodsCode": "L0000143",
+      "bucket": "drama",
+      "goodsName": "연극 〈타인의 삶〉",
+      "placeName": "LG아트센터 서울 U+ 스테이지",
+      "genreCode": "01009",
+      "placeCode": "L0000007",
+      "genreName": "연극",
+      "isIngredientOnestop": false,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260701",
+      "playEndDate": "20260913",
+      "ticketOpenDate": "202605261100",
+      "hideRemainSeat": true,
+      "hasWaitingFlag": false,
+      "flow": "legacy-poticket",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 0,
+      "remain_sample": [],
+      "playSeq_count": 0
+    },
+    {
+      "goodsCode": "26005154",
+      "bucket": "drama",
+      "goodsName": "2026연극 사랑해엄마",
+      "placeName": "대학로 아트하우스",
+      "genreCode": "01009",
+      "placeCode": "25001333",
+      "genreName": "연극",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20260501",
+      "playEndDate": "20261025",
+      "ticketOpenDate": "202604031400",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": true,
+      "flow": "onestop-reserved",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 4,
+      "remain_sample": [
+        {
+          "playSeq": "001",
+          "seatGrade": "1",
+          "seatGradeName": "특별석",
+          "remainCnt": 17
+        },
+        {
+          "playSeq": "001",
+          "seatGrade": "2",
+          "seatGradeName": "일반석",
+          "remainCnt": 99
+        },
+        {
+          "playSeq": "002",
+          "seatGrade": "1",
+          "seatGradeName": "특별석",
+          "remainCnt": 1
+        },
+        {
+          "playSeq": "002",
+          "seatGrade": "2",
+          "seatGradeName": "일반석",
+          "remainCnt": 45
+        }
+      ],
+      "playSeq_count": 2
+    },
+    {
+      "goodsCode": "26003518",
+      "bucket": "drama",
+      "goodsName": "블랙코미디 최강자! 연극 〈죽여주는 이야기〉- 18주년",
+      "placeName": "지인시어터(구.알과핵소극장)",
+      "genreCode": "01009",
+      "placeCode": "23000720",
+      "genreName": "연극",
+      "isIngredientOnestop": true,
+      "isReservedSeat": true,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20080515",
+      "playEndDate": "20261130",
+      "ticketOpenDate": "202603110900",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "onestop-reserved",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 0,
+      "remain_sample": [],
+      "playSeq_count": 0
+    },
+    {
+      "goodsCode": "22016459",
+      "bucket": "leisure",
+      "goodsName": "연천재인폭포오토캠핑장",
+      "placeName": "연천재인폭포오토캠핑장",
+      "genreCode": "01015",
+      "placeCode": "22001669",
+      "genreName": "레저",
+      "isIngredientOnestop": false,
+      "isReservedSeat": false,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20221201",
+      "playEndDate": "20261031",
+      "ticketOpenDate": "202211251000",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "legacy-poticket",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 0,
+      "remain_sample": [],
+      "playSeq_count": 0
+    },
+    {
+      "goodsCode": "21005592",
+      "bucket": "leisure",
+      "goodsName": "［한탄강관광지 오토캠핑장］",
+      "placeName": "한탄강캠핑장",
+      "genreCode": "01015",
+      "placeCode": "21000414",
+      "genreName": "레저",
+      "isIngredientOnestop": false,
+      "isReservedSeat": false,
+      "isSportOneStop": false,
+      "isCaptcha": false,
+      "isPaymentSeparate": true,
+      "playStartDate": "20210901",
+      "playEndDate": "20261031",
+      "ticketOpenDate": "202110221530",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "legacy-poticket",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 0,
+      "remain_sample": [],
+      "playSeq_count": 0
+    },
+    {
+      "goodsCode": "21009223",
+      "bucket": "leisure",
+      "goodsName": "평택 진위천유원지 캠핑장",
+      "placeName": "진위천유원지",
+      "genreCode": "01015",
+      "placeCode": "21000792",
+      "genreName": "레저",
+      "isIngredientOnestop": false,
+      "isReservedSeat": false,
+      "isSportOneStop": false,
+      "isCaptcha": true,
+      "isPaymentSeparate": true,
+      "playStartDate": "20211101",
+      "playEndDate": "20260930",
+      "ticketOpenDate": "202111151000",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "legacy-poticket",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 0,
+      "remain_sample": [],
+      "playSeq_count": 0
+    },
+    {
+      "goodsCode": "22005895",
+      "bucket": "leisure",
+      "goodsName": "고양시 킨텍스 캠핑장",
+      "placeName": "킨텍스 캠핑장",
+      "genreCode": "01015",
+      "placeCode": "17000467",
+      "genreName": "레저",
+      "isIngredientOnestop": false,
+      "isReservedSeat": false,
+      "isSportOneStop": false,
+      "isCaptcha": true,
+      "isPaymentSeparate": true,
+      "playStartDate": "20220601",
+      "playEndDate": "20260930",
+      "ticketOpenDate": "202205201000",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "legacy-poticket",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 0,
+      "remain_sample": [],
+      "playSeq_count": 0
+    },
+    {
+      "goodsCode": "22002652",
+      "bucket": "leisure",
+      "goodsName": "2026 노을캠핑장",
+      "placeName": "월드컵공원 노을캠핑장",
+      "genreCode": "01015",
+      "placeCode": "20000297",
+      "genreName": "레저",
+      "isIngredientOnestop": false,
+      "isReservedSeat": false,
+      "isSportOneStop": false,
+      "isCaptcha": true,
+      "isPaymentSeparate": true,
+      "playStartDate": "20250401",
+      "playEndDate": "20260930",
+      "ticketOpenDate": "202603161400",
+      "hideRemainSeat": false,
+      "hasWaitingFlag": false,
+      "flow": "legacy-poticket",
+      "grade_count": 0,
+      "grades": [],
+      "remain_rows": 0,
+      "remain_sample": [],
+      "playSeq_count": 0
+    }
+  ]
+}

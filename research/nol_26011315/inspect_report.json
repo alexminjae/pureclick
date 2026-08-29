@@ -1,0 +1,180 @@
+{
+  "inspected_at": "2026-08-25",
+  "url": "https://tickets.interpark.com/goods/26011315",
+  "show": {
+    "goodsCode": "26011315",
+    "goodsName": "마룬5 내한공연",
+    "subGoodsName": "Maroon 5 Asia 2027 in Seoul",
+    "placeCode": "26000914",
+    "placeName": "킨텍스 제1전시장 4,5홀",
+    "venuePlaceCode_mapped": "05000266",
+    "venueName": "일산 킨텍스(KINTEX)",
+    "bizCode": "29283",
+    "bizName": "라이브네이션 코리아 - 재미진",
+    "genreCode": "01003",
+    "genreSubCode": "03017",
+    "genre": "콘서트 / 내한공연",
+    "playDate": "20270127",
+    "playSeq": "001",
+    "ticketOpenDate": "202608141200",
+    "bookingEndDate": "202701261700",
+    "viewRate": "만 12세이상",
+    "global_link": "https://world.nol.com/en/ticket/places/26000914/products/26011315"
+  },
+  "critical_flags": {
+    "isIngredientOnestop": true,
+    "isPaymentSeparate": true,
+    "isReservedSeat": true,
+    "isCaptcha": true,
+    "isOnlyDelivery": true,
+    "isSportOneStop": false,
+    "specialSeatingCode": "DM003",
+    "specialSeatingName": "단독판매",
+    "goodsStatus": "Y",
+    "redirectBridges": null
+  },
+  "quality_flags_decoded": {
+    "C5021": "HIDE_REMAINSEAT",
+    "C5025": "GLOBAL_BOOKING",
+    "C5027": "WAITING",
+    "Q2368": "NOL_ONLY",
+    "raw": "C5013,C5015,C5021,C5025,C5025,C5025,C5027,C5029,C5053,C5068,C5105,Q2033,Q2034,Q2342,Q2368,"
+  },
+  "client_derived": {
+    "isWaiting_in_redux": false,
+    "isWaiting_reason": "Forced false after 2026-08-20 13:00 KST gate (ut.y), even though C5027 WAITING is set",
+    "ut_z_onestop_eligible": false,
+    "ut_z_fail_reason": "playStartDate >= 2027-01-01 hard-excludes this show from ut.z() (stored as isYouthCulturePass in reducer)",
+    "genre_allowlisted_for_onestop": true
+  },
+  "booking_entry_logic_from_chunk": {
+    "source": "chunk.goods_detail.js → BuyButton.js",
+    "getWaitingUrl_params": {
+      "channelCode": "pc (default) | cp (camping) | lo (lottery)",
+      "preSales": "N (default for this show; Y only for active round presale)",
+      "playDate": "yyyyMMdd",
+      "playSeq": "001"
+    },
+    "waiting_responses": {
+      "https_url": "enter waiting page (ingredient onestop → same-tab redirect)",
+      "N": "no queue → openPCOnestop BookSession POST",
+      "NP": "presale auth failed",
+      "BL": "abnormal booking blocked",
+      "401_unauth": "로그인 필요"
+    },
+    "openOnestop_when_N": {
+      "action": "https://poticket.interpark.com/Book/BookSession.asp",
+      "fields": [
+        "GroupCode",
+        "Tiki=N",
+        "Point=N",
+        "PlayDate",
+        "PlaySeq",
+        "lottery"
+      ]
+    },
+    "this_show": {
+      "isIngredientOnestop": true,
+      "expected_channelCode": "pc",
+      "expected_preSales": "N",
+      "playDate": "20270127",
+      "playSeq": "001"
+    }
+  },
+  "seat_inventory_live": {
+    "endpoint": "/v1/goods/26011315/playSeq/PlayDate/20270127/ALL",
+    "all_sold_out_or_unopened_inventory": true,
+    "grades": [
+      {
+        "seatGrade": "1",
+        "name": "EARLY ENTRY PACKAGE",
+        "price": 350000,
+        "remain": 0
+      },
+      {
+        "seatGrade": "2",
+        "name": "LOVE IS LIKE VIP PACKAGE",
+        "price": 425000,
+        "remain": 0
+      },
+      {
+        "seatGrade": "3",
+        "name": "스탠딩 P",
+        "price": 167000,
+        "remain": 0
+      },
+      {
+        "seatGrade": "4",
+        "name": "스탠딩 R",
+        "price": 143000,
+        "remain": 0
+      },
+      {
+        "seatGrade": "5",
+        "name": "지정석 P",
+        "price": 242000,
+        "remain": 0
+      },
+      {
+        "seatGrade": "6",
+        "name": "지정석 R",
+        "price": 220000,
+        "remain": 0
+      },
+      {
+        "seatGrade": "7",
+        "name": "지정석 S",
+        "price": 187000,
+        "remain": 0
+      },
+      {
+        "seatGrade": "8",
+        "name": "지정석 A",
+        "price": 154000,
+        "remain": 0
+      },
+      {
+        "seatGrade": "9",
+        "name": "지정석 B",
+        "price": 132000,
+        "remain": 0
+      }
+    ]
+  },
+  "pureclick_implications": [
+    "CRITICAL: waiting API params are channelCode+preSales+playDate+playSeq (camelCase). Old GroupCode/Tiki/Point/action schema is wrong for goods BuyButton path.",
+    "Use goodsCode 26011315 as primary test target (Maroon 5 / KINTEX / Live Nation).",
+    "Same ticketfront SPA + waiting → onestop path as other NOL reserved shows; isIngredientOnestop+isReservedSeat+isCaptcha all true.",
+    "Default playSeq=001, playDate=20270127, placeCode=26000914.",
+    "Captcha will appear (isCaptcha=true).",
+    "Delivery-only checkout (isOnlyDelivery=true) — skip 현장수령 assumptions.",
+    "NOL_ONLY exclusive (Q2368 / DM003) — must use tickets.interpark.com / NOL session, not third-party channels.",
+    "Waiting quality C5027 present; queue entry still via waiting API when not openOnestop — do waiting call inside logged-in browser.",
+    "Client ut.z() returns false for 2027 shows; do not rely on isYouthCulturePass-derived UI; drive entry from arm config + waiting API / 예매하기 click.",
+    "HIDE_REMAINSEAT means goods page may hide remain counts; seat hunt must use onestop seatMeta/seatStatus after entry.",
+    "Grade map for filters: 1 Early, 2 VIP Love, 3 Standing P, 4 Standing R, 5-9 Reserved P/R/S/A/B."
+  ],
+  "apis_confirmed": {
+    "summary": "GET /v1/goods/26011315/summary → 200",
+    "prices_group": "GET /v1/goods/26011315/prices/group → 200",
+    "bestprices_group": "GET /v1/goods/26011315/bestprices/group → 200",
+    "playDate_ALL": "GET /v1/goods/26011315/playSeq/PlayDate/20270127/ALL → remainSeat",
+    "playSeq_001_ALL": "GET /v1/goods/26011315/playSeq/PlaySeq/001/ALL → remainSeat",
+    "place": "GET /v1/Place/26000914 → KINTEX meta (mapped placeCode 05000266)",
+    "addition": "GET /v1/goods/26011315/tab/addition → cancel fees",
+    "bizInfo": "GET /v1/bizInfo/29283 → Live Nation Korea",
+    "redirectBridges": "null",
+    "presale_ticket_open": "empty [] (already opened 2026-08-14 12:00)",
+    "playSeq_list": "unstable / IllegalArgumentException with common date params (use PlayDate/PlaySeq detail instead)",
+    "waiting": "GET .../waiting?channelCode=pc&preSales=N&playDate=20270127&playSeq=001 → 401 login when unauthenticated (schema confirmed)"
+  },
+  "artifacts": [
+    "research/nol_26011315/summary.json",
+    "research/nol_26011315/prices_group.json",
+    "research/nol_26011315/playDate_ALL.json",
+    "research/nol_26011315/playSeq_001_ALL.json",
+    "research/nol_26011315/addition.json",
+    "research/nol_26011315/chunk.app.js",
+    "research/nol_26011315/page.html"
+  ]
+}
