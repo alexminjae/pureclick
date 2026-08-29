@@ -258,6 +258,82 @@ const tests = {
     }
   },
 
+  // --- Reaching a seat -----------------------------------------------------
+
+  "opening a 구역 makes its seats clickable without another poll"() {
+    // The block-switch tax. Travelling to a seat — leaveBlock, enterBlock,
+    // fitBlock — is the largest cost in 취켓팅 once one frees, and having paid
+    // it the loop then did `candidates = []; continue`, throwing the ranking
+    // away and going back round for another poll before clicking anything.
+    // clickableAmong is what lets the tick finish the job it started.
+    const { race } = sandbox.window.PureClick;
+    const seat = { seatInfoId: "S1", blockKey: "022:001", seatGrade: "1" };
+    const node = {
+      __reactProps$t: { seat: { seatInfoId: "S1", seatGrade: "1" }, blockKey: "022:001" },
+      getAttribute: () => "3",
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 6, height: 6 }),
+      isConnected: true,
+    };
+    const originalQsa = sandbox.document.querySelectorAll;
+    try {
+      // Before the 구역 opens the map has drawn nothing.
+      sandbox.document.querySelectorAll = () => [];
+      race.rebuildSeatIndex();
+      assert.deepEqual(race.clickableAmong([seat]), [], "nothing is drawn yet");
+
+      // Opening it mounts the seat; the same candidate is now clickable
+      // against a freshly read index, with no request in between.
+      sandbox.document.querySelectorAll = (sel) =>
+        String(sel).includes("circle") ? [node] : [];
+      race.rebuildSeatIndex();
+      assert.deepEqual(
+        race.clickableAmong([seat]).map((s) => s.seatInfoId), ["S1"],
+        "the seat must be reachable in the same pass that opened its 구역",
+      );
+    } finally {
+      sandbox.document.querySelectorAll = originalQsa;
+      race.rebuildSeatIndex();
+    }
+  },
+
+  "a seat in the open 구역 beats a nearer one we would have to travel to"() {
+    // Leaving a 구역 and entering another is the most expensive thing the loop
+    // does — up to eight zoom-out clicks at 250ms each, then an entry that
+    // settles for up to 900ms, then a fit. Fitting the 구역 already open costs
+    // a fraction of that. Ranking by distance alone sent the macro on that
+    // journey for a seat one row nearer, which by arrival is usually gone.
+    const { race } = sandbox.window.PureClick;
+    const nearer = { seatInfoId: "far-block", blockKey: "001:001", posTop: 0 };
+    const reachable = { seatInfoId: "same-block", blockKey: "022:001", posTop: 90 };
+    const ranked = [nearer, reachable];
+
+    assert.equal(
+      race.aimForCandidates(ranked, "022:001").seatInfoId, "same-block",
+      "must aim at the 구역 already open",
+    );
+    // With nothing open, or nothing here, distance decides as before.
+    assert.equal(race.aimForCandidates(ranked, "").seatInfoId, "far-block");
+    assert.equal(race.aimForCandidates(ranked, "099:009").seatInfoId, "far-block");
+    assert.equal(race.aimForCandidates([], "022:001"), null);
+  },
+
+  "what a map move costs is recorded, not assumed"() {
+    // The settle budgets these run against (900/700/250ms) are ceilings someone
+    // chose; the only real figure anywhere was a 389ms note in a comment. The
+    // travel is the biggest latency in 취켓팅, so it needs measuring.
+    const { race } = sandbox.window.PureClick;
+    race.state.mapMoves = {};
+    return (async () => {
+      await race.noteMapMove("enterBlock", "022:001", async () => ({ ok: true }));
+      await race.noteMapMove("enterBlock", "022:002", async () => ({ ok: false }));
+      const seen = race.state.mapMoves.enterBlock;
+      assert.equal(seen.n, 2, "every move is counted");
+      assert.equal(seen.failed, 1, "including the ones that did not work");
+      assert.ok(seen.totalMs >= 0 && seen.worstMs >= 0, "with real durations");
+      race.state.mapMoves = {};
+    })();
+  },
+
   "a configured speed can only slow the watch, never override its budget"() {
     // The fix that never took effect.
     //

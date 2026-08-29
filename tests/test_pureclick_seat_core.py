@@ -16,6 +16,7 @@ from pureclick_seat_core import (
     parse_summary_compatibility,
     rank_seats,
     resolve_seat_type,
+    map_move_lines,
     seat_order_lines,
     select_seat_unit,
 )
@@ -378,6 +379,28 @@ class SeatOrderLinesTest(unittest.TestCase):
     def test_nothing_ranked_yet_renders_nothing(self) -> None:
         for status in ({}, {"seatOrder": []}, {"seatOrder": "nonsense"}):
             self.assertEqual(seat_order_lines(status), [], status)
+
+
+class MapMoveLinesTest(unittest.TestCase):
+    """What travelling to a seat costs, once it is measured rather than assumed."""
+
+    def test_reports_each_kind_of_move_with_its_real_cost(self) -> None:
+        lines = map_move_lines({"mapMoves": {
+            "enterBlock": {"n": 3, "totalMs": 1200, "worstMs": 620, "failed": 1},
+            "fitBlock": {"n": 5, "totalMs": 900, "worstMs": 300, "failed": 0},
+        }})
+        self.assertIn("구역 열기  3회 · 평균 400ms · 최대 620ms · 실패 1회", lines)
+        self.assertIn("화면 맞추기  5회 · 평균 180ms · 최대 300ms", lines)
+        self.assertNotIn("실패", lines[1], "a move that never failed says nothing about failure")
+
+    def test_a_move_never_made_is_not_listed(self) -> None:
+        # A zero-count row would divide by zero, and an empty line tells you
+        # nothing anyway.
+        self.assertEqual(map_move_lines({"mapMoves": {"aim": {"n": 0, "totalMs": 0}}}), [])
+
+    def test_nothing_measured_yet_renders_nothing(self) -> None:
+        for status in ({}, {"mapMoves": {}}, {"mapMoves": "nonsense"}):
+            self.assertEqual(map_move_lines(status), [], status)
 
 
 if __name__ == "__main__":

@@ -568,3 +568,43 @@ def seat_order_lines(seat: dict[str, Any]) -> list[str]:
         near = f"거리 {dist}" if isinstance(dist, (int, float)) else "거리 —"
         lines.append(f"{index}. {label}  {where}  {near}")
     return lines
+
+
+# The kinds of map move the watch makes, in the order they cost.
+MAP_MOVE_LABELS = {
+    "leaveBlock": "구역 나가기",
+    "enterBlock": "구역 열기",
+    "fitBlock": "화면 맞추기",
+    "aim": "좌석까지 이동",
+}
+
+
+def map_move_lines(seat: dict[str, Any]) -> list[str]:
+    """What travelling to a seat actually costs.
+
+    Once a cancellation appears, the time between seeing it and clicking it is
+    mostly spent getting the seat drawn: stepping out of one 구역, opening
+    another, fitting it to the viewport. The settle budgets those run against
+    (900/700/250 ms) are ceilings someone chose — the only measured figure
+    anywhere was a 389 ms note in a comment. These are the real ones.
+    """
+    moves = seat.get("mapMoves")
+    if not isinstance(moves, dict) or not moves:
+        return []
+
+    lines: list[str] = []
+    for key, label in MAP_MOVE_LABELS.items():
+        row = moves.get(key)
+        if not isinstance(row, dict):
+            continue
+        count = row.get("n") or 0
+        if not count:
+            continue
+        average = round((row.get("totalMs") or 0) / count)
+        worst = row.get("worstMs") or 0
+        note = f"{label}  {count}회 · 평균 {average}ms · 최대 {worst}ms"
+        failed = row.get("failed") or 0
+        if failed:
+            note += f" · 실패 {failed}회"
+        lines.append(note)
+    return lines

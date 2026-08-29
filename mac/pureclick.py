@@ -25,6 +25,7 @@ from pureclick_mac_core import ensure_mac_ready  # noqa: E402
 from pureclick_seat_core import (  # noqa: E402
     SeatPreferences,
     parse_goods_code,
+    map_move_lines,
     seat_order_lines,
     serialize_preferences,
 )
@@ -1462,7 +1463,12 @@ class PureClickMacApp(tk.Tk):
         box = getattr(self, "order_text", None)
         if box is None or not box.winfo_exists():
             return
+        # The ordering, and underneath it what reaching those seats cost. Both
+        # answer the same question — why did it take that seat, and why then.
         lines = seat_order_lines(seat)
+        moves = map_move_lines(seat)
+        if moves:
+            lines = [*lines, *([""] if lines else []), *moves]
         if not lines:
             box.pack_forget()
             return

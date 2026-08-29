@@ -277,6 +277,8 @@
     takenUntil: new Map(),
     // Seats the page's own traffic showed opening, waiting for the loop.
     pageFreed: [],
+    // What travelling to a seat actually costs, by kind of move.
+    mapMoves: {},
     syncedSummary: null,
     lastProbe: null,
     lastBlocks: null,
@@ -2940,6 +2942,52 @@
   // The index, kept fresh by the observer. Falls back to a full scan when no
   // observer could be attached, so a venue whose subtree we cannot find behaves
   // exactly as it did before.
+  // Which of these seats can actually be clicked right now. Recomputed rather
+  // than computed once, because opening a 구역 changes the answer and the whole
+  // point is to act on that without going back round the loop.
+  /**
+   * Time a map move, and keep what it cost.
+   *
+   * The settle budgets these run against (900/700/250 ms) are ceilings someone
+   * chose, not costs anyone measured — the only real figure is a 389 ms note in
+   * a comment. Travelling to a seat is the largest latency in 취켓팅 once one
+   * frees, so tuning it needs the actual distribution rather than another
+   * guess. Recorded per kind so one watch answers it.
+   */
+  async function noteMapMove(kind, key, run) {
+    const started = performance.now();
+    const result = await run();
+    const ms = Math.round(performance.now() - started);
+    const seen = (seatState.mapMoves[kind] ||= { n: 0, totalMs: 0, worstMs: 0, failed: 0 });
+    seen.n += 1;
+    seen.totalMs += ms;
+    seen.worstMs = Math.max(seen.worstMs, ms);
+    if (result && result.ok === false) seen.failed += 1;
+    traceCall(kind, key, { ...result, ms });
+    return result;
+  }
+
+  // Which seat to travel to, when none is drawn yet. See the note at the call
+  // site: reachability beats distance, because the travel costs more than the
+  // difference between two seats usually does.
+  function aimForCandidates(candidates, openBlock) {
+    if (openBlock) {
+      const here = candidates.find((seat) => String(seat.blockKey) === String(openBlock));
+      if (here) return here;
+    }
+    return candidates[0] || null;
+  }
+
+  function clickableAmong(candidates) {
+    const rendered = liveSeatIndex();
+    seatState.domCircleCount = rendered.size;
+    return candidates.filter((seat) => {
+      const node = rendered.get(String(seat.seatInfoId));
+      if (!node || node.isConnected === false) return false;
+      return !seatNodeDisabled(node);
+    });
+  }
+
   function liveSeatIndex() {
     if (!watchSeatMap()) return renderedSeatIndex();
     // A mounted circle can predate the observer; rebuild if it looks stale.
@@ -5568,6 +5616,7 @@
         wonVia: seatState.wonVia || "",
         sweepTicks: seatState.catchSweepTicks || 0,
         observedTickMs: seatState.observedTickMs || 0,
+        mapMoves: seatState.mapMoves || {},
         heldSeats: seatState.heldSeatIds.size,
         freeSeats: freeSeatCount(),
         blocks: (seatState.lastBlocks || []).length,
@@ -5729,6 +5778,7 @@
     seatState.pageStatusSeen = 0;
     seatState.pageStatusFreed = 0;
     seatState.observedTickMs = 0;
+    seatState.mapMoves = {};
     seatState.consecutiveRejects = 0;
     seatState.skippedByMap = 0;
     // Fresh per run, so 무작위 aims somewhere else next time while staying
@@ -6112,28 +6162,29 @@
       // viewport exist in the DOM. If nothing clickable is rendered, wait and
       // rescan — do not pick a ranked seat the user cannot click.
       // Exception: auto_assign has no circles to click; it uses the API path.
-      const rendered = liveSeatIndex();
-      const clickable = candidates.filter((seat) => {
-        const node = rendered.get(String(seat.seatInfoId));
-        if (!node || node.isConnected === false) return false;
-        return !seatNodeDisabled(node);
-      });
+      let clickable = clickableAmong(candidates);
       seatState.clickableNow = clickable.length;
-      seatState.domCircleCount = rendered.size;
       if (!clickable.length && !config.auto_assign) {
         // Nothing we want is drawn. On a big venue that is normal: the map
         // mounts only what is in the viewport, and a stadium's first screen is
         // a picture with no seats at all until a 구역 is opened.
         //
-        // Order matters here and is the result of measuring rather than
-        // guessing. Opening a block (389ms) and fitting it to the viewport are
+        // Order matters. Opening a block and fitting it to the viewport are
         // both verified against a live venue; the panning fallback below rests
         // on a transform lookup that found nothing on the same page. So the
-        // verified path leads and panning is the last resort.
+        // verified path leads and panning is the last resort. What each of
+        // these actually costs is recorded by noteMapMove — the settle budgets
+        // they run against are ceilings someone chose, not measurements.
         watchMapPointer();
-        const aim = candidates[0] || null;
-        const wantBlock = aim?.blockKey ? String(aim.blockKey) : "";
         const openBlock = currentOpenBlock();
+        // Distance decides which seat, but only among the ones we can afford to
+        // reach. Stepping out of a 구역 and into another is the most expensive
+        // thing this loop does; simply fitting the one already open costs a
+        // fraction of it. So a candidate in the open block wins over a nearer
+        // one elsewhere — by the time we had travelled, the nearer seat would
+        // most likely be gone anyway.
+        const aim = aimForCandidates(candidates, openBlock);
+        const wantBlock = aim?.blockKey ? String(aim.blockKey) : "";
 
         if (wantBlock) {
           const block = (seatState.discoveredBlocks || []).find(
@@ -6145,18 +6196,17 @@
               // map mounts by viewport, so this is the cheapest way to bring
               // the rest of the block into the DOM — and it used to run only
               // after our *own* entry, never for a block the user opened.
-              const fitted = await fitBlockToView();
-              traceCall("fitBlock", wantBlock, fitted);
-              if (seatNodeFor(aim.seatInfoId)) {
-                candidates = [];
-                continue;
-              }
+              await noteMapMove("fitBlock", wantBlock, () => fitBlockToView());
+              // Reaching the seat used to end in `candidates = []; continue`,
+              // which threw the ranking away and went back round the loop for
+              // another poll before clicking anything. Having just paid the
+              // travel, take the seat in this pass.
+              clickable = clickableAmong(candidates);
             } else {
               // Wrong 구역, or none open. Step out if we are inside one, then
               // open the block the seat actually lives in.
               if (openBlock) {
-                const left = await leaveBlockToVenue();
-                traceCall("leaveBlock", openBlock, left);
+                const left = await noteMapMove("leaveBlock", openBlock, () => leaveBlockToVenue());
                 if (!left.ok) {
                   // Stuck inside; work with what is reachable here rather than
                   // spinning on seats we cannot get to.
@@ -6171,53 +6221,58 @@
                 `구역 ${block.selfDefineBlock || block.blockKey} 여는 중…<br>${AUTOPILOT_BUILD}`,
                 "info",
               );
-              const entered = await enterBlockForSeats(block);
-              traceCall("enterBlock", block.blockKey, entered);
+              const entered = await noteMapMove("enterBlock", block.blockKey, () =>
+                enterBlockForSeats(block),
+              );
               if (entered.ok) {
-                const fitted = await fitBlockToView();
-                traceCall("fitBlock", block.blockKey, fitted);
-                candidates = [];
-                continue;
+                await noteMapMove("fitBlock", block.blockKey, () => fitBlockToView());
+                clickable = clickableAmong(candidates);
               }
             }
           }
         }
 
-        const moved = aim
-          ? await ensureSeatRendered(aim.seatInfoId, aim)
-          : { ok: false, via: "no-candidate" };
-        traceCall("aim", aim?.seatInfoId || null, {
-          ...moved,
-          label: aim?.label || "",
-          rendered: rendered.size,
-        });
+        // The travel worked and the seat is on screen. Fall through and click
+        // it in this pass rather than starting the tick over.
+        if (clickable.length) {
+          seatState.clickableNow = clickable.length;
+        } else {
+          // Still not drawn. Pan the map to it as a last resort — this rests on
+          // a transform lookup that found nothing on one real venue, which is
+          // why it runs after the verified block-entry path above.
+          const moved = aim
+            ? await noteMapMove("aim", aim.seatInfoId, () => ensureSeatRendered(aim.seatInfoId, aim))
+            : { ok: false, via: "no-candidate" };
 
-        if (moved.ok) {
-          candidates = [];
-          continue;
+          if (moved.ok) {
+            clickable = clickableAmong(candidates);
+            seatState.clickableNow = clickable.length;
+          }
+
+          if (!clickable.length) {
+            // Could not reach it. Drop this one and try the next rather than
+            // stalling on a seat the viewport will not produce.
+            if (aim && (moved.timedOut || moved.via === "centred-but-absent")) {
+              seatState.aimMisses = (seatState.aimMisses || 0) + 1;
+              candidates = candidates.filter((seat) => seat.seatInfoId !== aim.seatInfoId);
+              continue;
+            }
+
+            const why =
+              moved.via === "user-dragging"
+                ? "맵을 조작하는 중 — 손을 떼면 이어서 진행합니다"
+                : moved.via === "no-transform"
+                  ? "맵을 확대해 주세요 (이 화면은 자동 이동이 안 됩니다)"
+                  : "좌석이 그려지길 기다리는 중";
+            updateOverlay(
+              `${why}<br>잡을 자리 ${candidates.length}석 · 화면 ${seatState.domCircleCount || 0}개<br>${AUTOPILOT_BUILD}`,
+              "info",
+            );
+            await sleep(pollMs);
+            candidates = [];
+            continue;
+          }
         }
-
-        // Could not reach it. Drop this one and try the next rather than
-        // stalling on a seat the viewport will not produce.
-        if (aim && (moved.timedOut || moved.via === "centred-but-absent")) {
-          seatState.aimMisses = (seatState.aimMisses || 0) + 1;
-          candidates = candidates.filter((seat) => seat.seatInfoId !== aim.seatInfoId);
-          continue;
-        }
-
-        const why =
-          moved.via === "user-dragging"
-            ? "맵을 조작하는 중 — 손을 떼면 이어서 진행합니다"
-            : moved.via === "no-transform"
-              ? "맵을 확대해 주세요 (이 화면은 자동 이동이 안 됩니다)"
-              : "좌석이 그려지길 기다리는 중";
-        updateOverlay(
-          `${why}<br>잡을 자리 ${candidates.length}석 · 화면 ${rendered.size}개<br>${AUTOPILOT_BUILD}`,
-          "info",
-        );
-        await sleep(pollMs);
-        candidates = [];
-        continue;
       }
       const pool = clickable.length ? clickable : candidates;
 
@@ -6676,6 +6731,9 @@
         leaveBlockToVenue,
         ensureSeatRendered,
         applyBlockMask,
+        clickableAmong,
+        aimForCandidates,
+        noteMapMove,
         notePageSeatStatus,
       },
       auditBlocks: () => auditBlocks(),
