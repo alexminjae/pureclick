@@ -1267,6 +1267,62 @@ const tests = {
     }
   },
 
+  // Measured on a live session: armState came back all zeros — syncMs 0,
+  // clockQuality "", no attempts, no error — because the 예매 창 was on the seat
+  // map at step=price, where there is nothing to enter. Every early return in
+  // runArmScheduler was silent, so an arm that refused looked exactly like one
+  // that had never been asked.
+  "an arm that refuses says why"() {
+    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const fn = source.slice(source.indexOf("async function runArmScheduler("));
+    const body = fn.slice(0, fn.indexOf("\n  }\n"));
+    const head = body.slice(0, body.indexOf("armState.running = true;"));
+
+    // Every guard before the run starts must set a reason. armState.running is
+    // the one exception: a second call while one is in flight is not a refusal.
+    const returns = head.match(/^\s*if \(.*\) return[^;]*;/gm) || [];
+    assert.ok(returns.length >= 4, `expected several guards, found ${returns.length}`);
+    for (const line of returns) {
+      if (/armState\.running/.test(line)) continue;
+      assert.match(line, /refuse\(|armState\.lastError|return;$/,
+                   `silent guard: ${line.trim()}`);
+    }
+
+    // And each attempt must start clean, or one refusal sits on screen forever
+    // — lastError is otherwise only cleared inside fireEntry, which a refused
+    // arm never reaches.
+    assert.ok(head.indexOf('armState.lastError = ""') >= 0,
+              "the reason from a previous attempt must be cleared");
+    assert.ok(head.indexOf('armState.lastError = ""') < head.indexOf("refuse("),
+              "cleared before any new reason is set");
+  },
+
+  "an entry is refused where there is nothing to enter"() {
+    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const fn = source.slice(source.indexOf("async function runArmScheduler("));
+    const head = fn.slice(0, fn.indexOf("armState.running = true;"));
+    assert.match(head, /isNolProductPage\(\)[^]*isGoodsPage\(\)/,
+                 "the arm must check it is on a page an entry can happen from");
+    assert.match(head, /isSeatPage\(\)/, "and name the seat map, which is where this was hit");
+  },
+
+  // localStorage is per-origin and the booking flow crosses two of them. The
+  // script used to boot before the config was written, so bootRoute() read an
+  // empty config on every fresh origin and nothing re-ran it — the 400ms
+  // watcher only fires on a URL change, which had just happened.
+  "config reaches the page before the route is decided"() {
+    const host = readFileSync(resolve(here, "../mac/browser_host.py"), "utf8");
+    const fn = host.slice(host.indexOf("def inject_autopilot("));
+    const body = fn.slice(0, fn.indexOf("\ndef "));
+    const applied = body.indexOf("apply_state(window)");
+    const loaded = body.indexOf("evaluate_js(load_script())");
+    assert.ok(applied >= 0 && loaded >= 0, "both steps must be present");
+    assert.ok(applied < loaded, "storage must be written before the script boots");
+
+    // And a config that lands later must be able to wake the route.
+    assert.match(host, /configApplied/, "a late config must be able to re-decide the route");
+  },
+
   "an entry with no target time has no start time to compute"() {
     const { race } = sandbox.window.PureClick;
     for (const arm of [{}, { target_server_unix: null }, { target_server_unix: "soon" }]) {

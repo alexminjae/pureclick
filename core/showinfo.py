@@ -397,7 +397,10 @@ def fetch_show_catalog(value: str, *, timeout: float = 12.0) -> ShowCatalog:
 
 
 def seat_table_lines(
-    rows: list[dict], hide_remain: bool, live_free: int | None = None
+    rows: list[dict],
+    hide_remain: bool,
+    live_free: int | None = None,
+    free_by_grade: dict[str, int] | None = None,
 ) -> list[str]:
     """The 공연 table as text: grade, price, and what is left.
 
@@ -414,10 +417,20 @@ def seat_table_lines(
     lines: list[str] = []
     total = 0
     known = False
+    live = free_by_grade or {}
     for row in rows:
         price = int(row.get("price") or 0)
         remain = int(row.get("remain") or 0)
-        if hide_remain:
+        name_key = str(row.get("name") or "").strip()
+        counted = live.get(name_key)
+        if counted is not None:
+            # The bitmap, which is right whether or not the site publishes a
+            # count. Measured on 26012217: every grade reported remainCount 0
+            # with isVisibleSeatCount false while 710 seats were free.
+            left = f"{counted}석"
+            total += counted
+            known = True
+        elif hide_remain:
             left = "" if live_free is not None else "비공개"
         elif remain:
             left = f"{remain}석"

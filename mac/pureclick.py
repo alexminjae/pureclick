@@ -483,8 +483,9 @@ class PureClickMacApp(tk.Tk):
         run_row = tk.Frame(openq, bg=PANEL)
         run_row.pack(fill="x", pady=(10, 0))
         run_row.columnconfigure(0, weight=1)
-        ttk.Button(run_row, text="테스트 실행", style="CardGhost.TButton",
-                   command=self.run_entry_test).grid(row=0, column=0, sticky="ew")
+        self.btn_test = ttk.Button(run_row, text="테스트 실행", style="CardGhost.TButton",
+                                   command=self.run_entry_test)
+        self.btn_test.grid(row=0, column=0, sticky="ew")
         ttk.Button(run_row, text="오픈 시각으로", style="CardGhost.TButton",
                    command=self._test_time_from_show).grid(row=0, column=1, padx=(6, 0))
         tk.Label(openq, text="정한 시각에 실제로 이 공연에 들어가 봅니다.", bg=PANEL, fg=FAINT,
@@ -715,13 +716,19 @@ class PureClickMacApp(tk.Tk):
             self._apply_context_fields(context)
             self._schedule_remain_refresh(context)
 
-    def _render_seat_table(self, rows: list[dict], hide_remain: bool, live_free: int | None = None) -> None:
+    def _render_seat_table(
+        self,
+        rows: list[dict],
+        hide_remain: bool,
+        live_free: int | None = None,
+        free_by_grade: dict | None = None,
+    ) -> None:
         """Grades, prices and what is left.
 
         The text itself is built by `seat_table_lines` so it can be tested
         without a display; this method only puts it on screen.
         """
-        text = "\n".join(seat_table_lines(rows, hide_remain, live_free))
+        text = "\n".join(seat_table_lines(rows, hide_remain, live_free, free_by_grade))
         self.seat_table.configure(state="normal")
         self.seat_table.delete("1.0", tk.END)
         self.seat_table.insert("1.0", text)
@@ -1352,6 +1359,20 @@ class PureClickMacApp(tk.Tk):
         self.test_minute.set(when.strftime("%M"))
         self.test_second.set(when.strftime("%S"))
 
+    ENTRY_PAGES = {"nol", "goods"}
+
+    def _entry_page_problem(self) -> str:
+        """Why an entry cannot run right now, or "" if it can."""
+        page = str((self.browser.read_page_context() or {}).get("page") or "")
+        if page in self.ENTRY_PAGES:
+            return ""
+        where = {
+            "seat": "이미 좌석맵에 있습니다 — 들어갈 대기열이 없습니다.",
+            "waiting": "이미 대기열에 있습니다.",
+            "gates": "이미 대기열에 있습니다.",
+        }.get(page)
+        return where or "예매 창에서 공연 페이지를 먼저 여세요."
+
     def run_entry_test(self) -> None:
         """Rehearse the open at a moment you choose.
 
@@ -1360,6 +1381,10 @@ class PureClickMacApp(tk.Tk):
         real entry — same clock sync, same scheduler, same request — against a
         moment you pick, so it can be watched and repeated.
         """
+        problem = self._entry_page_problem()
+        if problem:
+            self._note(problem, error=True)
+            return
         self._start_worker(
             lambda: self._arm_worker(dry_run=False, target_text=self._test_time_text(), test=True)
         )
@@ -1546,11 +1571,15 @@ class PureClickMacApp(tk.Tk):
         # Once a seat session exists the bitmap is the truthful count, so the
         # show table switches from the API's `remain` to what is actually free.
         free = seat.get("freeSeats")
-        if isinstance(free, int) and free > 0 and self._grade_rows:
+        by_grade = seat.get("freeByGrade")
+        if not isinstance(by_grade, dict):
+            by_grade = None
+        if self._grade_rows and ((isinstance(free, int) and free > 0) or by_grade):
             self._render_seat_table(
                 self._grade_rows,
                 bool((self._show_info_data or {}).get("hide_remain_seat")),
-                live_free=free,
+                live_free=free if isinstance(free, int) and free > 0 else None,
+                free_by_grade=by_grade,
             )
 
         self._render_seat_order(seat)
@@ -1721,6 +1750,12 @@ class PureClickMacApp(tk.Tk):
         self.guidance.set(f"지금 할 일 — {hint}" if step else f"안내 — {hint}")
 
         self._set_enabled(self.btn_arm, step == 2)
+        # The rehearsal arms the real scheduler, so it belongs on the same pages
+        # a real entry does. It had no reference kept, so nothing could disable
+        # it: pressed on the seat map it armed a scheduler with nothing to enter
+        # and reported nothing at all.
+        can_enter = page in {"nol", "goods"}
+        self._set_enabled(getattr(self, "btn_test", None), can_enter)
         self._set_enabled(self.btn_catch, on_seat_map)
         # Say when a function cannot apply, rather than hiding it. Both stay on
         # screen; only the explanation changes.

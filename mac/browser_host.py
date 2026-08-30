@@ -179,6 +179,12 @@ def apply_state(window: webview.Window) -> None:
     if isinstance(trigger, dict):
         scripts.append(f"window.PureClick?.setWatchTrigger?.({json.dumps(trigger)});")
 
+    # Config that lands after the script has booted is invisible until something
+    # re-decides the route. This asks it to, and the page ignores the request
+    # when it is mid-run or already holding a seat.
+    if state.get("arm") is not None or state.get("seat") is not None:
+        scripts.append("window.PureClick?.configApplied?.();")
+
     command = state.get("command")
     if command and command in _COMMAND_JS:
         scripts.append(_COMMAND_JS[command])
@@ -205,7 +211,20 @@ def inject_autopilot(window: webview.Window) -> None:
     # Keep document-start in sync with disk on every load — otherwise a long-
     # lived app keeps re-injecting the script from process start.
     install_document_start_script(window)
+    # Storage first, script second.
+    #
+    # localStorage is per-origin and the booking flow crosses two of them
+    # (nol.yanolja.com for the product page, tickets.interpark.com for the seat
+    # map). This ran the other way round, so on every fresh origin the script
+    # booted, bootRoute() read an empty config and decided there was nothing to
+    # do, and only then was the config written. bootRoute() is not called again
+    # — `if (!alreadyLoaded)` guards it, and the 400ms watcher only re-runs it
+    # when the URL *changes*, which it just had. So the arm and the seat config
+    # arrived one moment too late to be read, which is how you can land on the
+    # seat map after the queue and have nothing start.
+    apply_state(window)
     window.evaluate_js(load_script())
+    # And once more, for anything the panel wrote while the script was loading.
     apply_state(window)
 
 

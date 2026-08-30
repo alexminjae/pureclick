@@ -1900,8 +1900,37 @@
   }
 
   async function runArmScheduler(arm) {
-    if (!arm?.enabled || arm.fired || armState.running) return;
-    if (armState.fired) return;
+    // Each attempt starts clean. lastError is otherwise only cleared inside
+    // fireEntry, which a refused arm never reaches — so one refusal would sit
+    // on screen through every later attempt.
+    armState.lastError = "";
+
+    // Every one of these used to return silently, so an arm that did nothing
+    // looked identical to one that had not been asked. Measured on a live
+    // session: armState came back all zeros — syncMs 0, clockQuality "", no
+    // attempts, no error — because the 예매 창 was on the seat map, where there
+    // is nothing to enter. Nothing said so.
+    const refuse = (why) => {
+      armState.lastError = why;
+      log("arm refused", why);
+      traceCall("armRefused", null, why);
+    };
+    if (!arm) return refuse("예약 정보가 없습니다 — 조작판에서 다시 [대기 시작]을 누르세요.");
+    if (!arm.enabled) return refuse("예약이 꺼져 있습니다.");
+    if (arm.fired || armState.fired) return refuse("이미 이번 예약으로 진입했습니다.");
+    if (armState.running) return;
+
+    // The entry only means anything where an entry can happen. On the seat map
+    // or inside the queue there is no line left to join.
+    if (!isNolProductPage() && !isGoodsPage()) {
+      return refuse(
+        isSeatPage()
+          ? "이미 좌석맵에 있습니다 — 들어갈 대기열이 없습니다."
+          : isWaitingPage() || isGatesPage()
+            ? "이미 대기열에 있습니다."
+            : "공연 페이지가 아닙니다 — 예매 창에서 공연을 여세요.",
+      );
+    }
 
     // An arm during a block cannot get in line and every attempt can extend the
     // lockout past the open — the one moment it cannot be recovered from. The
@@ -5923,6 +5952,7 @@
         triggerBursts: seatState.triggerBursts || 0,
         heldSeats: seatState.heldSeatIds.size,
         freeSeats: freeSeatCount(),
+        freeByGrade: freeSeatsByGrade(),
         blocks: (seatState.lastBlocks || []).length,
         domCircleCount: seatState.domCircleCount || 0,
         // Only ever set by 미리보기, and already trimmed to a preview.
@@ -5938,6 +5968,42 @@
   function liveSignature(live) {
     if (!live.length) return "0";
     return `${live.length}:${live[0].seatInfoId}:${live[live.length - 1].seatInfoId}`;
+  }
+
+  /**
+   * Free seats per grade, counted from the bitmap we already hold.
+   *
+   * The site does not always publish these. Measured on 26012217: its own
+   * /onestop/api/seats/grades answered remainCount 0 for every grade with
+   * "isVisibleSeatCount": false — a truthful "we do not say" that the panel
+   * rendered as "0석" while 710 seats were in fact free and the macro was busy
+   * booking one of them.
+   *
+   * seatMeta gives each seat its grade name and seatStatus gives the free bits.
+   * Both are already fetched and decoded, so this needs no extra request and is
+   * right whatever the server chooses to publish.
+   */
+  function freeSeatsByGrade() {
+    const blocks = seatState.polledBlocks?.size
+      ? (seatState.lastBlocks || []).filter((block) =>
+          seatState.polledBlocks.has(String(block.blockKey)),
+        )
+      : seatState.lastBlocks || [];
+    const counts = {};
+    for (const block of blocks) {
+      const mask = block.mask;
+      if (!mask) continue;
+      const seats = block.seats || [];
+      for (let pos = 0; pos < Math.min(mask.length, seats.length); pos += 1) {
+        if (!mask[pos]) continue;
+        const seat = seats[pos];
+        if (!seat?.isExposable) continue;
+        const name = String(seat.seatGradeName || seat.seatGrade || "").trim();
+        if (!name) continue;
+        counts[name] = (counts[name] || 0) + 1;
+      }
+    }
+    return counts;
   }
 
   function freeSeatCount() {
@@ -7072,6 +7138,7 @@
         ensureSeatRendered,
         applyBlockMask,
         clickableAmong,
+        freeSeatsByGrade,
         triggerFired,
         aimForCandidates,
         noteMapMove,
@@ -7209,6 +7276,25 @@
       // narrow: it matches 문자를 입력해주세요 rather than 보안문자, because our own
       // toast contains that word and would otherwise match itself.
       captcha: { isCaptchaPageCopy },
+      /**
+       * The panel has written config; re-decide what this page should do.
+       *
+       * localStorage is per-origin and the booking flow crosses two. The script
+       * boots on a fresh origin, bootRoute() reads a config that is not there
+       * yet, and nothing re-runs it — the 400ms watcher only fires on a URL
+       * change, which has just happened. So config arriving a moment after a
+       * navigation was never read, and landing on the seat map after the queue
+       * could leave auto_seats_after_entry evaluated against nothing.
+       *
+       * Refuses while a run owns the page: re-routing under a run in progress
+       * is how a second selection gets made on top of a held seat.
+       */
+      configApplied() {
+        if (seatState.running || seatState.locked || seatState.confirmStarted) return false;
+        if (armState.running) return false;
+        bootRoute();
+        return true;
+      },
       resetArm() {
         const arm = loadArmConfig();
         if (!arm) return null;
