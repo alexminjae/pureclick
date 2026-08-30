@@ -1536,19 +1536,24 @@ const tests = {
   // it, so from the first catch onwards every 감시 시작 hit the locked gate and
   // returned — no watch, no error, no sign at all. The live capture showed
   // exactly that state: locked true, pageSelected -1.
-  // The second half of why a second 취켓팅 caught nothing.
+  // The second half of why a second 취켓팅 caught nothing — and the trap in
+  // fixing it.
   //
   // lastBlocks survives a run, so run 2 diffed its first poll against the masks
   // run 1 left behind: every seat that freed in the gap came back as "just
-  // freed", minutes stale and long since taken. The loop opened by chasing
-  // ghosts, took 이선좌 on each, put them in the 30s cooldown and spent its
-  // retry budget before it could see a real cancellation.
-  "a new run diffs from a fresh baseline, not the last run's bitmap"() {
+  // freed", minutes stale and long since taken.
+  //
+  // Clearing the masks fixed that and caused something worse: seatIsFree()
+  // reads false for a null mask, so the entire venue looked sold out until the
+  // sweep refilled it two blocks per tick, and the watch had nothing to work
+  // with in the meantime. The masks have to stay; what resets is which blocks
+  // this run has already read.
+  "a new run re-baselines without going blind"() {
     const { race } = sandbox.window.PureClick;
+    const state = race.state;
     const block = {
       blockKey: "001:001",
-      // What the previous run left: seat 0 taken.
-      mask: [false, true],
+      mask: [false, true],   // what the previous run left
       seats: [
         { seatInfoId: "s1", seatGrade: "1", seatGradeName: "R석", rowNo: "A", seatNo: "1",
           isExposable: true, posLeft: 10, posTop: 10 },
@@ -1556,76 +1561,45 @@ const tests = {
           isExposable: true, posLeft: 20, posTop: 10 },
       ],
     };
-    // Against a stale baseline, a seat that freed while nothing was watching
-    // reads as a fresh opening.
-    assert.equal(race.applyBlockMask(block, [true, true], {}).length, 1,
-                 "this is the phantom the reset exists to prevent");
+    const before = state.runBaseline;
+    try {
+      // A new run: nothing read yet.
+      state.runBaseline = new Set();
 
-    // Cleared, the same reading is a first sighting and reports nothing.
-    block.mask = null;
-    assert.deepEqual(race.applyBlockMask(block, [true, true], {}), [],
-                     "a first sighting is not an opening");
-    // And the run after that diffs normally again.
-    assert.equal(race.applyBlockMask(block, [true, true], {}).length, 0, "no change, no report");
+      // First reading of this block re-establishes the baseline and reports
+      // nothing — the seat that freed while nothing was watching is not news.
+      assert.deepEqual(race.applyBlockMask(block, [true, true], {}), [],
+                       "a stale gap must not arrive as a burst of openings");
+
+      // But the mask is live, so the watch can see what is free right now. This
+      // is the part that broke: nulling it made every seat read as taken.
+      assert.deepEqual(block.mask, [true, true], "the bitmap must stay usable");
+      assert.equal(race.state.lastBlocks === undefined, false);
+
+      // And from here it diffs normally.
+      assert.deepEqual(race.applyBlockMask(block, [true, true], {}), [], "no change, no report");
+      const freed = race.applyBlockMask(block, [true, true], {});
+      assert.equal(freed.length, 0);
+      block.mask = [false, true];
+      assert.equal(race.applyBlockMask(block, [true, true], {}).length, 1,
+                   "a real opening after the baseline is still caught");
+    } finally {
+      state.runBaseline = before;
+    }
   },
 
-  "the run reset drops the bitmaps but keeps the venue"() {
-    // Clearing lastBlocks outright would force a full seatMeta re-fetch of the
-    // whole venue on every press; only the masks need to go.
+  "the run reset keeps both the venue and its bitmaps"() {
     const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
     const fn = source.slice(source.indexOf("async function runSeatAutopilot("));
     const reset = fn.slice(0, fn.indexOf("while (seatState.attempts < maxAttempts"));
-    assert.match(reset, /block\.mask = null/, "the diff baseline must be reset");
+
+    assert.match(reset, /runBaseline = new Set\(\)/, "the per-run baseline must reset");
+    // Both of these blinded or slowed the run when tried.
+    assert.doesNotMatch(reset, /block\.mask = null/,
+                        "clearing the bitmaps makes every seat read as taken");
     assert.doesNotMatch(reset, /seatState\.lastBlocks = \[\]/,
-                        "but the fetched venue must survive the press");
-    assert.match(reset, /catchCursor = 0/, "and the sweep starts from the top");
-  },
-
-  // 감시할 구역 여는 중… is deliberate: a freed seat that is not drawn cannot be
-  // clicked, so the run stands in the 구역 before a cancellation arrives rather
-  // than travelling there at the worst possible moment. But the entry itself
-  // had a trap.
-  "a learned block-entry mapping is tried first, not alone"() {
-    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
-    const fn = source.slice(source.indexOf("async function enterBlockForSeats("));
-    const body = fn.slice(0, fn.indexOf("\n  }\n"));
-
-    // It used to be `[learned]` — the whole list. Venues differ, so a mapping
-    // learned on one show meant the next got one wrong click, the full settle
-    // wait, and a failure, with the mappings that would have worked untried.
-    assert.match(body, /\.\.\.BLOCK_ENTRY_HYPOTHESES\.filter/,
-                 "the other mappings must remain reachable after a learned one misses");
-    const order = body.slice(body.indexOf("const order ="), body.indexOf("for (const hypothesis"));
-    assert.ok(order.indexOf("learned") < order.indexOf("BLOCK_ENTRY_HYPOTHESES"),
-              "and the learned one still goes first");
-  },
-
-  "a change of venue forgets the mapping learned on the last one"() {
-    const { race } = sandbox.window.PureClick;
-    const state = race.state;
-    const before = { key: state.blocksKey, hypothesis: state.blockEntryHypothesis };
-    try {
-      state.blocksKey = "SHOW-A:017";
-      state.blockEntryHypothesis = "viewbox-fit";
-      race.adoptBlocksKey("SHOW-B:022");
-      assert.equal(state.blockEntryHypothesis, "",
-                   "a mapping learned on another venue must not steer this one");
-    } finally {
-      state.blocksKey = before.key;
-      state.blockEntryHypothesis = before.hypothesis;
-    }
-  },
-
-  "opening the watch 구역 is measured like every other map move"() {
-    // This is the wait you actually sit through, and it was the one set of map
-    // moves not going through noteMapMove — so the panel's travel costs
-    // excluded the only one you notice.
-    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
-    const prep = source.slice(source.indexOf("감시할 구역 "), source.indexOf("while (seatState.attempts"));
-    for (const move of ["leaveBlock", "enterBlock", "fitBlock"]) {
-      assert.match(prep, new RegExp(`noteMapMove\\("${move}"`),
-                   `${move} during watch startup must be measured`);
-    }
+                        "and refetching the venue costs a full seatMeta sweep");
+    assert.match(reset, /catchCursor = 0/, "the sweep starts from the top");
   },
 
   "a deliberate press clears a stale seat lock"() {

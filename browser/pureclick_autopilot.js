@@ -295,6 +295,8 @@
     showCatalog: null,
     message: "",
     catchCursor: 0,
+    // Blocks this run has already read once — see applyBlockMask.
+    runBaseline: null,
     discoveredBlocks: null,
     domCircleCount: 0,
   };
@@ -5687,6 +5689,14 @@
     block.mask = mask;
     // Nothing to compare against yet: a first sighting is not an opening.
     if (!previous) return [];
+    // Nor is the first reading of this run. The mask we are holding was left by
+    // the previous run, and everything that freed in between would otherwise
+    // arrive at once as a burst of openings that are long gone.
+    const key = String(block.blockKey);
+    if (seatState.runBaseline && !seatState.runBaseline.has(key)) {
+      seatState.runBaseline.add(key);
+      return [];
+    }
     const freed = [];
     const rect = normalizeWatchRect(config.watch_rect);
     for (let pos = 0; pos < Math.min(previous.length, mask.length); pos += 1) {
@@ -6106,20 +6116,20 @@
     seatState.lastError = "";
     seatState.discoveredBlocks = null;
     seatState.statusFailures = 0;
-    // Start each run from a fresh baseline, keeping the venue but dropping the
-    // bitmaps.
+    // Re-establish the diff baseline for this run without going blind.
     //
     // lastBlocks survives a run, so a second 취켓팅 diffed its first poll
-    // against the masks the *previous* run left behind — and every seat that
-    // freed in the gap between them came back as "just freed". Those seats are
-    // minutes old and long since taken, so the loop opened by chasing ghosts,
-    // collected 이선좌 on each, put them in the 30s cooldown and burned its
-    // retry budget before it ever saw a real cancellation. applyBlockMask
-    // already declines to report anything on a first sighting; it simply never
-    // got one on a second run.
-    for (const block of seatState.lastBlocks || []) block.mask = null;
+    // against the masks the *previous* run left behind, and every seat that
+    // freed in the gap came back as "just freed" — minutes stale and long since
+    // taken. But clearing the masks to fix that was worse: seatIsFree() reads
+    // false for a null mask, so the whole venue looked sold out until the sweep
+    // refilled it two blocks at a time, and the run had nothing to work with.
+    //
+    // The masks stay. What resets is which blocks this run has *seen*: the
+    // first reading of each block re-establishes its baseline and reports
+    // nothing, and every reading after that diffs normally.
+    seatState.runBaseline = new Set();
     seatState.catchCursor = 0;
-    seatState.polledBlocks = null;
     seatState.catchLiveTries = 0;
     seatState.catchLiveSignature = "";
     seatState.pageFreed.length = 0;
