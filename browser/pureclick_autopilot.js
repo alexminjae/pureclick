@@ -320,6 +320,7 @@
     waitingUrl: "",
     // Every /waiting attempt with its offset from the target — see acquireWaitingUrl.
     waitingLog: [],
+    queueHost: "",
     reentryTries: 0,
     // What the last entry actually did, so a rehearsal has something to show.
     // fireEntry already measured the lateness and then discarded it.
@@ -1771,6 +1772,7 @@
           if (waitingUrl === "BL") throw new Error("비정상 예매로 차단되었습니다 (BL)");
           if (typeof waitingUrl === "string" && /^https?:\/\//i.test(waitingUrl)) {
             armState.enteredVia = "waiting";
+            rememberQueueHost(waitingUrl);
             location.href = waitingUrl;
             return { waitingUrl, latenessMs };
           }
@@ -1807,6 +1809,7 @@
     if (waitingUrl === "BL") throw new Error("비정상 예매로 차단되었습니다 (BL)");
     if (typeof waitingUrl === "string" && /^https?:\/\//i.test(waitingUrl)) {
       updateOverlay("대기열 URL로 진입…", "info");
+      rememberQueueHost(waitingUrl);
       location.href = waitingUrl;
       return { waitingUrl, latenessMs };
     }
@@ -1834,6 +1837,54 @@
     throw new Error(armState.lastError || "대기열 API와 예매하기 모두 실패");
   }
 
+  const QUEUE_HOST_KEY = "pureclick_queue_host_v1";
+
+  /**
+   * Warm the queue host before the open, if we have ever seen it.
+   *
+   * Measured: a cold TCP+TLS handshake to the booking hosts costs ~37ms. The
+   * /waiting request itself is already warm by T — the 400ms lead sees to that
+   * — but the *navigation* that follows goes to a different host entirely, and
+   * that one is cold at the exact moment it is on the critical path of claiming
+   * a place in line.
+   *
+   * The host is not knowable on a first run, so this learns it: remember it
+   * when a queue URL arrives, preconnect to it next time.
+   */
+  function preconnectQueueHost() {
+    let host = "";
+    try {
+      host = localStorage.getItem(QUEUE_HOST_KEY) || "";
+    } catch (error) {
+      return "";
+    }
+    if (!host || document.querySelector(`link[data-pureclick-preconnect="${host}"]`)) return host;
+    try {
+      const link = document.createElement("link");
+      link.rel = "preconnect";
+      link.href = host;
+      link.crossOrigin = "anonymous";
+      link.dataset.pureclickPreconnect = host;
+      document.head?.appendChild(link);
+      log(`preconnect ${host}`);
+    } catch (error) {
+      /* head not ready; the navigation still works, just cold */
+    }
+    return host;
+  }
+
+  function rememberQueueHost(waitingUrl) {
+    try {
+      const origin = new URL(String(waitingUrl), location.origin).origin;
+      if (origin && origin !== location.origin) {
+        localStorage.setItem(QUEUE_HOST_KEY, origin);
+        armState.queueHost = origin;
+      }
+    } catch (error) {
+      /* not a URL — "N", "NP", "BL" all land here and none is a host */
+    }
+  }
+
   async function runArmScheduler(arm) {
     if (!arm?.enabled || arm.fired || armState.running) return;
     if (armState.fired) return;
@@ -1847,6 +1898,7 @@
     armState.syncMs = Math.round(performance.now() - syncStarted);
     armState.clockQuality = clockState.quality;
     armState.clockOffsetMs = Math.round((clockState.offsetSeconds || 0) * 1000);
+    armState.queueHost = preconnectQueueHost();
     const remaining = arm.target_server_unix - serverTimeUnix();
     updateOverlay(`${arm.dry_run ? "테스트 " : ""}대기열 예약<br>${Math.max(0, remaining).toFixed(1)}초`, "info");
     // Stop short of the open by exactly the lead the request loop expects.
@@ -6868,6 +6920,9 @@
         describeWaitingAnswer,
         noteWaitingAttempt,
         WAITING_LOG_LIMIT,
+        preconnectQueueHost,
+        rememberQueueHost,
+        QUEUE_HOST_KEY,
         sampledRoundKey,
         pollFreedSeats,
         liveSeatIndex,

@@ -98,17 +98,37 @@ GET /v1/goods/{goodsCode}/waiting?channelCode=pc&preSales=N&playDate=&playSeq=
 
 The 예매하기 button is only a client-side gate, so nothing waits for it to render.
 
-Two things make the timing reliable:
+Three things make the timing reliable:
 
-- **Clock accuracy ~19ms.** The `Date` header has one-second resolution, so a
-  single reading is randomly 0–1000ms wrong. Taking the *maximum* across ~40
-  samples recovers the true offset, because every sample is short by the
-  fractional second and the largest was taken nearest a real boundary.
-  Measured against boundary-bracketing: max-of-40 = 19ms error, single reading =
-  50–454ms error, median = 385ms (biased).
-- **Burst entry.** It starts 400ms early and retries every ~80ms until the
-  server accepts, so a slightly wrong clock or one dropped packet does not cost
-  the slot. `NP` (presale auth) and `BL` (blocked) stop immediately.
+- **The clock is synced against the host we fire at.** It used to sync on
+  `poticket.interpark.com` while the queue lives on `api-ticketfront`. Measured
+  by boundary-bracketing their `Date` headers: poticket +18ms, ticketfront -8ms,
+  `tickets.interpark.com` +4ms — the two hosts that matter for booking agree
+  within 12ms, and poticket was the 26ms outlier.
+- **Burst entry, shaped.** The queue endpoint answers in 11ms warm, so a flat
+  80ms poll left ~69ms of every cycle idle — the show could open and go
+  unnoticed for up to 80ms. It now polls at 100ms before the open (where the
+  answer cannot be yes, so the requests only keep the connection warm), **20ms
+  across [-100ms, +600ms]**, and 80ms after. Average blind spot 40ms → 10ms,
+  burst bounded to ~35 requests. `NP` (presale auth) and `BL` (blocked) stop
+  immediately.
+- **Every attempt is recorded** with its offset from the open and shown in the
+  panel, centred on the flip. What `/waiting` returns *before* a show opens has
+  never been observed, and the two possibilities imply opposite strategies: if
+  it stays unusable until the flip, polling the boundary is right; if it hands
+  out a queue URL early, arriving at the open is already too late. One recorded
+  open settles it.
+
+The queue host is learned from the first entry that returns one and
+preconnected on later runs — the `/waiting` request is warm by the open, but the
+navigation that follows goes to a different host, cold, at the exact moment it
+is claiming your place.
+
+**Clicking 예매하기 is not faster.** NOL's button calls `openPCOnestop()`, which
+hits the same `/waiting` endpoint and then opens a named popup to drive — a
+popup WKWebView will not create, which is why this file carries a shim to fold
+it back into one window. Calling the endpoint directly skips the handler, the
+popup and the shim.
 
 ### ② 취켓팅 — catch cancellations
 

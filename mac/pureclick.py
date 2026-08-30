@@ -1511,6 +1511,10 @@ class PureClickMacApp(tk.Tk):
         if goods or seq:
             lines.append(f"상품 {goods or '?'} · 회차 {seq or '?'}")
 
+        host = str(arm.get("queueHost") or "").strip()
+        if host:
+            lines.append(f"대기열 호스트 {host} · 다음 진입부터 미리 연결")
+
         # What the queue endpoint actually said either side of the open. This is
         # the record that decides whether polling across the boundary is even
         # the right method.

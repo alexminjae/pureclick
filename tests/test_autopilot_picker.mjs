@@ -1237,6 +1237,36 @@ const tests = {
     assert.equal(log[log.length - 1].offsetMs, 1234, "with its offset from the open");
   },
 
+  // The /waiting request is warm by the open — the 400ms lead sees to that —
+  // but the navigation that follows goes to a different host, and that one is
+  // cold at the exact moment it is claiming your place in line. Measured: a
+  // cold TCP+TLS handshake to these hosts costs ~37ms.
+  "the queue host is learned from a real entry and warmed on the next one"() {
+    const { race } = sandbox.window.PureClick;
+    const store = sandbox.window.localStorage;
+    const before = store.getItem(race.QUEUE_HOST_KEY);
+    try {
+      store.removeItem(race.QUEUE_HOST_KEY);
+      // Nothing learned yet: a first run cannot know the host, and must not guess.
+      assert.equal(race.preconnectQueueHost(), "", "no host until one is seen");
+
+      race.rememberQueueHost("https://queue.interpark.com/waiting?token=abc");
+      assert.equal(store.getItem(race.QUEUE_HOST_KEY), "https://queue.interpark.com",
+                   "the origin, not the whole URL");
+      assert.equal(race.preconnectQueueHost(), "https://queue.interpark.com");
+
+      // The non-URL answers are the common ones and none of them is a host.
+      for (const answer of ["N", "NP", "BL", "", null, undefined]) {
+        race.rememberQueueHost(answer);
+        assert.equal(store.getItem(race.QUEUE_HOST_KEY), "https://queue.interpark.com",
+                     `${answer} must not overwrite a known host`);
+      }
+    } finally {
+      if (before === null) store.removeItem(race.QUEUE_HOST_KEY);
+      else store.setItem(race.QUEUE_HOST_KEY, before);
+    }
+  },
+
   "an entry with no target time has no start time to compute"() {
     const { race } = sandbox.window.PureClick;
     for (const arm of [{}, { target_server_unix: null }, { target_server_unix: "soon" }]) {
