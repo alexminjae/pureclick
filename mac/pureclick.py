@@ -26,6 +26,7 @@ from core.seat import (  # noqa: E402
     SeatPreferences,
     parse_goods_code,
     map_move_lines,
+    bridge_line,
     running_hint,
     waiting_log_lines,
     seat_order_lines,
@@ -154,7 +155,6 @@ class PureClickMacApp(tk.Tk):
         # the countdown, close enough to not be a wait.
         soon = now + timedelta(minutes=1)
         self.test_date = tk.StringVar(value=soon.strftime("%Y-%m-%d"))
-        self.test_time = tk.StringVar(value=soon.strftime("%H:%M:%S"))
         self.test_result = tk.StringVar(value="")
         self.test_hour = tk.StringVar(value=soon.strftime("%H"))
         self.test_minute = tk.StringVar(value=soon.strftime("%M"))
@@ -168,6 +168,7 @@ class PureClickMacApp(tk.Tk):
         self.countdown = tk.StringVar(value="")
         self.zone_summary = tk.StringVar(value="감시 구역: 전체")
         self.clock_info = tk.StringVar(value="서버 시각 동기화 중…")
+        self.bridge = tk.StringVar(value="예매 창 연결 대기 중…")
         self.guidance = tk.StringVar(
             value="지금 할 일 — 다른 창(NOL 예매)에서 공연을 클릭하세요. 조작판이 자동으로 채워집니다."
         )
@@ -389,6 +390,11 @@ class PureClickMacApp(tk.Tk):
         ttk.Label(head, text="스나이퍼", style="Wordmark.TLabel").pack(side="left")
         ttk.Label(head, textvariable=self.server_time, style="Clock.TLabel").pack(side="right")
         ttk.Label(root, textvariable=self.clock_info, style="Faint.TLabel").pack(anchor="e", pady=(1, 0))
+        # Directly under the masthead, because it says whether anything below it
+        # can be trusted. The panel had no way to tell a live browser from one it
+        # had stopped hearing from, and every failure looks the same from here.
+        ttk.Label(root, textvariable=self.bridge, style="Muted.TLabel",
+                  wraplength=wrap, justify="left").pack(anchor="w", pady=(6, 0))
 
         # --- What we are aiming at -------------------------------------------
         show = self._card(root, "공연")
@@ -618,8 +624,10 @@ class PureClickMacApp(tk.Tk):
             self.auto_assign_on.set(preferences.auto_assign)
             self.reentry_on.set(preferences.reentry)
             self.auto_start_on.set(preferences.auto_seats_after_entry)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001 - a bad file must not stop startup
+            # Silently falling back to defaults meant settings you had chosen
+            # simply disappeared between runs, with nothing to explain it.
+            self._note(f"저장된 설정을 읽지 못해 기본값으로 시작합니다: {exc}", error=True)
 
     def _sync_now_bg(self) -> None:
         self._start_worker(self._sync_worker)
@@ -1304,6 +1312,7 @@ class PureClickMacApp(tk.Tk):
         self._trigger_thread.start()
 
     def _trigger_worker(self) -> None:
+        trigger_errors = 0
         while getattr(self, "_trigger_on", False):
             total = None
             hide = bool((self._show_info_data or {}).get("hide_remain_seat"))
@@ -1326,8 +1335,15 @@ class PureClickMacApp(tk.Tk):
             )
             try:
                 self.browser.push_trigger(self._trigger_state.to_mapping())
-            except Exception:
-                pass
+                trigger_errors = 0
+            except Exception as exc:  # noqa: BLE001 - the watch must outlive one write
+                # Swallowed entirely before, so a trigger that could never reach
+                # the page looked exactly like one that was working: the watch
+                # would quietly pay the full sweep for every look.
+                trigger_errors += 1
+                if trigger_errors in (1, 20):
+                    self._ui(self._note,
+                             f"잔여석 신호를 예매 창에 전달하지 못했습니다: {exc}", error=True)
             time.sleep(self.TRIGGER_POLL_MS / 1000)
 
     def _stop_trigger_worker(self) -> None:
@@ -1464,6 +1480,13 @@ class PureClickMacApp(tk.Tk):
 
     def _poll_show(self) -> None:
         try:
+            self.bridge.set(
+                bridge_line(
+                    self.browser.read_bridge_health(),
+                    self.browser.read_page_context(),
+                    (self.browser.read_autopilot_status() or {}).get("seat") or {},
+                )
+            )
             context = self.browser.read_page_context()
             if context:
                 self._follow_browser_show(context)
@@ -1950,6 +1973,23 @@ class PureClickMacApp(tk.Tk):
         self.destroy()
 
     def _tick_server_time(self) -> None:
+        """The clock, and the countdown under it.
+
+        This rescheduled itself with no try/except while _poll_show, right
+        beside it, has one. datetime.fromtimestamp raises on an absurd value, so
+        a single bad reading would have stopped the clock *and* the countdown
+        for the rest of the session — silently, on the most visible element in
+        the app.
+        """
+        try:
+            self._render_server_time()
+        except Exception as exc:  # noqa: BLE001 - a tick must outlive one bad value
+            self.server_time.set("--:--:--")
+            self.clock_info.set(f"시각 표시 오류: {exc}")
+        finally:
+            self.after(100, self._tick_server_time)
+
+    def _render_server_time(self) -> None:
         result = self.clock.sync_result
         if result is None:
             self.server_time.set("--:--:--")
@@ -1962,7 +2002,6 @@ class PureClickMacApp(tk.Tk):
                 f"서버 시각 · 보정 {result.offset_seconds * 1000:+.0f}ms · 정확도 ±{result.best_rtt_seconds * 500:.0f}ms"
             )
         self._tick_countdown()
-        self.after(100, self._tick_server_time)
 
     def _tick_countdown(self) -> None:
         """Time left until the show opens, on the server's clock.

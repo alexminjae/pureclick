@@ -807,3 +807,78 @@ def waiting_log_lines(arm: dict[str, Any], limit: int = 12) -> list[str]:
         mark = "  ← 열림" if outcome.startswith("대기열") or outcome.startswith("N (") else ""
         lines.append(f"  {stamp:>7}  {outcome}{mark}")
     return lines
+
+
+# Why a run stopped, in words. Published as `lastExit` and never once drawn, so
+# a run that ended just ended — the panel went quiet and left you guessing
+# whether it was still working.
+EXIT_REASONS = {
+    # Running, not ended — said here so a live run does not read as a silent one.
+    "started": "",
+    "haltedByUser": "직접 멈춘 상태입니다 — 다시 시작하려면 버튼을 누르세요",
+    "soldOut": "빈 좌석이 없어 멈췄습니다 — 취소표를 기다리려면 [감시 시작]",
+    "blocked": "접속 차단으로 멈췄습니다",
+    "superseded": "새 실행이 시작되어 이전 실행을 멈췄습니다",
+    "reservedUserContinues": "좌석을 잡았습니다 — 예매 창에서 결제를 이어가세요",
+    "overSelected": "선택된 좌석이 매수를 넘어 멈췄습니다",
+    # Losing a seat to someone else is the normal texture of a busy open, and it
+    # must not read like a fault.
+    "takenByAnother": "다른 사람이 먼저 가져가 다음 자리로 넘어갑니다",
+    "advanceWithNoSeat": "가선점이 확인되지 않아 [선택 완료]를 누르지 않았습니다",
+    "awaitingManualConfirm": "[선택 완료]를 직접 눌러 주세요",
+    "confirmPreselectionInvalid": "가선점 확정에 실패해 좌석을 놓쳤습니다",
+}
+
+# Past this, the browser is not being read and nothing below it can be trusted.
+BRIDGE_STALE_SECONDS = 3.0
+
+
+def bridge_line(health: dict[str, Any], context: dict[str, Any] | None = None,
+                seat: dict[str, Any] | None = None, now: float | None = None) -> str:
+    """One line: is the 예매 창 still being heard from, and what is it showing?
+
+    The panel had no way to answer this. Every failure this session — buttons
+    not enabling, the seat table not moving, a button that "doesn't do anything"
+    — looks exactly like a frozen bridge from the screen, and there was nothing
+    to tell them apart. `poll_context` swallowed its errors and nothing
+    timestamped what it published, so a panel reading twenty-minute-old state
+    was indistinguishable from a working one.
+    """
+    import time as _time
+
+    at = _time.time() if now is None else now
+    seen_at = float(health.get("seen_at") or 0)
+    if not seen_at:
+        return "예매 창 연결 대기 중…"
+
+    age = max(0.0, at - seen_at)
+    if age > BRIDGE_STALE_SECONDS:
+        return (
+            f"예매 창 응답 없음 {age:.0f}초 — 창이 닫혔거나 페이지를 읽지 못하고 있습니다"
+        )
+
+    failures = int(health.get("failures") or 0)
+    if failures:
+        why = str(health.get("last_error") or "").strip()
+        return f"예매 창 읽기 실패 {failures}회{f' · {why}' if why else ''}"
+
+    where = _describe_page(context or {})
+    exit_note = EXIT_REASONS.get(str((seat or {}).get("lastExit") or ""), "").strip()
+    line = f"예매 창 연결됨 · {age:.1f}초 전 · {where}"
+    return f"{line} · {exit_note}" if exit_note else line
+
+
+def _describe_page(context: dict[str, Any]) -> str:
+    page = str(context.get("page") or "")
+    label = {
+        "nol": "공연 페이지",
+        "goods": "공연 페이지",
+        "seat": "좌석맵",
+        "waiting": "대기열",
+        "gates": "대기열",
+    }.get(page, "다른 페이지")
+    goods = str(context.get("goods_code") or "").strip()
+    seq = str(context.get("play_seq") or "").strip()
+    if goods and seq:
+        return f"{label} ({goods} 회차 {seq})"
+    return f"{label} ({goods})" if goods else label

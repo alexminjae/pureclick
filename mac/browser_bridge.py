@@ -70,6 +70,7 @@ class BrowserBridge:
     def __init__(self, mac_dir: Path) -> None:
         self.mac_dir = mac_dir
         self.state_path = mac_dir / ".pureclick_browser_state.json"
+        self.health_path = mac_dir / ".pureclick_bridge_health.json"
         self.host_script = mac_dir / "browser_host.py"
         self.process: subprocess.Popen[str] | None = None
 
@@ -107,6 +108,19 @@ class BrowserBridge:
     def read_show_catalog(self) -> dict[str, Any] | None:
         catalog = self.read_state().get("show_catalog")
         return catalog if isinstance(catalog, dict) else None
+
+    def read_bridge_health(self) -> dict[str, Any]:
+        """Whether the browser host is still reading the page, and how recently.
+
+        Its own file rather than a key in the shared state: it is rewritten
+        every 400ms by design, so its timestamp is what goes stale when the host
+        stops — the payload in the shared state would just sit there looking
+        current forever.
+        """
+        try:
+            return json.loads(self.health_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
 
     def read_autopilot_status(self) -> dict[str, Any] | None:
         status = self.read_state().get("autopilot_status")

@@ -14,3 +14,4 @@ mac/.pureclick_browser_state.json.lock
 mac/pureclick_seat_config.json
 mac/pureclick_arm_config.json
 mac/.pureclick_cookies.json
+mac/.pureclick_bridge_health.json

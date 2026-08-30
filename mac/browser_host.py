@@ -257,9 +257,38 @@ _SNAPSHOT_JS = """
 """
 
 
+HEALTH_PATH = STATE_PATH.with_name(".pureclick_bridge_health.json")
+
+
+def write_bridge_health(health: dict[str, Any]) -> None:
+    """Say whether the page is still being read, and how long since it was.
+
+    Deliberately not in the shared state file: this changes every tick, and the
+    point of it is that its timestamp keeps moving while the loop lives and
+    stops the moment it does not.
+    """
+    try:
+        HEALTH_PATH.write_text(json.dumps(health), encoding="utf-8")
+    except OSError:
+        pass  # a health report that cannot be written is not worth crashing for
+
+
 def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
+    """Read the page every 400ms — and say so when it cannot.
+
+    This is the only source of page_context (which decides which buttons the
+    panel enables), show_catalog (the seat table) and autopilot_status (every
+    status line). It used to end in a bare `except Exception: pass`, so when
+    evaluate_js began failing — a navigation, an uninjected page, a closed
+    window — the panel went on rendering the last state it ever received, with
+    nothing to distinguish that from a working app. Keeping the loop alive is
+    right; being silent about it is not.
+    """
     tick = 0
     saved_jar: list[dict[str, Any]] = []
+    failures = 0
+    last_ok = 0.0
+    last_error = ""
     while not stop_event.is_set():
         tick += 1
         try:
@@ -282,8 +311,28 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
                     value = snapshot.get(field)
                     if isinstance(value, dict):
                         merge_if_changed(STATE_PATH, key, value)
-        except Exception:
-            pass
+                failures = 0
+                last_ok = time.time()
+                last_error = ""
+            else:
+                # A page with no autopilot on it answers null. Not an error, but
+                # not a reading either — the panel must not treat it as fresh.
+                failures += 1
+                last_error = "페이지에서 자동화 스크립트를 찾지 못했습니다"
+        except Exception as error:  # noqa: BLE001 - the loop must outlive any one read
+            failures += 1
+            last_error = f"{type(error).__name__}: {error}"[:160]
+
+        # Its own small file, not the shared state. This is written every tick
+        # so its timestamp ages when the loop dies, and the shared state is
+        # ~180KB — merging into that 2.5 times a second would mean rewriting it
+        # constantly and holding its lock away from the panel for no reason.
+        write_bridge_health({
+            "seen_at": time.time(),
+            "last_ok": last_ok,
+            "failures": failures,
+            "last_error": last_error,
+        })
         stop_event.wait(0.4)
 
 

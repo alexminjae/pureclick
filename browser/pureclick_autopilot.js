@@ -1079,22 +1079,6 @@
     return true;
   }
 
-  // After 선택 완료, Interpark shows 취소/환불 안내. Clicking 확인하고 예매하기
-  // is what actually advances to the price step. Navigating to ?step=price
-  // while this modal is up makes the sniper think checkout started.
-  async function confirmPostSelectNotices({ tries = 40 } = {}) {
-    for (let attempt = 0; attempt < tries; attempt += 1) {
-      if (!bookingNoticeVisible()) return true;
-      if (dismissBookingNotices()) {
-        updateOverlay("환불 안내 확인 버튼 클릭…", "info");
-        await sleep(350);
-        continue;
-      }
-      await sleep(200);
-    }
-    return !bookingNoticeVisible();
-  }
-
   async function waitForPageSelectOutcome({ since, timeoutMs = 6000 } = {}) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
@@ -1375,19 +1359,6 @@
     return false;
   }
 
-
-  function clickByExactText(labels) {
-    const nodes = [...document.querySelectorAll("button, a, label, span, li, div, p")];
-    for (const label of labels) {
-      const hit = nodes.find((node) => node.childElementCount <= 2 && (node.textContent || "").trim() === label);
-      if (hit) {
-        hit.click();
-        return true;
-      }
-    }
-    return false;
-  }
-
   function clickFirstMatching(pattern) {
     const nodes = [...document.querySelectorAll("button, a, [role=button], input[type=button], input[type=submit]")];
     const hit = nodes.find((el) => {
@@ -1404,28 +1375,6 @@
   function isBookingNoticeConfirm(text) {
     const compact = String(text || "").replace(/\s+/g, "");
     return compact === "확인하고예매하기" || compact === "동의하고예매하기";
-  }
-
-  function fillLabeledInput(pattern, value) {
-    if (!value) return false;
-    const labels = [...document.querySelectorAll("label, th, dt, span, p, div")];
-    for (const label of labels) {
-      if (!pattern.test(label.textContent || "")) continue;
-      const root = label.closest("tr, li, div, dl, label") || label.parentElement;
-      const field = root?.querySelector("input, select");
-      if (!field || field.offsetParent === null) continue;
-      if (field.tagName === "SELECT") {
-        const option = [...field.options].find((item) => item.text.includes(value) || item.value === String(value));
-        if (option) field.value = option.value;
-      } else {
-        field.focus();
-        field.value = value;
-      }
-      field.dispatchEvent(new Event("input", { bubbles: true }));
-      field.dispatchEvent(new Event("change", { bubbles: true }));
-      return true;
-    }
-    return false;
   }
 
   // Anything that commits money. POST /payment/order/{goodsCode} is the actual
@@ -1482,28 +1431,6 @@
       return { awaitingPayment: false, recovered: true };
     }
     return { awaitingPayment: false, recovered: false };
-  }
-
-  function isCheckoutAdvanceSafe(el) {
-    const text = (el.textContent || "").trim();
-    if (!ADVANCE_BUTTON.test(text)) return false;
-    if (COMMIT_BUTTON.test(text)) return false;
-    const root = el.closest("[role=dialog], aside, section, article, div") || el.parentElement;
-    const around = root?.innerText || "";
-    if (/구매하실\s*좌석을\s*선택해주세요|좌석을\s*선택해주세요|선점\s*실패|오류/.test(around)) return false;
-    return true;
-  }
-
-  /** Tick required consent boxes; optional marketing ones are left alone. */
-  function acceptRequiredAgreements() {
-    for (const box of document.querySelectorAll('input[type="checkbox"]')) {
-      if (box.checked || box.disabled || box.offsetParent === null) continue;
-      const label = `${box.getAttribute("name") || ""} ${box.id || ""} ${
-        box.closest("label")?.textContent || box.parentElement?.textContent || ""
-      }`;
-      if (/광고|마케팅|선택/.test(label)) continue;
-      if (/동의|필수|약관|확인/.test(label)) box.click();
-    }
   }
 
   function notifyDiscord(message) {
@@ -7183,7 +7110,7 @@
       runEntry: () => runArmScheduler(loadArmConfig()),
       runSeats: () => runSeatAutopilot(loadSeatConfig(), { userInitiated: true }),
       runCatch: () =>
-        runSeatAutopilot({ ...loadSeatConfig(), mode: "catch" }, { catchMode: true, userInitiated: true }),
+        runSeatAutopilot(loadSeatConfig(), { catchMode: true, userInitiated: true }),
       probeSeats: () => runSeatAutopilot(loadSeatConfig(), { probe: true, userInitiated: true }),
       stopAll() {
         window.__pureclickRunGen = (window.__pureclickRunGen || 0) + 1;
