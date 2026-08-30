@@ -127,24 +127,16 @@ class PureClickMacApp(tk.Tk):
         self._show_info_data: dict | None = None
         self._grade_rows: list[dict] = []
         self._block_rows: list[dict] = []
-        self._found_shows: list[dict] = []
         self._auto_loaded_code: str | None = None
         self._followed_round: tuple | None = None
-        self.genre_vars: dict[str, tk.BooleanVar] = {}
-        self._finder: tk.Toplevel | None = None
         self._zones: tk.Toplevel | None = None
         self._zone_canvas: tk.Canvas | None = None
         self._zone_hint: tk.StringVar | None = None
-        self._zone_placed = []
         self._zone_view = None
         self._zone_sketch: list[dict] = []
         self._zone_drag: tuple[float, float] | None = None
-        self._zone_rubber: int | None = None
         self._zone_redraw_job: str | None = None
-        self._zone_stats: dict[str, dict] = {}
-        self._block_list_keys: list[str] = []
         self._block_selecting = False
-        self.find_tree: ttk.Treeview | None = None
 
         now = datetime.now(KST)
         self.target_date = tk.StringVar(value=now.strftime("%Y-%m-%d"))

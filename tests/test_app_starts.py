@@ -40,7 +40,7 @@ ENTRY_POINTS = [MAC / "pureclick.py", MAC / "browser_host.py"]
 # Third-party and stdlib are the environment's problem, not ours.
 OURS = {
     "browser_bridge", "browser_host", "browser_session", "pureclick_arm_core",
-    "pureclick_catalog", "pureclick_core", "pureclick_mac_core",
+    "pureclick_core", "pureclick_mac_core",
     "pureclick_seat_core", "pureclick_showinfo", "pureclick_zone_map",
 }
 
