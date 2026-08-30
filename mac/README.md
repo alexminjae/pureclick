@@ -201,6 +201,33 @@ open and the session only has to execute.
 The bitmap is also more accurate than the official remaining-seats API — one
 show reported `remainCnt` 0 while 228 seats were genuinely free.
 
+## When NOL blocks you
+
+The gateway throttles by account and answers:
+
+```
+{"errorCode":"GATEWAY_ABUSE_BLOCKED","abuseStage":"BLOCKED",
+ "retryAfterMs":165470,"classification":"FORBIDDEN"}
+```
+
+Every call fails while it holds, and **retrying through a block extends it**.
+The queue API says the same thing in one word: `BL` (비정상 예매로 차단).
+
+A block is recognised in every shape it can arrive in — the GraphQL envelope on
+`/onestop/gql`, the same fields at the top level of a REST error body, a bare
+403/429 with or without `Retry-After`, and the queue API's `BL`. It used to be
+read only out of the GraphQL envelope, which is the one endpoint that has one:
+`seatMeta`, `seatStatus`, `block-data`, `grades` and the queue API all threw
+plain HTTP errors, so a block on any of them was invisible and the loop kept
+asking. `seatStatus` alone is about four requests a second for as long as a
+watch runs, which made it the likeliest to be throttled and the worst to be
+blind to.
+
+One report stops everything: 취켓팅 checks on **every tick**, not once at the
+start, and an arm refuses to fire while a block is live. The panel names the
+endpoint that earned it, because the queue path and the seat path need
+different answers.
+
 ## Booking engines
 
 Measured over the whole NOL catalogue (94 shows across 7 genre pages):

@@ -1455,7 +1455,10 @@ class PureClickMacApp(tk.Tk):
         could not be answered: the answer was being computed and discarded on
         every run that mattered.
         """
-        if not arm.get("fired"):
+        # A refused arm never fires, so gating on `fired` alone meant the one
+        # case you most need to see — "it did not even try, and here is why" —
+        # showed nothing at all. A block refuses before firing.
+        if not arm.get("fired") and not str(arm.get("lastError") or "").strip():
             return
 
         lateness = arm.get("latenessMs")
@@ -1468,7 +1471,8 @@ class PureClickMacApp(tk.Tk):
         }.get(str(arm.get("enteredVia") or ""), "")
 
         if error:
-            lines.append(f"진입 실패 · {error[:60]}")
+            # Long enough for a block message to keep the endpoint it names.
+            lines.append(f"진입 {'실패' if arm.get('fired') else '안 함'} · {error[:90]}")
         elif via:
             lines.append(f"진입 성공 · {via}")
         else:

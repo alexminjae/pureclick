@@ -428,6 +428,21 @@ class RunningHintTest(unittest.TestCase):
     thing that is merely interesting.
     """
 
+    def test_a_block_names_the_endpoint_that_earned_it(self) -> None:
+        # The question the repo could not answer after the fact: which call was
+        # throttled, the queue or the seat path. They need different answers.
+        hint = running_hint(
+            {"blockedForMs": 90_000, "blockedEndpoint": "/onestop/api/seatStatus"},
+            "감시 중",
+        )
+        self.assertIn("/onestop/api/seatStatus", hint)
+        self.assertIn("90초", hint)
+
+    def test_a_block_with_no_endpoint_still_reports_cleanly(self) -> None:
+        hint = running_hint({"blockedForMs": 12_000}, "감시 중")
+        self.assertIn("12초", hint)
+        self.assertNotIn("()", hint, "no empty parenthesis where a name would go")
+
     def test_a_gateway_block_outranks_everything(self) -> None:
         # While blocked, no seat can be taken and retrying lengthens the block,
         # so every other number on screen is noise.

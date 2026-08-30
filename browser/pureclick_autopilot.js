@@ -275,6 +275,10 @@
     // just took is not gone for good: holds expire and carts are abandoned, so
     // it rejoins the pool rather than being blacklisted for the run.
     takenUntil: new Map(),
+    // Unix ms until a gateway block lifts, and which call earned it. Declared
+    // rather than sprung into being, because every loop now reads them.
+    blockedUntil: 0,
+    blockedEndpoint: "",
     // Seats the page's own traffic showed opening, waiting for the loop.
     pageFreed: [],
     // What travelling to a seat actually costs, by kind of move.
@@ -1526,6 +1530,8 @@
     return sso.toString();
   }
 
+  const WAITING_ENDPOINT = "/v1/goods/{code}/waiting";
+
   async function fetchWaitingUrl(arm) {
     const params = new URLSearchParams({
       channelCode: arm.channel_code || "pc",
@@ -1540,6 +1546,14 @@
     if (typeof data === "string" && /로그인|logout|Unauthorized/i.test(data)) {
       throw new Error(data);
     }
+    // BL is 비정상 예매로 차단 — a block, not an error to retry past. It used to
+    // be thrown bare, so nothing recorded a cooldown and every other path in
+    // the app carried on as if the account were fine.
+    const blockedMs = readGatewayBlock(data ?? payload, {
+      status: response.status === 401 ? 0 : response.status,
+      headers: response.headers,
+    });
+    if (blockedMs >= 0) throw noteGatewayBlock(blockedMs, WAITING_ENDPOINT);
     if (!response.ok && response.status !== 401) {
       throw new Error(`waiting HTTP ${response.status}`);
     }
@@ -1888,6 +1902,20 @@
   async function runArmScheduler(arm) {
     if (!arm?.enabled || arm.fired || armState.running) return;
     if (armState.fired) return;
+
+    // An arm during a block cannot get in line and every attempt can extend the
+    // lockout past the open — the one moment it cannot be recovered from. The
+    // queue path used to neither set nor check this, so a block earned by the
+    // seat path would let an arm fire straight into it.
+    const blockedFor = gatewayBlockRemainingMs();
+    if (blockedFor > 0) {
+      const seconds = Math.ceil(blockedFor / 1000);
+      armState.lastError =
+        `접속 차단 중 — ${seconds}초 후에 다시 시도하세요.` +
+        (seatState.blockedEndpoint ? ` (${seatState.blockedEndpoint})` : "");
+      updateOverlay(`접속 차단 중<br>${seconds}초 남음`, "error");
+      return;
+    }
 
     armState.running = true;
     updateOverlay("서버 시각 동기화 중…", "info");
@@ -3343,6 +3371,22 @@
     const response = await fetch(url, { credentials: "include", ...options, headers });
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
+      // These four endpoints carry no GraphQL envelope, so a block here used to
+      // surface as a plain HTTP error and the loop kept asking — seatStatus
+      // most of all, at roughly four requests a second for as long as a watch
+      // runs.
+      let parsed = null;
+      try {
+        parsed = JSON.parse(detail);
+      } catch (error) {
+        /* not JSON; the status and headers can still say we are blocked */
+      }
+      const endpoint = String(url).split("?")[0];
+      const blockedMs = readGatewayBlock(parsed, {
+        status: response.status,
+        headers: response.headers,
+      });
+      if (blockedMs >= 0) throw noteGatewayBlock(blockedMs, endpoint);
       throw new Error(`HTTP ${response.status} for ${url}${detail ? ` · ${detail.slice(0, 160)}` : ""}`);
     }
     return response.json();
@@ -4486,13 +4530,24 @@
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
       traceCall(name, variables, `HTTP ${response.status} ${detail}`);
+      let parsed = null;
+      try {
+        parsed = JSON.parse(detail);
+      } catch (error) {
+        /* not JSON */
+      }
+      const blockedMs = readGatewayBlock(parsed?.errors ?? parsed, {
+        status: response.status,
+        headers: response.headers,
+      });
+      if (blockedMs >= 0) throw noteGatewayBlock(blockedMs, "/onestop/gql");
       throw new Error(`gql HTTP ${response.status}${detail ? ` · ${detail.slice(0, 160)}` : ""}`);
     }
     const payload = await response.json();
     if (payload?.errors?.length) {
       traceCall(name, variables, payload.errors);
       const blockedMs = readGatewayBlock(payload.errors);
-      if (blockedMs >= 0) throw gatewayBlockError(blockedMs);
+      if (blockedMs >= 0) throw noteGatewayBlock(blockedMs, "/onestop/gql");
       throw new Error(payload.errors[0]?.message || "gql error");
     }
     traceCall(name, variables, payload?.data);
@@ -5383,23 +5438,85 @@
   // Every call fails while it holds, and preselect failing is what makes the
   // select report 좌석 요청이 잘못 되었습니다 — the seat was never held, so asking
   // for it is genuinely invalid. Retrying through a block can only extend it.
-  function readGatewayBlock(payload) {
+  //
+  // This used to be read only out of a GraphQL error envelope, on the one
+  // endpoint that carries one. Everything else — seatMeta, seatStatus,
+  // block-data, grades, and the queue API — threw a generic HTTP error, so a
+  // block there was invisible and the loop kept asking. seatStatus alone is
+  // about four requests a second for as long as a watch runs, which makes it
+  // the likeliest thing to be throttled and the worst thing to be blind to.
+  //
+  // A block therefore has to be recognisable in every shape it can arrive in.
+  const BLOCK_FALLBACK_MS = 165000;
+
+  function blockFieldsFrom(node) {
+    if (!node || typeof node !== "object") return null;
+    const code = String(node.errorCode || node.code || "");
+    if (code.includes("ABUSE") || node.abuseStage === "BLOCKED") {
+      return Math.max(0, Number(node.retryAfterMs) || 0) || BLOCK_FALLBACK_MS;
+    }
+    return null;
+  }
+
+  /**
+   * How long we are blocked for, or -1 if we are not.
+   *
+   * `payload` may be a GraphQL error array, a parsed REST error body, or a
+   * bare string answer from the queue API. `status` and `headers` cover the
+   * case where the server says only 403/429 with a Retry-After and no body we
+   * can read.
+   */
+  function readGatewayBlock(payload, { status = 0, headers = null } = {}) {
+    // The queue API's whole vocabulary is one string; "BL" is 비정상 예매 차단.
+    if (payload === "BL") return BLOCK_FALLBACK_MS;
+
     const nodes = Array.isArray(payload) ? payload : [payload];
     for (const node of nodes) {
-      const extensions = node?.extensions;
-      if (!extensions) continue;
-      const code = String(extensions.errorCode || "");
-      if (code.includes("ABUSE") || extensions.abuseStage === "BLOCKED") {
-        return Math.max(0, Number(extensions.retryAfterMs) || 0);
-      }
+      // GraphQL puts it under extensions; REST puts the same fields at the top.
+      const found = blockFieldsFrom(node?.extensions) ?? blockFieldsFrom(node);
+      if (found !== null) return found;
+    }
+
+    if (status === 403 || status === 429) {
+      const retryAfter = Number(headers?.get?.("Retry-After"));
+      // Retry-After is seconds when it is a number at all.
+      return Number.isFinite(retryAfter) && retryAfter > 0
+        ? retryAfter * 1000
+        : BLOCK_FALLBACK_MS;
     }
     return -1;
   }
 
-  function gatewayBlockError(retryAfterMs) {
+  /**
+   * Record a block from wherever it came, and stop everything.
+   *
+   * The endpoint is kept because the one question this session could not answer
+   * from the repo was *which* call had been blocked — the queue or the seat
+   * path. Next time it will say so.
+   */
+  function noteGatewayBlock(retryAfterMs, endpoint) {
+    const until = Date.now() + retryAfterMs;
+    if (until > (seatState.blockedUntil || 0)) {
+      seatState.blockedUntil = until;
+      seatState.blockedEndpoint = String(endpoint || "");
+    }
+    traceCall("blocked", endpoint, { retryAfterMs });
+    return gatewayBlockError(retryAfterMs, endpoint);
+  }
+
+  // How long a block has left, 0 when clear. Read every tick, not only at the
+  // start of a run: a block that arrives mid-watch used to be invisible until
+  // the next 감시 시작, so 취켓팅 polled straight through a lockout for as long
+  // as it was left running — and retrying through one can only extend it.
+  function gatewayBlockRemainingMs() {
+    return Math.max(0, (seatState.blockedUntil || 0) - Date.now());
+  }
+
+  function gatewayBlockError(retryAfterMs, endpoint = "") {
     const seconds = Math.ceil(retryAfterMs / 1000);
     const error = new Error(`GATEWAY_ABUSE_BLOCKED retryAfterMs=${retryAfterMs}`);
     error.gatewayBlockedMs = retryAfterMs;
+    error.blockedEndpoint = String(endpoint || "");
     error.serverMessage =
       `접속이 일시 차단되었습니다 (요청이 너무 잦음). ${seconds}초 후에 다시 시도하세요. ` +
       `차단 중에는 어떤 좌석도 잡을 수 없고, 계속 시도하면 차단이 길어집니다.`;
@@ -5763,7 +5880,8 @@
         pageSelected: selectedSeatCount(),
         consecutiveRejects: seatState.consecutiveRejects || 0,
         captcha: { ...captchaReport },
-        blockedForMs: Math.max(0, (seatState.blockedUntil || 0) - Date.now()),
+        blockedForMs: gatewayBlockRemainingMs(),
+        blockedEndpoint: seatState.blockedEndpoint || "",
         trace: trace.slice(-TRACE_LIMIT),
         // Which build the page is actually running. Without it there is no way
         // to tell a reload that silently failed from a command that did nothing.
@@ -5875,7 +5993,7 @@
     }
 
     // Starting during a gateway block cannot succeed and risks extending it.
-    const blockedFor = (seatState.blockedUntil || 0) - Date.now();
+    const blockedFor = gatewayBlockRemainingMs();
     if (blockedFor > 0 && !probe) {
       const seconds = Math.ceil(blockedFor / 1000);
       seatState.lastError = `접속 차단 중 — ${seconds}초 후에 다시 시도하세요.`;
@@ -6201,6 +6319,22 @@
     while (seatState.attempts < maxAttempts && !seatState.locked && !seatState.stopRequested) {
       if (runWasSuperseded(runGen)) {
         seatState.lastExit = "superseded";
+        break;
+      }
+
+      // Before anything else this tick. A block makes every request fail and
+      // every extra one can lengthen it, so there is nothing to gain by
+      // continuing and something to lose. This used to be checked once, before
+      // the first tick, so a block arriving mid-watch went unnoticed until the
+      // next 감시 시작 and the loop polled through the whole lockout.
+      const blockedNow = gatewayBlockRemainingMs();
+      if (blockedNow > 0) {
+        const seconds = Math.ceil(blockedNow / 1000);
+        const where = seatState.blockedEndpoint ? ` · ${seatState.blockedEndpoint}` : "";
+        seatState.lastExit = "blocked";
+        seatState.lastError =
+          `접속 차단 중 — ${seconds}초 후에 다시 시도하세요.${where}`;
+        updateOverlay(`접속 차단 중<br>${seconds}초 남음${where}`, "error");
         break;
       }
 
@@ -6896,6 +7030,11 @@
         seatErrorDialogVisible,
         unknownBlockingDialogText,
         markSeatTaken,
+        readGatewayBlock,
+        noteGatewayBlock,
+        gatewayBlockRemainingMs,
+        BLOCK_FALLBACK_MS,
+        WAITING_ENDPOINT,
         seatInCooldown,
         sweepTakenCooldowns,
         state: seatState,
@@ -7040,6 +7179,7 @@
         parseSeatStatus,
         readUnselectable,
         readGatewayBlock,
+        BLOCK_FALLBACK_MS,
         looksLikeBookingContext,
         toCandidate,
         numOrNull,

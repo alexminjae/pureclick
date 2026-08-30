@@ -645,8 +645,13 @@ def running_hint(seat: dict[str, Any], message: str) -> str:
     # A gateway block makes every other number meaningless.
     blocked = int(seat.get("blockedForMs") or 0)
     if blocked > 0:
+        # Which call earned it. Until now nothing recorded that, so after the
+        # fact there was no way to tell whether the queue or the seat path had
+        # been throttled — and those need different answers.
+        where = str(seat.get("blockedEndpoint") or "").strip()
+        cause = f" ({where})" if where else ""
         return (
-            f"접속 차단 중 — {blocked // 1000}초 남음. "
+            f"접속 차단 중 — {blocked // 1000}초 남음{cause}. "
             "차단 중에는 좌석을 잡을 수 없고, 계속 시도하면 차단이 길어집니다."
         )
 

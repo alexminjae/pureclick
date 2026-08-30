@@ -112,6 +112,22 @@ class EntryTestReadout(unittest.TestCase):
         render(panel, {"fired": False})
         self.assertEqual(panel.test_result.get(), "")
 
+    def test_an_arm_refused_before_firing_still_says_why(self) -> None:
+        """The case you most need to see, and the one that showed nothing.
+
+        A gateway block refuses the arm *before* it fires, so gating the whole
+        readout on `fired` meant "it did not even try" rendered as silence.
+        """
+        panel = FakePanel()
+        render(panel, {
+            "fired": False,
+            "lastError": "접속 차단 중 — 165초 후에 다시 시도하세요. (/onestop/api/seatStatus)",
+        })
+        text = panel.test_result.get()
+        self.assertIn("접속 차단", text)
+        self.assertIn("/onestop/api/seatStatus", text,
+                      "the endpoint must survive the truncation")
+
     @staticmethod
     def _body(name: str) -> str:
         """The whole function, not a fixed slice of characters.

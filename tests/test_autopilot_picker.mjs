@@ -1401,8 +1401,102 @@ const tests = {
     );
     assert.equal(picker.readGatewayBlock([{ message: "nope" }]), -1);
     assert.equal(picker.readGatewayBlock(null), -1);
-    // Blocked with no countdown given is still blocked.
-    assert.equal(picker.readGatewayBlock([{ extensions: { abuseStage: "BLOCKED" } }]), 0);
+
+    // Blocked with no countdown given is still blocked — and used to return 0,
+    // which sets blockedUntil to a moment already past and lets every loop
+    // carry straight on. A block of unknown length gets the observed one.
+    assert.equal(
+      picker.readGatewayBlock([{ extensions: { abuseStage: "BLOCKED" } }]),
+      picker.BLOCK_FALLBACK_MS,
+    );
+
+    // --- the shapes that used to be invisible ----------------------------
+    //
+    // Only /onestop/gql carries a GraphQL envelope. seatMeta, seatStatus,
+    // block-data, grades and the queue API do not, so a block on any of them
+    // was read as a plain HTTP error and the loop kept asking. seatStatus is
+    // ~4 requests a second for as long as a watch runs.
+
+    // REST: the same fields, at the top level rather than under extensions.
+    assert.equal(
+      picker.readGatewayBlock({ errorCode: "GATEWAY_ABUSE_BLOCKED", retryAfterMs: 165470 }),
+      165470,
+    );
+
+    // The queue API's whole vocabulary is one string. BL is 비정상 예매 차단.
+    assert.equal(picker.readGatewayBlock("BL"), picker.BLOCK_FALLBACK_MS);
+    assert.equal(picker.readGatewayBlock("N"), -1, "no queue is not a block");
+    assert.equal(picker.readGatewayBlock("NP"), -1, "presale auth is not a block");
+
+    // Status alone, when the body says nothing we can read.
+    const headers = (value) => ({ get: (name) => (name === "Retry-After" ? value : null) });
+    assert.equal(picker.readGatewayBlock(null, { status: 429, headers: headers("90") }), 90000);
+    assert.equal(picker.readGatewayBlock(null, { status: 403, headers: headers(null) }),
+                 picker.BLOCK_FALLBACK_MS);
+    assert.equal(picker.readGatewayBlock(null, { status: 500, headers: headers(null) }), -1,
+                 "a server error is not a block");
+    assert.equal(picker.readGatewayBlock(null, { status: 401, headers: headers(null) }), -1,
+                 "logged out is not a block");
+  },
+
+  "a block stops the watch on the next tick, not on the next 감시 시작"() {
+    // The check happened once, before the first tick. A block arriving mid-watch
+    // was invisible until the run was restarted by hand, so 취켓팅 polled through
+    // the whole lockout — and the code's own note says retrying through one can
+    // only extend it. Structural: the loop needs a live page to execute.
+    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const loop = source.slice(source.indexOf("while (seatState.attempts < maxAttempts"));
+    const check = loop.search(/gatewayBlockRemainingMs\(\)/);
+    assert.ok(check >= 0, "the loop must ask whether it is blocked");
+
+    // And ask before it spends anything.
+    for (const [label, pattern] of [
+      ["polling for freed seats", /pollFreedSeats\(/],
+      ["clicking a seat", /selectSeatUnit\(/],
+    ]) {
+      assert.ok(loop.search(pattern) > check,
+                `${label} must not happen while blocked`);
+    }
+  },
+
+  "an arm will not fire while a block is running"() {
+    // The queue path neither set nor checked a block, so a lockout earned by
+    // the seat path let an arm fire straight into it — and every attempt can
+    // push the block past the open, which is the one moment it cannot be
+    // recovered from.
+    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const fn = source.slice(source.indexOf("async function runArmScheduler("));
+    const body = fn.slice(0, fn.indexOf("\n  }\n"));
+    const check = body.search(/gatewayBlockRemainingMs\(\)/);
+    assert.ok(check >= 0, "the scheduler must ask whether it is blocked");
+    assert.ok(body.search(/syncServerClock\(/) > check,
+              "and ask before it starts syncing toward a fire it cannot make");
+  },
+
+  "a block from any endpoint stops everything and says which one"() {
+    // The question this session could not answer from the repo: which call was
+    // blocked, the queue or the seat path. It is recorded now.
+    const { race } = sandbox.window.PureClick;
+    const state = race.state;
+    const before = { until: state.blockedUntil, endpoint: state.blockedEndpoint };
+    try {
+      state.blockedUntil = 0;
+      state.blockedEndpoint = "";
+      const error = race.noteGatewayBlock(165470, "/onestop/api/seatStatus");
+      assert.ok(state.blockedUntil > Date.now() + 160000, "the cooldown is recorded");
+      assert.equal(state.blockedEndpoint, "/onestop/api/seatStatus");
+      assert.equal(error.gatewayBlockedMs, 165470);
+      assert.equal(error.blockedEndpoint, "/onestop/api/seatStatus");
+
+      // A shorter block must not shorten a longer one already running.
+      const far = state.blockedUntil;
+      race.noteGatewayBlock(1000, race.WAITING_ENDPOINT);
+      assert.equal(state.blockedUntil, far, "the longest block wins");
+      assert.equal(state.blockedEndpoint, "/onestop/api/seatStatus", "and keeps its cause");
+    } finally {
+      state.blockedUntil = before.until;
+      state.blockedEndpoint = before.endpoint;
+    }
   },
 
   // Measured on a live seat map: the circles carry onPointerDown/onPointerUp and
@@ -1965,14 +2059,24 @@ const tests = {
     // only reachable from a navigation helper, and the 취켓팅 wait — where a
     // sold-out show spends all its time — returned before anything could clear
     // one. Structural, because the loop needs a live page to execute.
+    // Asserted by order, not by a byte offset. This used to slice the first
+    // 1400 characters of the loop, so adding a comment above the check failed a
+    // working change — the same trap test_panel_entry_test.py fell into with a
+    // 600-byte slice.
     const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
     const loop = source.slice(source.indexOf("while (seatState.attempts < maxAttempts"));
-    const head = loop.slice(0, 1400);
-    assert.match(
-      head,
-      /blockingOverlayNodes\(\)\.length\s*\)\s*dismissBlockingDialogs\(\)/,
-      "every pass of the loop must clear a blocking modal before doing anything else",
-    );
+    const clear = loop.search(/blockingOverlayNodes\(\)\.length\s*\)\s*dismissBlockingDialogs\(\)/);
+    assert.ok(clear >= 0, "the loop must clear a blocking modal at all");
+
+    // Everything that touches the page or the network has to come after it.
+    for (const [label, pattern] of [
+      ["reading the cart", /selectedSeatCount\(\)/],
+      ["polling for freed seats", /pollFreedSeats\(/],
+      ["clicking a seat", /selectSeatUnit\(/],
+    ]) {
+      const at = loop.search(pattern);
+      assert.ok(at > clear, `${label} must not happen before the modal is cleared`);
+    }
   },
 
   "a modal nobody named still gets cleared off the map": async () => {
