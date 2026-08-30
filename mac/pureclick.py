@@ -131,6 +131,11 @@ class PureClickMacApp(tk.Tk):
         self._grade_rows: list[dict] = []
         self._block_rows: list[dict] = []
         self._auto_loaded_code: str | None = None
+        # The code a lookup is currently in flight for. Separate from
+        # _auto_loaded_code, which means "loaded successfully": the panel polls
+        # the page every 500ms, so without this a retry would re-fire the fetch
+        # on every tick while the first one is still running.
+        self._fetching_code: str | None = None
         self._followed_round: tuple | None = None
         self._zones: tk.Toplevel | None = None
         self._zone_canvas: tk.Canvas | None = None
@@ -653,7 +658,9 @@ class PureClickMacApp(tk.Tk):
         try:
             code = parse_goods_code(target)
             self.goods_code.set(code)
-            self._auto_loaded_code = code
+            # In flight, not loaded — the worker started two lines above. Marking
+            # it loaded here would suppress the retry if that lookup fails.
+            self._fetching_code = code
             self.browser.navigate(f"https://nol.yanolja.com/ticket/products/{code}")
             self._note(f"브라우저를 {code} 공연 페이지로 이동합니다")
         except Exception as exc:
@@ -664,7 +671,11 @@ class PureClickMacApp(tk.Tk):
             catalog = fetch_show_catalog(target)
         except Exception as exc:  # noqa: BLE001 - any failure is reported in the UI
             self._ui(self.status.set, f"조회 실패: {exc}")
+            self._ui(self._note, f"공연 정보를 못 가져왔습니다: {exc}", error=True)
             return
+        finally:
+            # Whichever way it ended, the next poll may try again.
+            self._fetching_code = None
         self._ui(self._apply_show_info, catalog.to_mapping())
 
     def _apply_show_info(self, info: dict) -> None:
@@ -1669,7 +1680,13 @@ class PureClickMacApp(tk.Tk):
             return
 
         if code != self._auto_loaded_code:
-            self._auto_loaded_code = code
+            if code == self._fetching_code:
+                return
+            # _auto_loaded_code is claimed only once the lookup succeeds, in
+            # _apply_show_info. Setting it here meant one failed fetch left the
+            # panel at "공연 정보를 가져오는 중…" with every button disabled and
+            # nothing ever trying again.
+            self._fetching_code = code
             self._followed_round = None
             self._remain_refresh_key = None
             self.goods_code.set(code)
@@ -1744,6 +1761,8 @@ class PureClickMacApp(tk.Tk):
             step, hint = 4, "좌석맵 도착 — [감시 시작]을 누르면 고른 범위를 지켜봅니다."
         elif self._sale_open():
             step, hint = 3, "예매 창에서 로그인 후 [예매하기]를 눌러 좌석맵으로 이동하세요."
+        elif self._open_time() is None:
+            step, hint = 2, "티켓 오픈 시각을 알 수 없습니다 — 위에 직접 입력하고 [대기 시작]을 누르세요."
         else:
             step, hint = 2, "판매 전입니다. 예매 창에서 로그인해 두고 [대기 시작]을 누르세요."
 
@@ -1765,16 +1784,28 @@ class PureClickMacApp(tk.Tk):
             self.open_note.set("아직 안 열린 공연 — 열리는 순간 대기열을 먼저 잡습니다.")
 
 
-    def _sale_open(self) -> bool:
-        """True when the ticket-open time has already passed."""
-        info = self._show_info_data or {}
-        raw = str(info.get("ticket_open_kst") or "")
+    def _open_time(self) -> datetime | None:
+        """When this show goes on sale, or None if we do not know."""
+        raw = str((self._show_info_data or {}).get("ticket_open_kst") or "")
         if not raw:
-            return True
+            return None
         try:
-            opens = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
+            return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
         except ValueError:
-            return True
+            return None
+
+    def _sale_open(self) -> bool:
+        """True when the ticket-open time has already passed.
+
+        An unknown open time is NOT "already open". It used to return True in
+        both of those cases, which read as "no waiting needed" and disabled
+        대기 시작 — the exact opposite of what an unknown time means for someone
+        sitting in front of a show that has not opened. And the panel lets you
+        type the time by hand, so locking the button was never necessary.
+        """
+        opens = self._open_time()
+        if opens is None:
+            return False
         return datetime.now(KST) >= opens
 
     @staticmethod
