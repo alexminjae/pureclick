@@ -2740,9 +2740,16 @@
     }
 
     const before = collectSeatCircles().length;
-    // A mapping that has already worked on this show is tried first and alone.
-    const order = seatState.blockEntryHypothesis
-      ? [seatState.blockEntryHypothesis]
+    // A mapping that has already worked is tried *first*, not alone.
+    //
+    // It used to be the whole list, and it is never cleared — so after one
+    // venue taught it "viewbox-fit", a different venue whose mapping is
+    // "extent-to-image" got one wrong click, the full settle wait, and a
+    // failure, with the two mappings that would have worked never tried. The
+    // 구역 simply never opened on the second show of a session.
+    const learned = seatState.blockEntryHypothesis;
+    const order = learned
+      ? [learned, ...BLOCK_ENTRY_HYPOTHESES.filter((h) => h !== learned)]
       : BLOCK_ENTRY_HYPOTHESES;
 
     for (const hypothesis of order) {
@@ -3422,6 +3429,9 @@
     seatState.lastBlocks = [];
     seatState.showCatalog = null;
     seatState.blockEntered = "";
+    // Learned from the venue we just left, and venues differ. Keeping it made
+    // the next show start by trying the wrong mapping.
+    seatState.blockEntryHypothesis = "";
     traceCall("roundChanged", blocksKey, { was });
     return true;
   }
@@ -6336,13 +6346,19 @@
             `감시할 구역 ${target.selfDefineBlock || target.blockKey} 여는 중…`,
             "info",
           );
-          if (openNow) await leaveBlockToVenue();
-          const entered = await enterBlockForSeats(target);
-          traceCall("prepareWatch", target.blockKey, entered);
-          if (entered.ok) await fitBlockToView();
+          // Through noteMapMove, so the panel reports what this actually
+          // costs. These were the one set of map moves not being measured, and
+          // they are the ones you wait on.
+          if (openNow) await noteMapMove("leaveBlock", openNow, () => leaveBlockToVenue());
+          const entered = await noteMapMove("enterBlock", target.blockKey, () =>
+            enterBlockForSeats(target),
+          );
+          if (entered.ok) {
+            await noteMapMove("fitBlock", target.blockKey, () => fitBlockToView());
+          }
         } else if (target) {
           // Already in the right 구역 — make sure all of it is mounted.
-          await fitBlockToView();
+          await noteMapMove("fitBlock", target.blockKey, () => fitBlockToView());
         }
       } catch (error) {
         // Preparation is an optimisation; the run still works without it.

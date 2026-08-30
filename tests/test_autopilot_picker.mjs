@@ -1581,6 +1581,53 @@ const tests = {
     assert.match(reset, /catchCursor = 0/, "and the sweep starts from the top");
   },
 
+  // 감시할 구역 여는 중… is deliberate: a freed seat that is not drawn cannot be
+  // clicked, so the run stands in the 구역 before a cancellation arrives rather
+  // than travelling there at the worst possible moment. But the entry itself
+  // had a trap.
+  "a learned block-entry mapping is tried first, not alone"() {
+    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const fn = source.slice(source.indexOf("async function enterBlockForSeats("));
+    const body = fn.slice(0, fn.indexOf("\n  }\n"));
+
+    // It used to be `[learned]` — the whole list. Venues differ, so a mapping
+    // learned on one show meant the next got one wrong click, the full settle
+    // wait, and a failure, with the mappings that would have worked untried.
+    assert.match(body, /\.\.\.BLOCK_ENTRY_HYPOTHESES\.filter/,
+                 "the other mappings must remain reachable after a learned one misses");
+    const order = body.slice(body.indexOf("const order ="), body.indexOf("for (const hypothesis"));
+    assert.ok(order.indexOf("learned") < order.indexOf("BLOCK_ENTRY_HYPOTHESES"),
+              "and the learned one still goes first");
+  },
+
+  "a change of venue forgets the mapping learned on the last one"() {
+    const { race } = sandbox.window.PureClick;
+    const state = race.state;
+    const before = { key: state.blocksKey, hypothesis: state.blockEntryHypothesis };
+    try {
+      state.blocksKey = "SHOW-A:017";
+      state.blockEntryHypothesis = "viewbox-fit";
+      race.adoptBlocksKey("SHOW-B:022");
+      assert.equal(state.blockEntryHypothesis, "",
+                   "a mapping learned on another venue must not steer this one");
+    } finally {
+      state.blocksKey = before.key;
+      state.blockEntryHypothesis = before.hypothesis;
+    }
+  },
+
+  "opening the watch 구역 is measured like every other map move"() {
+    // This is the wait you actually sit through, and it was the one set of map
+    // moves not going through noteMapMove — so the panel's travel costs
+    // excluded the only one you notice.
+    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const prep = source.slice(source.indexOf("감시할 구역 "), source.indexOf("while (seatState.attempts"));
+    for (const move of ["leaveBlock", "enterBlock", "fitBlock"]) {
+      assert.match(prep, new RegExp(`noteMapMove\\("${move}"`),
+                   `${move} during watch startup must be measured`);
+    }
+  },
+
   "a deliberate press clears a stale seat lock"() {
     const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
     const fn = source.slice(source.indexOf("async function runSeatAutopilot("));
