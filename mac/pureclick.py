@@ -1335,6 +1335,10 @@ class PureClickMacApp(tk.Tk):
         self._trigger_state = None
 
     def arm(self, *, dry_run: bool = False) -> None:
+        # Acknowledge the press on the spot. Everything after this happens on a
+        # worker thread and the first thing it does takes ~2s, so without this
+        # the button looks inert for long enough to be pressed again.
+        self.status.set("예약 준비 중…")
         self._start_worker(lambda: self._arm_worker(dry_run=dry_run))
 
     def _bump_test_time(self) -> None:
@@ -1396,8 +1400,18 @@ class PureClickMacApp(tk.Tk):
         if problem:
             self._note(problem, error=True)
             return
+        # Read the picked time here, on the UI thread. Inside the lambda it ran
+        # on the worker, reading tk variables off the main thread — and a bad
+        # value surfaced from a background exception rather than as an answer to
+        # the press.
+        try:
+            wanted = self._test_time_text()
+        except Exception as exc:  # noqa: BLE001 - reported to the user
+            self._note(str(exc), error=True)
+            return
+        self.status.set("테스트 준비 중…")
         self._start_worker(
-            lambda: self._arm_worker(dry_run=False, target_text=self._test_time_text(), test=True)
+            lambda: self._arm_worker(dry_run=False, target_text=wanted, test=True)
         )
 
     def _test_time_text(self) -> str:
@@ -1416,11 +1430,21 @@ class PureClickMacApp(tk.Tk):
             raise PureClickError("시각이 올바르지 않습니다")
         return f"{date_text} {hour:02d}:{minute:02d}:{second:02d}"
 
-    def _start_worker(self, target) -> None:
+    def _start_worker(self, target) -> bool:
+        """Run `target` in the background, or say why it will not.
+
+        This returned silently when a worker was already alive — and one always
+        is for the first couple of seconds after launch, because the startup
+        clock sync shares this slot and takes ~2s. A press in that window did
+        nothing whatsoever: no thread, no message, no error. "대기 시작 doesn't
+        even do anything" was often exactly that.
+        """
         if self.worker and self.worker.is_alive():
-            return
+            self._note("이전 작업이 끝나는 중입니다 — 잠시 후 다시 눌러 주세요.", error=True)
+            return False
         self.worker = threading.Thread(target=target, daemon=True)
         self.worker.start()
+        return True
 
     def _sync_worker(self) -> None:
         try:
@@ -1854,10 +1878,14 @@ class PureClickMacApp(tk.Tk):
 
     def _arm_worker(self, *, dry_run: bool, target_text: str | None = None, test: bool = False) -> None:
         try:
+            # Read the target first. Syncing takes ~2s, and spending it before
+            # discovering the time field is empty is how a bad press looked like
+            # a dead button rather than a mistake.
+            wanted = target_text or self._target_time_text()
             self._ui(self.status.set, "시각 동기화…")
             result = self._sync_now()
             target_unix = parse_target_time(
-                target_text or self._target_time_text(),
+                wanted,
                 self.clock.server_time_unix(),
                 target_tz=KST,
             )
@@ -1881,12 +1909,29 @@ class PureClickMacApp(tk.Tk):
             self._ui(self._note, f"오류: {exc}", error=True)
 
     def _target_time_text(self) -> str:
+        """The 티켓 오픈 fields, in the shape parse_target_time accepts.
+
+        Every failure here used to escape as a raw ValueError — pressing
+        대기 시작 with the fields empty reported
+        "time data '' does not match format '%Y-%m-%d'", in English, after a
+        two-second wait. The panel now enables this button when the open time is
+        unknown precisely so it can be typed, which makes an empty field the
+        expected case rather than an odd one.
+        """
         date_text = self.target_date.get().strip()
         time_text = self.target_time.get().strip()
-        datetime.strptime(date_text, "%Y-%m-%d")
+        if not date_text or not time_text:
+            raise PureClickError("티켓 오픈 날짜와 시각을 입력하세요 (예: 2026-09-05 20:00:00)")
+        try:
+            datetime.strptime(date_text, "%Y-%m-%d")
+        except ValueError:
+            raise PureClickError(f"날짜 형식이 올바르지 않습니다: {date_text} (예: 2026-09-05)") from None
         if len(time_text.split(":")) == 2:
             time_text += ":00"
-        hour, minute, second = time_text.split(":")
+        parts = time_text.split(":")
+        if len(parts) != 3:
+            raise PureClickError(f"시각 형식이 올바르지 않습니다: {time_text} (예: 20:00:00)")
+        hour, minute, second = parts
         for part, label in ((hour, "시"), (minute, "분"), (second, "초")):
             if not part.isdigit():
                 raise PureClickError(f"{label}는 숫자여야 합니다")

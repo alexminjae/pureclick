@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.clock import KST  # noqa: E402
+from core.clock import KST, PureClickError  # noqa: E402
 
 _SRC = (ROOT / "mac" / "pureclick.py").read_text(encoding="utf-8")
 _CLS = next(
@@ -37,7 +37,8 @@ def _methods(*names):
     assert len(body) == len(names), f"missing: {set(names) - {getattr(n, 'name', None) for n in body}}"
     module = ast.Module(body=body, type_ignores=[])
     ast.fix_missing_locations(module)
-    ns: dict = {"datetime": datetime, "timedelta": timedelta, "KST": KST}
+    ns: dict = {"datetime": datetime, "timedelta": timedelta, "KST": KST,
+                "PureClickError": PureClickError}
     exec(compile(module, "<panel>", "exec"), ns)  # noqa: S102 - our own source
     return ns
 
@@ -141,6 +142,86 @@ class LookupRetryTest(unittest.TestCase):
         self.assertIn("_fetching_code", follow)
         self.assertIn("_fetching_code = None", self._body("_fetch_show_worker"),
                       "and the claim must be released however the worker ends")
+
+
+class ArmPressTest(unittest.TestCase):
+    """Pressing 대기 시작 must always do something visible.
+
+    Three ways it could look inert, all of them real:
+
+    - `_start_worker` returned silently while another worker was alive, and one
+      always is for the first ~2s after launch because the startup clock sync
+      shares that slot. No thread, no message, no error.
+    - The clock was synced *before* the target time was read, so an empty field
+      reported ~2 seconds after the press.
+    - The report was a raw Python ValueError in English:
+      "time data '' does not match format '%Y-%m-%d'".
+    """
+
+    @staticmethod
+    def _body(name: str) -> str:
+        fn = next(n for n in _CLS.body if getattr(n, "name", None) == name)
+        return ast.get_source_segment(_SRC, fn) or ""
+
+    def test_a_busy_panel_says_so_instead_of_swallowing_the_press(self) -> None:
+        body = self._body("_start_worker")
+        self.assertIn("_note", body, "a refused press must be reported")
+        self.assertIn("return False", body, "and the caller must be able to tell")
+
+    def test_the_press_is_acknowledged_before_the_worker_starts(self) -> None:
+        self.assertIn("self.status.set", self._body("arm"))
+
+    def test_the_target_is_read_before_the_clock_is_synced(self) -> None:
+        body = self._body("_arm_worker")
+        wanted = body.index("_target_time_text()")
+        synced = body.index("self._sync_now()")
+        self.assertLess(wanted, synced,
+                        "validate the time before spending two seconds on the clock")
+
+    def test_every_time_error_is_readable(self) -> None:
+        build = _methods("_target_time_text")["_target_time_text"]
+
+        class _Field:
+            def __init__(self, value: str) -> None:
+                self.value = value
+
+            def get(self) -> str:
+                return self.value
+
+        class _P:
+            pass
+
+        cases = {
+            ("", ""): "입력하세요",
+            ("2026-09-05", ""): "입력하세요",
+            ("5 Sept", "20:00"): "날짜 형식",
+            ("2026-09-05", "저녁"): "시각 형식",
+        }
+        for (date, clock), expected in cases.items():
+            panel = _P()
+            panel.target_date, panel.target_time = _Field(date), _Field(clock)
+            with self.assertRaises(Exception) as caught:
+                build(panel)
+            message = str(caught.exception)
+            self.assertIn(expected, message, f"{date!r} {clock!r} -> {message}")
+            self.assertNotIn("does not match format", message, "no raw ValueError text")
+
+    def test_a_valid_time_still_parses(self) -> None:
+        build = _methods("_target_time_text")["_target_time_text"]
+
+        class _Field:
+            def __init__(self, value: str) -> None:
+                self.value = value
+
+            def get(self) -> str:
+                return self.value
+
+        class _P:
+            pass
+
+        panel = _P()
+        panel.target_date, panel.target_time = _Field("2026-09-05"), _Field("20:00")
+        self.assertEqual(build(panel), "2026-09-05 20:00:00.000")
 
 
 if __name__ == "__main__":
