@@ -243,7 +243,10 @@
   // loop is built to retry across the boundary, so being early is the point:
   // the first request the server is willing to accept is then ours.
   const ENTRY_LEAD_MS = 400;
-  const CATCH_MIN_POLL_MS = 200;
+  // Measured: seatStatus answers in 29ms for two blocks, so a 200ms floor left
+  // 87% of every tick asleep. The site's own page bursts at roughly 460
+  // requests a second when it opens a 구역; this sustains about eight.
+  const CATCH_MIN_POLL_MS = 100;
   const CATCH_MAX_REQUESTS_PER_TICK = 1;
   const CATCH_LIVE_TRIES = 8;
   // 좌석 잡기 gives up after this many refusals in a row. 취켓팅 keeps watching,
@@ -5609,6 +5612,50 @@
     }
   }
 
+  // How many seatStatus calls to have in the air at once.
+  //
+  // Six, because that is what the site's own page does: opening a 구역 fires six
+  // seatStatus requests inside 13ms — measured from a recorded session. A width
+  // the gateway sees from its own client is a defensible one; seventeen at once,
+  // which a whole-venue burst would otherwise reach, is a signature nothing has
+  // shown to be normal.
+  const SWEEP_CONCURRENCY = 6;
+
+  /**
+   * Fetch every block's bitmap, several requests at a time, in key order.
+   *
+   * This awaited each request in turn. With the ordinary one-request budget that
+   * costs nothing, but a burst across a 34-block venue became 17 round trips
+   * back to back — about 490ms for work the network can do in one.
+   *
+   * Two things are load-bearing here:
+   *
+   * - allSettled, not all: one refused block must not lose the other 33.
+   * - Alignment. The caller matches masks to keys positionally, so every pair
+   *   contributes exactly as many slots as it had keys whether it succeeded or
+   *   not. Collapsing the failures instead would shift every later mask onto the
+   *   wrong block — silently, and it would read as seats freeing in places they
+   *   did not.
+   */
+  async function fetchMasksFor(initData, batch) {
+    const pairs = chunk(batch, 2);
+    const masks = [];
+    for (let at = 0; at < pairs.length; at += SWEEP_CONCURRENCY) {
+      const wave = pairs.slice(at, at + SWEEP_CONCURRENCY);
+      const settled = await Promise.allSettled(
+        wave.map((pair) => fetchSeatStatus(initData, pair)),
+      );
+      settled.forEach((result, index) => {
+        const parsed =
+          result.status === "fulfilled" ? parseSeatStatus(result.value) : [];
+        for (let slot = 0; slot < wave[index].length; slot += 1) {
+          masks.push(parsed[slot] || null);
+        }
+      });
+    }
+    return masks;
+  }
+
   async function pollFreedSeats(initData, blockKeys, config, { burst = false } = {}) {
     if (!blockKeys.length) return [];
     if (!seatState.lastBlocks?.length) {
@@ -5665,10 +5712,7 @@
     seatState.polledBlocks = new Set(keys.map(String));
 
     const freed = [];
-    const masks = [];
-    for (const pair of chunk(batch, 2)) {
-      masks.push(...parseSeatStatus(await fetchSeatStatus(initData, pair)));
-    }
+    const masks = await fetchMasksFor(initData, batch);
     batch.forEach((key, index) => {
       freed.push(...applyBlockMask(byKey.get(String(key)), masks[index] || null, config));
     });
@@ -7132,6 +7176,8 @@
         ensureSeatRendered,
         applyBlockMask,
         clickableAmong,
+        fetchMasksFor,
+        SWEEP_CONCURRENCY,
         freeSeatsByGrade,
         triggerFired,
         aimForCandidates,

@@ -710,18 +710,102 @@ const tests = {
     const picked = picker.collectFromBlocks(withMask, {});
     assert.deepEqual(picked.map((s) => s.seatNo), ["3"]);
     assert.equal(picker.countFree(withMask), 1);
-    // The watch's request budget, not a magic number. seatStatus takes two
-    // blocks per call, and the gateway answers GATEWAY_ABUSE_BLOCKED with a
-    // ~165s lockout if pushed — so what must hold is requests per second, and
-    // sweep time is allowed to follow from how much is being watched.
-    const perSecond =
+    assert.equal(picker.CATCH_LIVE_TRIES, 8);
+  },
+
+  // Pulled out of the sold-out test above, where a rate ceiling was the last
+  // thing anyone changing the rate would have looked at.
+  // A burst across a 34-block venue was 17 round trips back to back — about
+  // 490ms for work the network can do in one. The site's own page fires six
+  // seatStatus requests inside 13ms, so six concurrent is a width it plainly
+  // accepts.
+  "a sweep issues its requests together, not one after another"() {
+    const { race } = sandbox.window.PureClick;
+    const originalFetch = sandbox.fetch;
+    const events = [];
+    let open = 0;
+    let peak = 0;
+    sandbox.fetch = async (url) => {
+      const keys = [...String(url).matchAll(/blockKeys=([^&]+)/g)]
+        .map((m) => decodeURIComponent(m[1]));
+      open += 1;
+      peak = Math.max(peak, open);
+      events.push({ kind: "start", keys });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      open -= 1;
+      return { ok: true, status: 200, json: async () => keys.map(() => "0") };
+    };
+    const initData = { goods: { goodsCode: "G", placeCode: "P" }, playSeq: { playSeq: "001" } };
+    const batch = Array.from({ length: 12 }, (_, i) => `001:${String(i + 1).padStart(3, "0")}`);
+    return race
+      .fetchMasksFor(initData, batch)
+      .then((masks) => {
+        // Overlap is the claim, not wall-clock total: a serial sweep can never
+        // have two in flight at once.
+        assert.ok(peak > 1, `requests must overlap; peak in flight was ${peak}`);
+        assert.ok(peak <= race.SWEEP_CONCURRENCY,
+                  `never wider than the page's own burst; peaked at ${peak}`);
+        assert.equal(masks.length, batch.length, "one mask slot per requested key");
+      })
+      .finally(() => {
+        sandbox.fetch = originalFetch;
+      });
+  },
+
+  "one refused block does not shift every later block's bitmap"() {
+    // The caller matches masks to keys positionally. Collapsing a failure
+    // instead of keeping its slots would apply one block's bitmap to another —
+    // silently, and it would read as seats freeing where they had not.
+    const { race } = sandbox.window.PureClick;
+    const originalFetch = sandbox.fetch;
+    sandbox.fetch = async (url) => {
+      const keys = [...String(url).matchAll(/blockKeys=([^&]+)/g)]
+        .map((m) => decodeURIComponent(m[1]));
+      // The middle pair refuses.
+      if (keys.includes("001:003")) throw new Error("HTTP 500");
+      return { ok: true, status: 200, json: async () => keys.map((k) => (k === "001:005" ? "8" : "0")) };
+    };
+    const initData = { goods: { goodsCode: "G", placeCode: "P" }, playSeq: { playSeq: "001" } };
+    const batch = ["001:001", "001:002", "001:003", "001:004", "001:005", "001:006"];
+    return race
+      .fetchMasksFor(initData, batch)
+      .then((masks) => {
+        assert.equal(masks.length, batch.length, "the failed pair keeps its slots");
+        assert.equal(masks[2], null, "001:003 has no bitmap");
+        assert.equal(masks[3], null, "nor its partner");
+        // The one seat that is free must still land on 001:005, not on 001:003.
+        assert.ok(masks[4] && masks[4][0] === true,
+                  "001:005's bitmap must stay on 001:005");
+        assert.ok(masks[5] && masks[5][0] === false);
+      })
+      .finally(() => {
+        sandbox.fetch = originalFetch;
+      });
+  },
+
+  "the watch's sustained request rate stays inside its budget"() {
+    // The gateway answers GATEWAY_ABUSE_BLOCKED with a ~165s lockout, so what
+    // has to hold is requests per second; sweep time is allowed to follow from
+    // how much is being watched.
+    //
+    // This arithmetic uses the sleep alone, so it is a deliberate *over*
+    // estimate: the real period is the sleep plus the request, measured at 29ms
+    // for two blocks, which puts a 100ms floor at about 7.8/s rather than 10.
+    const ceiling =
       (picker.CATCH_MAX_REQUESTS_PER_TICK * 1000) / picker.CATCH_MIN_POLL_MS;
     assert.ok(
-      perSecond <= 6,
-      `polling at ${perSecond}/s risks a 165s lockout; keep it at or under 6/s`,
+      ceiling <= 10,
+      `polling at up to ${ceiling}/s risks a 165s lockout; keep the ceiling at 10/s`,
     );
     assert.ok(picker.CATCH_MIN_POLL_MS >= 100, "and never hammer below 100ms");
-    assert.equal(picker.CATCH_LIVE_TRIES, 8);
+
+    // The evidence for that ceiling, from a recorded session: the site's own
+    // page fires six seatStatus requests inside 13ms when it opens a 구역. A
+    // burst is not a steady state, which is why the sustained rate stays two
+    // orders of magnitude below it — but it is why six concurrent is a width
+    // the gateway demonstrably accepts.
+    assert.equal(sandbox.window.PureClick.race.SWEEP_CONCURRENCY, 6,
+                 "match the page's own observed burst width, not more");
   },
 
   // The post-selection modal is worded several ways. Reported live and

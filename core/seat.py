@@ -635,10 +635,10 @@ CAPTCHA_LABELS = {
     "timeout": "보안문자 인식 무응답 — 예매 창에서 직접 입력하세요",
 }
 
-# The watch's own tick, used only as a fallback until the page reports the
-# one it actually measured. A tick is the sleep plus the request, and
-# seatStatus measures 58ms, so 200 alone understates every sweep.
-CATCH_TICK_MS = 200
+# The watch's own sleep, used only as a fallback until the page reports the tick
+# it actually measured. A tick is the sleep plus the request — seatStatus
+# measures 29ms for two blocks — so this alone understates every sweep.
+CATCH_TICK_MS = 100
 
 def running_hint(seat: dict[str, Any], message: str) -> str:
     """The one line worth reading while it runs."""
