@@ -19,6 +19,7 @@ from core.seat import (
     map_move_lines,
     CATCH_TICK_MS,
     running_hint,
+    waiting_log_lines,
     seat_order_lines,
     select_seat_unit,
 )
@@ -476,6 +477,53 @@ class RunningHintTest(unittest.TestCase):
         # It is rendered on every poll, including before anything has happened.
         self.assertIsInstance(running_hint({}, "대기 중"), str)
         self.assertIsInstance(running_hint({}, ""), str)
+
+
+class WaitingLogTest(unittest.TestCase):
+    """What the queue endpoint said either side of the open.
+
+    The one thing nobody has observed is what `/waiting` returns *before* a show
+    opens. If it stays unusable until the flip, polling across the boundary is
+    right and only the density is in question. If it hands out a queue URL
+    early, then arriving at the open is already too late and the strategy has to
+    move earlier. Those are opposite conclusions and one recorded open decides.
+    """
+
+    @staticmethod
+    def _log(n: int = 20, flip_at: int = 15) -> list[dict]:
+        rows = [{"offsetMs": (i - flip_at) * 20, "outcome": "(빈 응답)", "ms": 11}
+                for i in range(n)]
+        rows[flip_at]["outcome"] = "대기열 queue.interpark.com"
+        return rows
+
+    def test_it_centres_on_the_flip_not_the_tail(self) -> None:
+        # A 15-second window at 20ms is 750 entries; showing the last twelve
+        # would miss the only ones that matter.
+        lines = waiting_log_lines({"waitingLog": self._log(n=200, flip_at=150)})
+        self.assertTrue(any("대기열" in line and "←" in line for line in lines),
+                        "the flip must be visible")
+        self.assertLessEqual(len(lines), 14, "and the readout stays short")
+
+    def test_offsets_are_signed_against_the_open(self) -> None:
+        lines = waiting_log_lines({"waitingLog": self._log()})
+        body = "\n".join(lines)
+        self.assertIn("-0.", body, "requests before the open")
+        self.assertIn("+0.", body, "and after it")
+
+    def test_the_total_is_reported_even_when_trimmed(self) -> None:
+        lines = waiting_log_lines({"waitingLog": self._log(n=200, flip_at=150)})
+        self.assertIn("200회", lines[0], "how many attempts it really took")
+
+    def test_no_flip_still_shows_the_last_attempts(self) -> None:
+        # The case where it never opened: the tail is the evidence.
+        rows = [{"offsetMs": i * 80, "outcome": "(빈 응답)", "ms": 11} for i in range(50)]
+        lines = waiting_log_lines({"waitingLog": rows})
+        self.assertGreater(len(lines), 1)
+        self.assertNotIn("←", "\n".join(lines))
+
+    def test_nothing_recorded_renders_nothing(self) -> None:
+        for arm in ({}, {"waitingLog": []}, {"waitingLog": "nonsense"}):
+            self.assertEqual(waiting_log_lines(arm), [], arm)
 
 
 if __name__ == "__main__":

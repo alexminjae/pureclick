@@ -318,6 +318,8 @@
     fired: false,
     lastError: "",
     waitingUrl: "",
+    // Every /waiting attempt with its offset from the target — see acquireWaitingUrl.
+    waitingLog: [],
     reentryTries: 0,
     // What the last entry actually did, so a rehearsal has something to show.
     // fireEntry already measured the lateness and then discarded it.
@@ -1614,7 +1616,50 @@
     return target - ENTRY_LEAD_MS / 1000;
   }
 
-  async function acquireWaitingUrl(arm, { leadMs = ENTRY_LEAD_MS, intervalMs = 80, windowMs = 15000 } = {}) {
+  /**
+   * How hard to ask, and when.
+   *
+   * Measured: the queue endpoint answers in 11ms on a warm connection, and the
+   * old flat 80ms interval left ~69ms of every cycle idle — so the show could
+   * open and we would not notice for up to 80ms, 40ms on average. But asking
+   * hard for the whole 15s window is 50 requests a second against the gateway
+   * that answers GATEWAY_ABUSE_BLOCKED with a ~165s lockout, at the one moment
+   * a lockout cannot be recovered from.
+   *
+   * So the density goes where it buys something. Before the open the answer
+   * cannot be yes, and those requests exist only to keep the connection warm
+   * and prove the session is good while there is still time to react.
+   */
+  const WAITING_POLL_SHAPE = [
+    // [from ms relative to target, until ms, interval ms]
+    [-Infinity, -100, 100],   // can't succeed yet — stay cheap
+    [-100, 600, 20],          // the window that decides the position
+    [600, Infinity, 80],      // it did not open on time; settle down
+  ];
+
+  function waitingIntervalAt(offsetMs, shape = WAITING_POLL_SHAPE) {
+    for (const [from, until, interval] of shape) {
+      if (offsetMs >= from && offsetMs < until) return interval;
+    }
+    return shape[shape.length - 1][2];
+  }
+
+  /**
+   * Repeatedly ask for a queue slot across the open boundary.
+   *
+   * A single perfectly-timed request is fragile: a clock error of a few tens of
+   * milliseconds, one dropped packet, or the backend flipping to "open" a beat
+   * late all cost the slot. Starting early and retrying means the first request
+   * the server is willing to accept is ours, without depending on hitting one
+   * exact instant.
+   *
+   * Every attempt is recorded with its offset from the target, because what
+   * this endpoint returns *before* a show opens has never been observed. If it
+   * hands out a queue URL early, then arriving at T is already too late and the
+   * whole strategy moves earlier — and the log is what settles that rather than
+   * another guess.
+   */
+  async function acquireWaitingUrl(arm, { leadMs = ENTRY_LEAD_MS, windowMs = 15000, shape } = {}) {
     const target = Number(arm.target_server_unix) || serverTimeUnix();
     const startAt = target - leadMs / 1000;
     const giveUpAt = target + windowMs / 1000;
@@ -1625,13 +1670,18 @@
       await sleep(Math.min(20, waitMs - 4));
     }
 
+    armState.waitingLog = [];
     let attempts = 0;
     let lastError = null;
     while (serverTimeUnix() < giveUpAt) {
       attempts += 1;
+      const sentOffsetMs = Math.round((serverTimeUnix() - target) * 1000);
       const startedPerf = performance.now();
+      let outcome = "";
       try {
         const answer = await fetchWaitingUrl(arm);
+        outcome = describeWaitingAnswer(answer);
+        noteWaitingAttempt(sentOffsetMs, outcome, performance.now() - startedPerf);
         if (WAITING_TERMINAL.test(String(answer))) {
           armState.waitingAttempts = attempts;
           return answer;
@@ -1644,16 +1694,49 @@
         }
       } catch (error) {
         lastError = error;
+        noteWaitingAttempt(sentOffsetMs, `오류 ${String(error).slice(0, 40)}`,
+                           performance.now() - startedPerf);
       }
       const elapsed = performance.now() - startedPerf;
       if (attempts % 12 === 0) {
         updateOverlay(`대기열 요청 ${attempts}회 재시도…`, "info");
       }
-      await sleep(Math.max(0, intervalMs - elapsed));
+      const interval = waitingIntervalAt((serverTimeUnix() - target) * 1000, shape);
+      await sleep(Math.max(0, interval - elapsed));
     }
     armState.waitingAttempts = attempts;
     if (lastError) throw lastError;
     return null;
+  }
+
+  // What came back, short enough to sit in a log line. The distinction that
+  // matters is "nothing usable yet" versus "a queue URL" — those are the two
+  // states whose boundary we are trying to find.
+  function describeWaitingAnswer(answer) {
+    if (answer === null || answer === undefined || answer === "") return "(빈 응답)";
+    const text = String(answer);
+    if (/^https?:\/\//i.test(text)) {
+      try {
+        return `대기열 ${new URL(text).host}`;
+      } catch (error) {
+        return "대기열 URL";
+      }
+    }
+    if (text === "N") return "N (대기열 없음)";
+    if (text === "NP") return "NP (선예매 인증 필요)";
+    if (text === "BL") return "BL (차단)";
+    return text.slice(0, 40);
+  }
+
+  const WAITING_LOG_LIMIT = 40;
+
+  function noteWaitingAttempt(offsetMs, outcome, ms) {
+    const log = armState.waitingLog;
+    if (!log) return;
+    log.push({ offsetMs, outcome, ms: Math.round(ms) });
+    // Keep the boundary, not the tail: the interesting entries are the ones
+    // around the flip, and a 15s window at 20ms would otherwise bury them.
+    if (log.length > WAITING_LOG_LIMIT) log.splice(0, log.length - WAITING_LOG_LIMIT);
   }
 
   async function fireEntry(arm) {
@@ -6780,6 +6863,11 @@
         stagePoint,
         ENTRY_LEAD_MS,
         armEntryStartUnix,
+        waitingIntervalAt,
+        WAITING_POLL_SHAPE,
+        describeWaitingAnswer,
+        noteWaitingAttempt,
+        WAITING_LOG_LIMIT,
         sampledRoundKey,
         pollFreedSeats,
         liveSeatIndex,

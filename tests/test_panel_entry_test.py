@@ -14,10 +14,15 @@ so a run aimed at the wrong one silently finds nothing. A rehearsal that prints
 from __future__ import annotations
 
 import ast
+import sys
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from datetime import datetime  # noqa: E402
 
 
 def _load(name: str):
@@ -27,7 +32,19 @@ def _load(name: str):
     fn = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == name)
     module = ast.Module(body=[fn], type_ignores=[])
     ast.fix_missing_locations(module)
-    ns: dict = {}
+    # The renderer calls into core/seat.py; the extracted function needs those
+    # names in its globals or it raises NameError the moment a log is present.
+    from datetime import datetime, timedelta
+
+    from core.clock import KST, PureClickError
+    from core.seat import waiting_log_lines
+
+    # A function lifted out of its module has none of that module's globals.
+    ns: dict = {
+        "waiting_log_lines": waiting_log_lines,
+        "datetime": datetime, "timedelta": timedelta,
+        "KST": KST, "PureClickError": PureClickError,
+    }
     exec(compile(module, "<panel>", "exec"), ns)  # noqa: S102 - our own source
     return ns[name]
 
@@ -47,8 +64,7 @@ class FakeVar:
 
 
 class FakePanel:
-    def __init__(self, started: float = 1.0) -> None:
-        self._entry_test_started = started
+    def __init__(self) -> None:
         self.test_result = FakeVar()
 
 
@@ -76,11 +92,20 @@ class EntryTestReadout(unittest.TestCase):
         self.assertIn("대기열 API 실패", text)
         self.assertIn("-12ms", text, "an early fire is still worth seeing")
 
-    def test_silent_until_a_test_is_run(self) -> None:
-        """A live run must not paint its result into the rehearsal box."""
-        panel = FakePanel(started=0.0)
-        render(panel, {"fired": True, "latenessMs": 1.0, "goodsCode": "X", "playSeq": "1"})
-        self.assertEqual(panel.test_result.get(), "")
+    def test_a_real_arm_reports_too_not_only_a_rehearsal(self) -> None:
+        """The bug this readout was hiding.
+
+        It opened with `if not self._entry_test_started: return`, and that flag
+        was set in exactly one place — run_entry_test. So a real 대기 시작
+        published lateness, attempt count, clock quality and the round across
+        the bridge, and the panel discarded every one of them. "It fires way
+        outside the expected time" could not be answered because the answer was
+        being computed and thrown away on precisely the runs that mattered.
+        """
+        panel = FakePanel()
+        render(panel, {"fired": True, "latenessMs": 1.0, "enteredVia": "waiting",
+                       "goodsCode": "X", "playSeq": "1"})
+        self.assertIn("진입 성공", panel.test_result.get())
 
     def test_nothing_to_report_before_it_fires(self) -> None:
         panel = FakePanel()
@@ -108,14 +133,51 @@ class EntryTestReadout(unittest.TestCase):
         # It must go through the real scheduler, not a second implementation.
         self.assertIn("_arm_worker", fn)
 
-    def test_the_moment_is_recomputed_when_the_button_is_pressed(self) -> None:
-        """An offset chosen ten minutes ago points into the past.
+    def test_the_rehearsal_time_is_an_absolute_moment(self) -> None:
+        """You pick a time, not an offset from now.
 
-        The time is picked as an offset from now, so a panel left open would
-        otherwise arm against a moment that has already gone and fail with
-        이미 지난 시각입니다 instead of testing anything.
+        It used to be a list of relative offsets (30초/1분/2분/5분/10분 뒤),
+        which cannot rehearse against a real open — the one thing a rehearsal is
+        for. The offsets are gone; "+1분" survives as a smoke test beside a real
+        clock.
         """
-        self.assertIn("_on_test_offset()", self._body("run_entry_test"))
+        source = (ROOT / "mac" / "pureclick.py").read_text(encoding="utf-8")
+        self.assertNotIn("TEST_OFFSETS", source, "the offset table is gone")
+        fn = self._body("_test_time_text")
+        for var in ("test_hour", "test_minute", "test_second", "test_date"):
+            self.assertIn(var, fn, f"the picked {var} must reach the target string")
+
+    def test_the_picked_time_is_shaped_for_the_parser(self) -> None:
+        """parse_target_time takes 'YYYY-MM-DD HH:MM:SS'; anything else raises."""
+        from core.clock import KST, parse_target_time
+
+        build = _load("_test_time_text")
+        panel = FakePanel()
+        panel.test_date, panel.test_hour = FakeVar(), FakeVar()
+        panel.test_minute, panel.test_second = FakeVar(), FakeVar()
+        panel.test_date.set("2027-01-27")
+        panel.test_hour.set("14")
+        panel.test_minute.set("00")
+        panel.test_second.set("07")
+        text = build(panel)
+        self.assertEqual(text, "2027-01-27 14:00:07")
+        # And it round-trips through the real parser at the intended instant.
+        parsed = parse_target_time(text, target_tz=KST)
+        self.assertEqual(datetime.fromtimestamp(parsed, KST).strftime("%H:%M:%S"), "14:00:07")
+
+    def test_an_impossible_time_is_refused_rather_than_armed(self) -> None:
+        from core.clock import PureClickError
+
+        build = _load("_test_time_text")
+        panel = FakePanel()
+        panel.test_date, panel.test_hour = FakeVar(), FakeVar()
+        panel.test_minute, panel.test_second = FakeVar(), FakeVar()
+        panel.test_date.set("2027-01-27")
+        panel.test_hour.set("99")
+        panel.test_minute.set("00")
+        panel.test_second.set("00")
+        with self.assertRaises(PureClickError):
+            build(panel)
 
 
 if __name__ == "__main__":  # pragma: no cover

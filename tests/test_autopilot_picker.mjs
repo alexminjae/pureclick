@@ -1163,6 +1163,80 @@ const tests = {
     assert.ok(race.ENTRY_LEAD_MS > 0, "a zero lead is the bug this replaced");
   },
 
+  // The queue endpoint answers in 11ms warm, so a flat 80ms poll left ~69ms of
+  // every cycle idle — the show could open and we would not notice for up to
+  // 80ms. Asking hard for the whole 15s window instead is ~50 requests/second
+  // against the gateway that answers GATEWAY_ABUSE_BLOCKED with a ~165s
+  // lockout, at the one moment a lockout cannot be recovered from. So the
+  // density goes only where it buys something.
+  "the queue poll is dense only across the open, not for the whole window"() {
+    const { race } = sandbox.window.PureClick;
+    const at = (ms) => race.waitingIntervalAt(ms);
+
+    // Before the open the answer cannot be yes; these requests only keep the
+    // connection warm and prove the session is good while there is time to act.
+    assert.equal(at(-400), 100, "cheap while it cannot succeed");
+    assert.equal(at(-101), 100);
+
+    // The window that decides the queue position.
+    assert.equal(at(-100), 20, "dense from just before the open");
+    assert.equal(at(0), 20);
+    assert.equal(at(599), 20);
+
+    // It did not open on time; settle down rather than hammer for 15 seconds.
+    assert.equal(at(600), 80, "backs off after the boundary");
+    assert.equal(at(14000), 80);
+
+    // The dense window must be short enough to bound the burst.
+    const dense = race.WAITING_POLL_SHAPE.find(([, , ms]) => ms === 20);
+    assert.ok(dense, "there is a dense band");
+    const requests = (dense[1] - dense[0]) / dense[2];
+    assert.ok(requests <= 60, `burst is ${requests} requests; keep it bounded`);
+  },
+
+  // What this endpoint returns *before* a show opens has never been observed,
+  // and the two possibilities imply opposite strategies: if it hands out a
+  // queue URL early then arriving at the open is already too late. The log is
+  // what settles that.
+  "every queue attempt is recorded with its offset from the open"() {
+    const { race } = sandbox.window.PureClick;
+    const state = race.state;
+    const arm = sandbox.window.PureClick.race;
+    // armState is reachable through the published status.
+    const armState = sandbox.window.PureClick.status().arm;
+    assert.ok("waitingLog" in armState, "the log crosses the bridge with the arm");
+
+    assert.equal(race.describeWaitingAnswer(""), "(빈 응답)");
+    assert.equal(race.describeWaitingAnswer(null), "(빈 응답)");
+    assert.equal(race.describeWaitingAnswer("N"), "N (대기열 없음)");
+    assert.equal(race.describeWaitingAnswer("NP"), "NP (선예매 인증 필요)");
+    assert.equal(race.describeWaitingAnswer("BL"), "BL (차단)");
+    assert.match(race.describeWaitingAnswer("https://queue.example.com/x"),
+                 /대기열 queue\.example\.com/);
+  },
+
+  "the attempt log keeps the boundary, not the tail"() {
+    // A 15-second window at 20ms would push the entries around the flip off the
+    // end of any fixed-size buffer read from the front. The flip is the only
+    // part worth keeping.
+    const { race } = sandbox.window.PureClick;
+    const state = race.state;
+    const armState = sandbox.window.PureClick.status().arm;
+    void armState;
+    // Drive the recorder directly; it writes into the live arm state.
+    sandbox.window.PureClick.race.noteWaitingAttempt(-400, "(빈 응답)", 11);
+    const limit = race.WAITING_LOG_LIMIT;
+    for (let i = 0; i < limit + 25; i += 1) {
+      race.noteWaitingAttempt(i * 20 - 100, "(빈 응답)", 11);
+    }
+    race.noteWaitingAttempt(1234, "대기열 queue.example.com", 12);
+    const log = sandbox.window.PureClick.status().arm.waitingLog;
+    assert.equal(log.length, limit, `capped at ${limit}`);
+    assert.equal(log[log.length - 1].outcome, "대기열 queue.example.com",
+                 "the newest entry — the flip — must survive");
+    assert.equal(log[log.length - 1].offsetMs, 1234, "with its offset from the open");
+  },
+
   "an entry with no target time has no start time to compute"() {
     const { race } = sandbox.window.PureClick;
     for (const arm of [{}, { target_server_unix: null }, { target_server_unix: "soon" }]) {

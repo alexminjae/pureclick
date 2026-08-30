@@ -759,3 +759,46 @@ def running_hint(seat: dict[str, Any], message: str) -> str:
     # Everything after the first ' · ' is the explanation the toast carries.
     parts = message.split(" · ", 1)
     return parts[1] if len(parts) > 1 else ""
+
+
+def waiting_log_lines(arm: dict[str, Any], limit: int = 12) -> list[str]:
+    """What the queue endpoint said, and when, either side of the open.
+
+    The one thing nobody has observed is what `/waiting` returns *before* a show
+    opens. If it answers with nothing usable until the flip, then polling across
+    the boundary is right and the only question is how densely. If it hands out
+    a queue URL beforehand, then arriving at the open is already too late and
+    the whole strategy has to move earlier. Those are opposite conclusions, and
+    one recorded open decides between them.
+
+    Offsets are signed milliseconds from the target, so the flip is the line
+    where the outcome changes.
+    """
+    entries = arm.get("waitingLog")
+    if not isinstance(entries, list) or not entries:
+        return []
+
+    rows = [row for row in entries if isinstance(row, dict)]
+    if not rows:
+        return []
+
+    # Around the flip, not the tail: the entry that first came back usable is
+    # the answer, and the few before it are the evidence.
+    flip = next(
+        (i for i, row in enumerate(rows) if str(row.get("outcome") or "").startswith("대기열")),
+        None,
+    )
+    if flip is None:
+        shown = rows[-limit:]
+    else:
+        start = max(0, flip - (limit - 2))
+        shown = rows[start:flip + 2]
+
+    lines = [f"대기열 응답 {len(rows)}회"]
+    for row in shown:
+        offset = row.get("offsetMs")
+        stamp = f"{offset / 1000:+.2f}s" if isinstance(offset, (int, float)) else "  ?  "
+        outcome = str(row.get("outcome") or "")
+        mark = "  ← 열림" if outcome.startswith("대기열") or outcome.startswith("N (") else ""
+        lines.append(f"  {stamp:>7}  {outcome}{mark}")
+    return lines

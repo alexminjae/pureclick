@@ -27,6 +27,7 @@ from core.seat import (  # noqa: E402
     parse_goods_code,
     map_move_lines,
     running_hint,
+    waiting_log_lines,
     seat_order_lines,
     serialize_preferences,
 )
@@ -95,15 +96,17 @@ class PureClickMacApp(tk.Tk):
 
     # Offsets from now, in seconds. Long enough to watch the countdown, short
     # enough that a rehearsal is not itself a wait.
-    TEST_OFFSETS = {
-        "30초 뒤": 30,
-        "1분 뒤": 60,
-        "2분 뒤": 120,
-        "5분 뒤": 300,
-        "10분 뒤": 600,
-    }
-
-    SYNC_URL = "https://poticket.interpark.com/Book/BookMain.asp"
+    # Sync against the host we fire at, not a third one.
+    #
+    # This pointed at poticket.interpark.com while the queue lives on
+    # api-ticketfront. Measured by boundary-bracketing their Date headers:
+    # poticket runs +18ms, ticketfront -8ms, tickets.interpark.com +4ms — so the
+    # two hosts that matter for booking agree within 12ms and poticket is the
+    # outlier, 26ms away from the one the entry actually races against.
+    # The host root: a Date header, no body, and nothing show-specific to go
+    # stale. /v1/goods/{code}/waiting works too but would tie the clock to one
+    # show outliving the sync.
+    SYNC_URL = "https://api-ticketfront.interpark.com/"
     SYNC_SAMPLES = 5
     START_URL = "https://nol.yanolja.com/ticket"
 
@@ -148,11 +151,12 @@ class PureClickMacApp(tk.Tk):
         self.test_date = tk.StringVar(value=soon.strftime("%Y-%m-%d"))
         self.test_time = tk.StringVar(value=soon.strftime("%H:%M:%S"))
         self.test_result = tk.StringVar(value="")
-        self.test_offset = tk.StringVar(value="1분 뒤")
+        self.test_hour = tk.StringVar(value=soon.strftime("%H"))
+        self.test_minute = tk.StringVar(value=soon.strftime("%M"))
+        self.test_second = tk.StringVar(value=soon.strftime("%S"))
         self.show_round = tk.StringVar(value="")
         self.open_note = tk.StringVar(value="아직 안 열린 공연 — 열리는 순간 대기열을 먼저 잡습니다.")
         self.catch_note = tk.StringVar(value="이미 매진된 공연 — 고른 범위에서 자리가 나오면 바로 잡습니다.")
-        self._entry_test_started = 0.0
         self.server_time = tk.StringVar(value="동기화 중…")
         self.show_title = tk.StringVar(value="공연을 선택하세요")
         self.show_where = tk.StringVar(value="예매 창에서 공연을 열면 자동으로 채워집니다")
@@ -467,15 +471,22 @@ class PureClickMacApp(tk.Tk):
         test_row.pack(fill="x")
         tk.Label(test_row, text="테스트 시각", bg=PANEL, fg=MUTED,
                  font=(UI_FONT, 11)).pack(side="left", padx=(0, 8))
-        offsets = ttk.Combobox(test_row, textvariable=self.test_offset, state="readonly",
-                               values=list(self.TEST_OFFSETS), width=9)
-        offsets.pack(side="left")
-        offsets.bind("<<ComboboxSelected>>", self._on_test_offset)
-        self.test_when = tk.Label(test_row, text="", bg=PANEL, fg=FAINT, font=(MONO_FONT, 11))
-        self.test_when.pack(side="left", padx=(10, 0))
-        self._on_test_offset()
-        ttk.Button(openq, text="테스트 실행", style="CardGhost.TButton",
-                   command=self.run_entry_test).pack(fill="x", pady=(10, 0))
+        ttk.Entry(test_row, textvariable=self.test_date, width=11).pack(side="left")
+        for var, count, pad in ((self.test_hour, 24, (8, 0)),
+                                (self.test_minute, 60, (4, 0)),
+                                (self.test_second, 60, (4, 0))):
+            ttk.Combobox(test_row, textvariable=var, state="readonly", width=3,
+                         values=[f"{n:02d}" for n in range(count)]).pack(side="left", padx=pad)
+        ttk.Button(test_row, text="+1분", style="CardGhost.TButton", width=5,
+                   command=self._bump_test_time).pack(side="left", padx=(10, 0))
+
+        run_row = tk.Frame(openq, bg=PANEL)
+        run_row.pack(fill="x", pady=(10, 0))
+        run_row.columnconfigure(0, weight=1)
+        ttk.Button(run_row, text="테스트 실행", style="CardGhost.TButton",
+                   command=self.run_entry_test).grid(row=0, column=0, sticky="ew")
+        ttk.Button(run_row, text="오픈 시각으로", style="CardGhost.TButton",
+                   command=self._test_time_from_show).grid(row=0, column=1, padx=(6, 0))
         tk.Label(openq, text="정한 시각에 실제로 이 공연에 들어가 봅니다.", bg=PANEL, fg=FAINT,
                  font=(UI_FONT, 11), anchor="w").pack(anchor="w", pady=(2, 0))
         tk.Label(openq, textvariable=self.test_result, bg=PANEL, fg=GREEN, anchor="w",
@@ -1308,40 +1319,66 @@ class PureClickMacApp(tk.Tk):
     def arm(self, *, dry_run: bool = False) -> None:
         self._start_worker(lambda: self._arm_worker(dry_run=dry_run))
 
-    def _on_test_offset(self, _event=None) -> None:
-        """Turn the chosen offset into the moment it will fire."""
-        seconds = self.TEST_OFFSETS.get(self.test_offset.get(), 60)
-        when = datetime.now(KST) + timedelta(seconds=seconds)
+    def _bump_test_time(self) -> None:
+        """Push the test a minute out — the quick smoke test.
+
+        The old control was a list of relative offsets (30초/1분/… 뒤), which
+        cannot rehearse against a real open time. This is what that list was
+        actually good for, kept as one button beside a real clock.
+        """
+        try:
+            when = datetime.strptime(self._test_time_text(), "%Y-%m-%d %H:%M:%S")
+        except (ValueError, PureClickError):
+            when = datetime.now(KST).replace(tzinfo=None)
+        self._set_test_time(when + timedelta(minutes=1))
+
+    def _test_time_from_show(self) -> None:
+        """Aim the rehearsal at this show's own 티켓 오픈."""
+        opens = f"{self.target_date.get().strip()} {self.target_time.get().strip()}"
+        try:
+            when = datetime.strptime(opens.strip(), "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            try:
+                when = datetime.strptime(opens.strip(), "%Y-%m-%d %H:%M")
+            except ValueError:
+                self._note("이 공연의 티켓 오픈 시각을 아직 모릅니다", error=True)
+                return
+        self._set_test_time(when)
+        self._note(f"테스트 시각을 티켓 오픈({when:%H:%M:%S})에 맞췄습니다")
+
+    def _set_test_time(self, when: datetime) -> None:
         self.test_date.set(when.strftime("%Y-%m-%d"))
-        self.test_time.set(when.strftime("%H:%M:%S"))
-        label = getattr(self, "test_when", None)
-        if label is not None and label.winfo_exists():
-            label.configure(text=when.strftime("%H:%M:%S"))
+        self.test_hour.set(when.strftime("%H"))
+        self.test_minute.set(when.strftime("%M"))
+        self.test_second.set(when.strftime("%S"))
 
     def run_entry_test(self) -> None:
         """Rehearse the open at a moment you choose.
 
         The whole of 오픈 대기 is one instant that either works or is lost, and
-        until now the only way to find out was to be there for it. This arms the
+        the only way to find out used to be to be there for it. This arms the
         real entry — same clock sync, same scheduler, same request — against a
         moment you pick, so it can be watched and repeated.
         """
-        # Recompute now: an offset chosen ten minutes ago points at a moment
-        # that has already passed, and the run would fail with 이미 지난 시각입니다.
-        self._on_test_offset()
-        self._entry_test_started = time.time()
         self._start_worker(
             lambda: self._arm_worker(dry_run=False, target_text=self._test_time_text(), test=True)
         )
 
     def _test_time_text(self) -> str:
+        """The picked moment, in the exact shape parse_target_time accepts."""
         date_text = self.test_date.get().strip()
-        time_text = self.test_time.get().strip()
         datetime.strptime(date_text, "%Y-%m-%d")
-        if len(time_text.split(":")) == 2:
-            time_text += ":00"
-        hour, minute, second = time_text.split(":")
-        return f"{date_text} {int(hour):02d}:{int(minute):02d}:{int(second):02d}"
+        parts = []
+        for var, label in ((self.test_hour, "시"), (self.test_minute, "분"),
+                           (self.test_second, "초")):
+            raw = var.get().strip()
+            if not raw.isdigit():
+                raise PureClickError(f"{label}는 숫자여야 합니다")
+            parts.append(int(raw))
+        hour, minute, second = parts
+        if hour > 23 or minute > 59 or second > 59:
+            raise PureClickError("시각이 올바르지 않습니다")
+        return f"{date_text} {hour:02d}:{minute:02d}:{second:02d}"
 
     def _start_worker(self, target) -> None:
         if self.worker and self.worker.is_alive():
@@ -1411,12 +1448,13 @@ class PureClickMacApp(tk.Tk):
     def _render_entry_result(self, arm: dict) -> None:
         """What the last entry actually did.
 
-        `arm` has always been published alongside the seat status and never
-        read — the same computed-but-invisible pattern as the guidance line.
-        A rehearsal is worthless if you cannot see how it went.
+        This used to render only after a 테스트 실행 — `_entry_test_started` was
+        set in exactly one place and gated the whole method — so a *real* 대기
+        시작 published every one of these numbers across the bridge and the panel
+        threw them away. Which is why "it fires way outside the expected time"
+        could not be answered: the answer was being computed and discarded on
+        every run that mattered.
         """
-        if not self._entry_test_started:
-            return
         if not arm.get("fired"):
             return
 
@@ -1436,9 +1474,18 @@ class PureClickMacApp(tk.Tk):
         else:
             lines.append("발사함 · 진입 확인 중")
 
+        acquired = arm.get("acquiredLatenessMs")
+        attempts = arm.get("waitingAttempts") or 0
         if isinstance(lateness, (int, float)):
-            # Signed on purpose: early is as informative as late.
-            lines.append(f"발사 정확도 {lateness:+.0f}ms")
+            # Signed on purpose: early is as informative as late. The fire is
+            # now deliberately early by ENTRY_LEAD_MS, so on its own this reads
+            # ≈ -400ms every time — the number that moves is the one below it.
+            row = f"발사 {lateness:+.0f}ms"
+            if isinstance(acquired, (int, float)):
+                row += f" · 대기열 확보 {acquired:+.0f}ms"
+            if attempts:
+                row += f" · 요청 {attempts}회"
+            lines.append(row)
 
         # Where the time actually went. "It takes too long" is otherwise a
         # feeling; these are the three numbers that make it a measurement.
@@ -1463,6 +1510,11 @@ class PureClickMacApp(tk.Tk):
         seq = str(arm.get("playSeq") or "").strip()
         if goods or seq:
             lines.append(f"상품 {goods or '?'} · 회차 {seq or '?'}")
+
+        # What the queue endpoint actually said either side of the open. This is
+        # the record that decides whether polling across the boundary is even
+        # the right method.
+        lines.extend(waiting_log_lines(arm))
 
         self.test_result.set("\n".join(lines))
 
