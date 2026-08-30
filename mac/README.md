@@ -16,7 +16,7 @@ They are one app:
 1. **예매 창** — log into NOL, click the show, press 예매하기 when it is on sale.
 2. **조작판** — fills itself from the page you opened. Buttons enable only when
    that page can actually run them (오픈 대기 on a product page before sale;
-   미리보기 / 좌석 잡기 / 취켓팅 only on the seat map).
+   취켓팅 only on the seat map).
 
 You do not type a goods code. Open the show in the 예매 창 and wait a second.
 
@@ -85,7 +85,7 @@ and `bookingOpenTime` — but **no round list**. `playSeq` and the open time com
 from the ticketfront API instead, which the panel fetches from the goods code.
 That is why the panel only needs you to open the show.
 
-## The three functions
+## The two functions
 
 ### ① 오픈 대기 — be first in the queue
 Set the open time (auto-filled when you load a show) and press 오픈 대기 시작.
@@ -110,18 +110,34 @@ Two things make the timing reliable:
   server accepts, so a slightly wrong clock or one dropped packet does not cost
   the slot. `NP` (presale auth) and `BL` (blocked) stop immediately.
 
-### ② 좌석 잡기 — take a seat
-On the seat map, 좌석 잡기 reads the layout, ranks seats against your conditions,
-and calls `bulkPreselectSeats` then `POST /onestop/api/seats/select`.
+### ② 취켓팅 — catch cancellations
 
-**미리보기** does everything except send — it prints the exact POST body it would
-have sent, so the path can be verified without taking a seat.
+Draw a 감시 구역 on the seat map and press 감시 시작. Anything that frees inside
+it is taken regardless of grade — a cancellation is gone in seconds, and
+refusing one because the grade was not on a list is how you watch an empty seat
+go to somebody else.
 
-### ③ 취켓팅 — catch cancellations
-Polls the availability bitmap and diffs it. When a bit flips 0→1 that index *is*
-the freed seat, so it preselects immediately with no re-fetch.
+Two channels feed it:
 
-Detection lands in roughly 50–250ms.
+- **The whole-venue trigger.** One request answers "did anything free anywhere?"
+  in ~132ms. Sweeping the bitmap to answer the same question costs one request
+  per two blocks — `seatStatus` caps at two blockKeys, measured, `n>=3` is HTTP
+  400 — so a 34-block venue needs 17 requests and about 4.4s per lap. The
+  trigger only ever *adds* a sweep: when it cannot see (the show hides its
+  remaining counts, the round is not on sale, the feed is unreachable) the
+  rolling sweep carries on unchanged.
+- **The page's own traffic.** The 예매 창 fetches availability for its own
+  drawing; those responses feed the same diff, cost no request, and so are not
+  paced by the gateway budget.
+
+When a bit flips 0→1 that index *is* the freed seat, so it is clicked with no
+re-fetch. Most of the remaining latency is travel: reaching a seat outside the
+open 구역 means leaving it, opening another and fitting it to the viewport. The
+panel reports what each of those actually costs.
+
+There is no separate "take a seat now" button. Taking a seat is what both
+functions end in, and 들어가면 곧바로 좌석까지 잡기 makes 오픈 대기 continue
+into it.
 
 ## How a seat map is understood
 
@@ -216,36 +232,57 @@ the path *up to* the lock is a race.
 | File | Role |
 |---|---|
 | `pureclick.py` | Control panel |
-| `browser_host.py` | pywebview + script injection |
-| `browser_bridge.py` | Panel ↔ browser state |
+| `browser_host.py` | pywebview + document-start script injection |
+| `browser_bridge.py` | Panel ↔ browser state, over a flock-guarded JSON file |
 | `browser_session.py` | Cookie jar save/restore, so login survives a restart |
-| `../pureclick_showinfo.py` | Show lookup + engine classification |
-| `../pureclick_catalog.py` | Genre browsing + upcoming-opens scan |
-| `../pureclick_seat_core.py` | Grade ranking, bitmap decoding, seat grouping |
-| `../browser/pureclick_autopilot.js` | In-page automation |
+| `pureclick_mac_core.py` | CoreGraphics helpers and the accessibility check |
+| `../browser/pureclick_autopilot.js` | Everything that happens inside the page |
+| `../core/clock.py` | Server-time sync and the open-time parser |
+| `../core/seat.py` | Grade ranking, bitmap decoding, seat grouping, panel text |
+| `../core/showinfo.py` | Show lookup, remaining counts, engine classification |
+| `../core/zone_map.py` | Projecting the venue for the 범위 정하기 picker |
+| `../core/arm.py` | The arm payload shared with the page |
+| `../core/watch_trigger.py` | The whole-venue "did anything free?" trigger |
+
+Nothing under `core/` touches tkinter, pywebview or the filesystem. That is the
+split: those are the parts testable without launching an app or opening a
+booking page, and all of them are tested.
 
 ## Research scripts
 
-Each reproduces one measurement quoted above.
+Each reproduces one measurement quoted above. Run any of them from the repo
+root; none needs a login.
 
 | Script | Answers |
 |---|---|
-| `research/demo_no_login.py` | Real seats + availability with no cookies |
-| `research/coverage_no_login.py` | How many shows expose data without login |
-| `research/probe_bitmap.py` | That seatStatus is a per-seat bitmap |
-| `research/probe_bitmap_semantics.py` | That a set bit means "free now" |
-| `research/probe_batchlimit.py` | The 2-blockKey request limit |
-| `research/probe_status_cache.py` | That seatStatus is never cached |
-| `research/validate_clock_estimator.py` | Clock estimator accuracy |
-| `research/dump_seatmaps.py` | Layout variety across venue types |
+| `research/probes/demo_no_login.py` | Real seats and availability with no cookies |
+| `research/probes/dump_seatmaps.py` | Layout variety across venue types |
+| `research/probes/extract_rsc.py` | Pulls initData out of a captured RSC payload |
+| `research/probes/mine_nol_api.py` | Downloads the current bundles and mines their API surface |
+| `research/probes/probe_batchlimit.py` | The 2-blockKey request limit |
+| `research/probes/probe_bitmap.py` | That seatStatus is a per-seat bitmap |
+| `research/probes/probe_bitmap_semantics.py` | That a set bit means "free now" |
+| `research/probes/probe_blockkeys.py` | That block keys embed the round |
+| `research/probes/probe_clock.py` | Date-header resolution and round-trip spread |
+| `research/probes/probe_ordering.py` | That posLeft/posTop track the printed row order |
+| `research/probes/probe_remains_vs_bitmap.py` | That the whole-venue count agrees with the bitmap |
+| `research/probes/probe_seatmap.py` | seatMeta shape and which fields are populated |
+| `research/probes/probe_seatstatus.py` | seatStatus shape and round-trip cost |
+| `research/probes/probe_status_cache.py` | That seatStatus is never cached |
+| `research/probes/probe_status_detail.py` | What a status response carries beyond the mask |
+| `research/probes/survey_shows.py` | Engine and layout spread across many shows |
+| `research/probes/validate_clock_estimator.py` | Clock estimator accuracy |
 
 ## Tests
 
 ```bash
 cd ~/Desktop/pureclick
-python3 -m unittest discover -s tests    # 62 tests
-node tests/test_autopilot_picker.mjs     # 17 tests, drives the real autopilot
+python3 -m pytest tests/ -q               # 103 tests
+node tests/test_autopilot_picker.mjs      # 79 tests, drives the real autopilot
 ```
+
+Every claim above that carries a number has a test or a probe behind it. Where
+one does not, it says so.
 
 ## Legal
 

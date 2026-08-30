@@ -1,6 +1,13 @@
 # Interpark / NOL ticketing flow (full sweep)
 
-Live UI, onestop JS bundles (`research/onestop_bundles`), NOL/gates research, and PureClick autopilot.
+Live UI, the onestop JS bundles, NOL/gates research, and the PureClick autopilot.
+
+The bundle quotes below were mined from a capture that is no longer in the repo:
+those chunk URLs 404, and every endpoint they named that we had not already
+adopted is gone too, so the capture described a deploy that no longer runs. The
+behaviour recorded here was re-checked against the live site and still holds.
+`research/probes/mine_nol_api.py` captures the current bundles if it is ever
+needed again.
 
 ## What `/onestop/seat` is
 
@@ -53,7 +60,7 @@ On `/onestop/seat` load:
 
 ### What zoom actually does (lazy load)
 
-From `research/onestop_bundles/13_6705-*.js`:
+From the onestop bundle `13_6705-*.js`, as captured at the time:
 
 1. Pan/zoom updates the visible viewport (debounced ~100–300ms)
 2. An R-tree finds which `blockKey`s intersect the viewport → `currentBlocks[]`

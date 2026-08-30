@@ -16,30 +16,30 @@ Two windows open: the 조작판 (control panel) and the 예매 창 (an embedded
 browser). You log in and type any 보안문자 yourself in the 예매 창; everything
 else is driven from inside that page.
 
-## Shape
+**[mac/README.md](mac/README.md) is the manual** — how each function works, what
+was measured, and what it will not do. This page is only the map.
+
+## Layout
 
 | | |
 |---|---|
-| `mac/pureclick.py` | the panel — tkinter, the server clock, the arm scheduler |
-| `mac/browser_host.py` | the 예매 창 — pywebview, injects the autopilot at document start |
-| `browser/pureclick_autopilot.js` | everything that happens inside the page |
-| `pureclick_*.py` | pure logic, at the repo root, shared by both and unit-tested |
-| `research/` | probes and captured site data behind the decisions above |
-
-The panel and the browser host are separate processes that talk through a
-flock-guarded JSON file (`mac/.pureclick_browser_state.json`). Measured at
-0.55 ms a read, which is why it is a file and not something cleverer.
+| `mac/` | the app — panel, browser host, bridge, session store |
+| `browser/pureclick_autopilot.js` | everything that happens inside the booking page |
+| `core/` | pure logic — no tkinter, no pywebview, no filesystem, all tested |
+| `tests/` | `pytest tests/` and `node tests/test_autopilot_picker.mjs` |
+| `research/probes/` | one script per measurement the design rests on |
+| `research/seatmaps/`, `api_shapes/` | captured venue layouts and API response shapes |
+| `docs/` | how the Interpark/NOL booking flow actually works |
 
 ## Tests
 
 ```bash
-python3 -m pytest tests/ -q          # the Python side
-node tests/test_autopilot_picker.mjs # the in-page logic
+python3 -m pytest tests/ -q
+node tests/test_autopilot_picker.mjs
 ```
 
-## Windows
+## Legal
 
-Removed. It was a native screen-clicker with a colour-change watch, and it had
-been superseded by the embedded-browser design — it could not run on macOS, and
-its tests were still counted in the suite. It is in the history if it is ever
-wanted back.
+Korea's 공연법 (amended, effective March 2024) makes macro ticket purchasing an
+offence when combined with resale — up to 1 year imprisonment or a ₩10M fine.
+Automated booking also breaches the site's terms of use.
