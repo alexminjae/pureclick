@@ -827,6 +827,7 @@ EXIT_REASONS = {
     "advanceWithNoSeat": "가선점이 확인되지 않아 [선택 완료]를 누르지 않았습니다",
     "awaitingManualConfirm": "[선택 완료]를 직접 눌러 주세요",
     "confirmPreselectionInvalid": "가선점 확정에 실패해 좌석을 놓쳤습니다",
+    "alreadyHolding": "이미 좌석을 잡고 있어 새 감시를 시작하지 않았습니다",
 }
 
 # Past this, the browser is not being read and nothing below it can be trusted.

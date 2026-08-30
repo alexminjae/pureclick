@@ -1529,6 +1529,82 @@ const tests = {
               "and ask before it starts syncing toward a fire it cannot make");
   },
 
+  // Why a second 취켓팅 caught nothing.
+  //
+  // Catching a seat sets seatState.locked, and stopAll deliberately leaves it
+  // set so stopping does not throw away a seat you won. Nothing else cleared
+  // it, so from the first catch onwards every 감시 시작 hit the locked gate and
+  // returned — no watch, no error, no sign at all. The live capture showed
+  // exactly that state: locked true, pageSelected -1.
+  // The second half of why a second 취켓팅 caught nothing.
+  //
+  // lastBlocks survives a run, so run 2 diffed its first poll against the masks
+  // run 1 left behind: every seat that freed in the gap came back as "just
+  // freed", minutes stale and long since taken. The loop opened by chasing
+  // ghosts, took 이선좌 on each, put them in the 30s cooldown and spent its
+  // retry budget before it could see a real cancellation.
+  "a new run diffs from a fresh baseline, not the last run's bitmap"() {
+    const { race } = sandbox.window.PureClick;
+    const block = {
+      blockKey: "001:001",
+      // What the previous run left: seat 0 taken.
+      mask: [false, true],
+      seats: [
+        { seatInfoId: "s1", seatGrade: "1", seatGradeName: "R석", rowNo: "A", seatNo: "1",
+          isExposable: true, posLeft: 10, posTop: 10 },
+        { seatInfoId: "s2", seatGrade: "1", seatGradeName: "R석", rowNo: "A", seatNo: "2",
+          isExposable: true, posLeft: 20, posTop: 10 },
+      ],
+    };
+    // Against a stale baseline, a seat that freed while nothing was watching
+    // reads as a fresh opening.
+    assert.equal(race.applyBlockMask(block, [true, true], {}).length, 1,
+                 "this is the phantom the reset exists to prevent");
+
+    // Cleared, the same reading is a first sighting and reports nothing.
+    block.mask = null;
+    assert.deepEqual(race.applyBlockMask(block, [true, true], {}), [],
+                     "a first sighting is not an opening");
+    // And the run after that diffs normally again.
+    assert.equal(race.applyBlockMask(block, [true, true], {}).length, 0, "no change, no report");
+  },
+
+  "the run reset drops the bitmaps but keeps the venue"() {
+    // Clearing lastBlocks outright would force a full seatMeta re-fetch of the
+    // whole venue on every press; only the masks need to go.
+    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const fn = source.slice(source.indexOf("async function runSeatAutopilot("));
+    const reset = fn.slice(0, fn.indexOf("while (seatState.attempts < maxAttempts"));
+    assert.match(reset, /block\.mask = null/, "the diff baseline must be reset");
+    assert.doesNotMatch(reset, /seatState\.lastBlocks = \[\]/,
+                        "but the fetched venue must survive the press");
+    assert.match(reset, /catchCursor = 0/, "and the sweep starts from the top");
+  },
+
+  "a deliberate press clears a stale seat lock"() {
+    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const fn = source.slice(source.indexOf("async function runSeatAutopilot("));
+    const gate = fn.slice(fn.indexOf("if (seatState.locked) {"));
+    const body = gate.slice(0, gate.indexOf("\n    if (seatState.running)"));
+
+    // A user-initiated run must be able to get past it.
+    assert.match(body, /userInitiated/, "the gate must know the press was deliberate");
+    assert.match(body, /seatState\.locked = false/, "and be able to clear the lock");
+
+    // The page's cart is the authority, not our flag.
+    assert.match(body, /selectedSeatCount\(\)/,
+                 "ask the page what it is holding rather than trusting the flag");
+
+    // -1 means "cannot read", which is the common case on a seat page. A press
+    // must win there too, or the bug survives in the state it was found in.
+    assert.match(body, /heldOnPage <= 0/,
+                 "an unreadable cart must not outrank a deliberate press");
+
+    // And refusing, when it genuinely is holding, has to be visible.
+    assert.match(body, /lastError/, "a refusal must reach the panel, not just a toast");
+    assert.match(body, /alreadyHolding/, "and name itself as an exit");
+  },
+
   "a block from any endpoint stops everything and says which one"() {
     // The question this session could not answer from the repo: which call was
     // blocked, the queue or the seat path. It is recorded now.

@@ -5995,20 +5995,47 @@
     }
 
     if (seatState.locked) {
-      if (emptyPriceStepVisible() || seatSelectionEmpty()) {
+      // Why a second 취켓팅 caught nothing.
+      //
+      // Catching a seat sets locked, and stopAll deliberately leaves it set so
+      // stopping does not throw away a seat you won. But nothing else cleared
+      // it either, so from the first catch onwards every press of 감시 시작
+      // arrived here and returned — no watch, no error, no sign. A press is an
+      // instruction; a stale flag must not outrank it.
+      //
+      // The page's own cart is the authority, not our flag: 0 means it is
+      // holding nothing, -1 means it cannot be read (which is the common case
+      // on a seat page — the live capture showed pageSelected -1 beside
+      // locked true).
+      const heldOnPage = selectedSeatCount();
+      if (userInitiated && heldOnPage <= 0) {
+        log("clearing a stale seat lock for a user-initiated run", { heldOnPage });
+        traceCall("staleLock", heldOnPage, "cleared");
+        seatState.locked = false;
+        seatState.awaitingPayment = false;
+        seatState.heldSeatIds.clear();
+        updateOverlay("이전에 잡은 좌석 기록을 지우고 다시 감시합니다", "info");
+      } else if (emptyPriceStepVisible() || seatSelectionEmpty()) {
         recoverEmptyPriceStep();
         seatState.running = false;
         return;
-      }
-      if (bookingNoticeVisible() || !seatState.awaitingPayment) {
+      } else if (bookingNoticeVisible() || !seatState.awaitingPayment) {
         updateOverlay("선점된 좌석 — 안내 확인 후 결제 단계로 이동합니다", "info");
         const advanced = await advanceAfterSeatLock(config);
         if (advanced?.noSeat || advanced?.recovered) seatState.locked = false;
         seatState.running = false;
         return;
+      } else {
+        // Genuinely holding seats. Refusing is right — a second watch would
+        // take another and the site answers 선택 가능한 매수를 초과했어요 — but
+        // it must say so on the panel, not only in a toast that fades.
+        seatState.lastExit = "alreadyHolding";
+        seatState.lastError =
+          `이미 좌석 ${heldOnPage}석을 잡고 있습니다. 예매 창에서 결제를 마치거나 ` +
+          `좌석을 비운 뒤 다시 [감시 시작]을 누르세요.`;
+        updateOverlay("이미 좌석을 선점했습니다. 결제 화면을 확인하세요.", "ok");
+        return;
       }
-      updateOverlay("이미 좌석을 선점했습니다. 결제 화면을 확인하세요.", "ok");
-      return;
     }
     if (seatState.running) {
       seatState.stopRequested = true;
@@ -6069,6 +6096,20 @@
     seatState.lastError = "";
     seatState.discoveredBlocks = null;
     seatState.statusFailures = 0;
+    // Start each run from a fresh baseline, keeping the venue but dropping the
+    // bitmaps.
+    //
+    // lastBlocks survives a run, so a second 취켓팅 diffed its first poll
+    // against the masks the *previous* run left behind — and every seat that
+    // freed in the gap between them came back as "just freed". Those seats are
+    // minutes old and long since taken, so the loop opened by chasing ghosts,
+    // collected 이선좌 on each, put them in the 30s cooldown and burned its
+    // retry budget before it ever saw a real cancellation. applyBlockMask
+    // already declines to report anything on a first sighting; it simply never
+    // got one on a second run.
+    for (const block of seatState.lastBlocks || []) block.mask = null;
+    seatState.catchCursor = 0;
+    seatState.polledBlocks = null;
     seatState.catchLiveTries = 0;
     seatState.catchLiveSignature = "";
     seatState.pageFreed.length = 0;
