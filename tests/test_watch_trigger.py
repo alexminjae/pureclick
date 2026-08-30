@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import unittest
 
-from pureclick_watch_trigger import TriggerState, next_trigger_state
+from core.watch_trigger import TriggerState, next_trigger_state
 
 
 class TriggerTest(unittest.TestCase):

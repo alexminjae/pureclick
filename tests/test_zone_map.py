@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from pureclick_zone_map import (
+from core.zone_map import (
     block_keys_in_watch_rect,
     is_click,
     parse_watch_rect,

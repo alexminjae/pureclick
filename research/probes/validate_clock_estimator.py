@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from pureclick_core import ServerClock, fetch_server_date  # noqa: E402
+from core.clock import ServerClock, fetch_server_date  # noqa: E402
 
 SYNC_URL = "https://poticket.interpark.com/Book/BookMain.asp"
 

@@ -22,7 +22,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
-from pureclick_seat_core import (
+from core.seat import (
     ShowCompatibility,
     parse_goods_code,
     parse_summary_compatibility,

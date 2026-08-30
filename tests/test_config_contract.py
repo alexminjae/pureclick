@@ -15,7 +15,7 @@ import re
 import unittest
 from pathlib import Path
 
-from pureclick_seat_core import SeatPreferences
+from core.seat import SeatPreferences
 
 AUTOPILOT = Path(__file__).resolve().parent.parent / "browser" / "pureclick_autopilot.js"
 
@@ -56,7 +56,7 @@ class ConfigContractTests(unittest.TestCase):
         )
 
     def test_seat_strategy_values_agree_across_both_layers(self) -> None:
-        from pureclick_seat_core import VALID_STRATEGIES
+        from core.seat import VALID_STRATEGIES
 
         source = AUTOPILOT.read_text(encoding="utf-8")
         match = re.search(r"const SEAT_STRATEGIES = \[(.*?)\];", source, re.S)

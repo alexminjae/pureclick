@@ -7,7 +7,7 @@ you the show is sold out when it is not.
 
 These once drove a hand-kept copy of the panel's rendering logic. The copy went
 stale the first time the real method changed and the tests still passed, so the
-logic now lives in `pureclick_showinfo.seat_table_lines` and is imported here —
+logic now lives in `core.showinfo.seat_table_lines` and is imported here —
 there is nothing left to drift.
 """
 
@@ -16,7 +16,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from pureclick_showinfo import seat_table_lines as render
+from core.showinfo import seat_table_lines as render
 
 MAC_DIR = Path(__file__).resolve().parent.parent / "mac"
 

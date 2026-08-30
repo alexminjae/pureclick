@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from pureclick_showinfo import (
+from core.showinfo import (
     build_warnings,
     format_open_time,
     merge_grades,
@@ -10,7 +10,7 @@ from pureclick_showinfo import (
     parse_remain_rows,
     unwrap,
 )
-from pureclick_seat_core import parse_summary_compatibility
+from core.seat import parse_summary_compatibility
 
 
 class ShowInfoParsingTests(unittest.TestCase):
@@ -80,7 +80,7 @@ class ShowInfoParsingTests(unittest.TestCase):
         self.assertEqual(grades[1].remain, 150)
 
     def test_pick_schedule_matches_play_time(self) -> None:
-        from pureclick_showinfo import normalize_play_time, pick_schedule
+        from core.showinfo import normalize_play_time, pick_schedule
 
         schedules = [
             {"playSeq": "015", "playTime": "14:30"},

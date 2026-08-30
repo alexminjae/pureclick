@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from pureclick_core import (
+from core.clock import (
     KST,
     ServerClock,
     TimeSample,
@@ -66,7 +66,7 @@ class PureClickCoreTests(unittest.TestCase):
             TimeSample(9.999, 0.500, 0, 0, "slow"),
         ]
 
-        with patch("pureclick_core.fetch_server_date", side_effect=samples):
+        with patch("core.clock.fetch_server_date", side_effect=samples):
             result = ServerClock().sync(
                 "https://example.com/",
                 sample_count=4,

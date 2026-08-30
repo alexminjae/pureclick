@@ -13,6 +13,7 @@ resolve. It cannot catch a runtime bug, but it catches a deletion.
 from __future__ import annotations
 
 import ast
+import importlib
 import sys
 import unittest
 from pathlib import Path
@@ -39,9 +40,9 @@ def _declared_imports(source: Path) -> list[tuple[str, str]]:
 ENTRY_POINTS = [MAC / "pureclick.py", MAC / "browser_host.py"]
 # Third-party and stdlib are the environment's problem, not ours.
 OURS = {
-    "browser_bridge", "browser_host", "browser_session", "pureclick_arm_core",
-    "pureclick_core", "pureclick_mac_core",
-    "pureclick_seat_core", "pureclick_showinfo", "pureclick_zone_map",
+    "browser_bridge", "browser_host", "browser_session", "pureclick_mac_core",
+    "core.arm", "core.clock", "core.seat", "core.showinfo",
+    "core.watch_trigger", "core.zone_map",
 }
 
 
@@ -53,7 +54,10 @@ class AppStartsTest(unittest.TestCase):
             for module_name, name in _declared_imports(entry):
                 if module_name not in OURS:
                     continue
-                module = __import__(module_name)
+                # importlib, not __import__: the latter returns the top-level
+                # package for a dotted name, so __import__("core.seat") hands
+                # back `core` and every hasattr against it fails.
+                module = importlib.import_module(module_name)
                 self.assertTrue(
                     hasattr(module, name),
                     f"{entry.name} imports {name} from {module_name}, which no longer has it",

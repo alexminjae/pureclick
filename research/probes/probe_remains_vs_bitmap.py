@@ -31,8 +31,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from pureclick_seat_core import parse_seat_status  # noqa: E402
-from pureclick_showinfo import BROWSER_UA, fetch_round_remains, fetch_show_catalog  # noqa: E402
+from core.seat import parse_seat_status  # noqa: E402
+from core.showinfo import BROWSER_UA, fetch_round_remains, fetch_show_catalog  # noqa: E402
 
 ORIGIN = "https://tickets.interpark.com"
 HEADERS = {

@@ -19,19 +19,20 @@ if str(MAC_DIR) not in sys.path:
     sys.path.insert(0, str(MAC_DIR))
 
 from browser_bridge import BrowserBridge  # noqa: E402
-from pureclick_arm_core import ArmPayload  # noqa: E402
-from pureclick_core import KST, PureClickError, ServerClock, parse_target_time  # noqa: E402
+from core.arm import ArmPayload  # noqa: E402
+from core.clock import KST, PureClickError, ServerClock, parse_target_time  # noqa: E402
 from pureclick_mac_core import ensure_mac_ready  # noqa: E402
-from pureclick_seat_core import (  # noqa: E402
+from core.seat import (  # noqa: E402
     SeatPreferences,
     parse_goods_code,
     map_move_lines,
+    running_hint,
     seat_order_lines,
     serialize_preferences,
 )
-from pureclick_showinfo import seat_table_lines, fetch_round_remains, fetch_show_catalog  # noqa: E402
-from pureclick_watch_trigger import TriggerState, next_trigger_state  # noqa: E402
-from pureclick_zone_map import (  # noqa: E402
+from core.showinfo import seat_table_lines, fetch_round_remains, fetch_show_catalog  # noqa: E402
+from core.watch_trigger import TriggerState, next_trigger_state  # noqa: E402
+from core.zone_map import (  # noqa: E402
     block_keys_in_watch_rect,
     is_click,
     parse_box,
@@ -88,7 +89,6 @@ class PureClickMacApp(tk.Tk):
     }
     # Mirrors CATCH_MIN_POLL_MS in the autopilot; used only to say how long a
     # sweep takes, never to drive the poll.
-    CATCH_TICK_MS = 200
 
     # A config written by an older build must still open.
     LEGACY_STRATEGIES = {"stage": "center", "random": "center"}
@@ -1503,7 +1503,7 @@ class PureClickMacApp(tk.Tk):
         elif seat.get("running"):
             head = message.split(" · ")[0]
             self._set_state(ACCENT, f"{head} · 시도 {attempts}회" if attempts else head,
-                            self._running_hint(seat, message))
+                            running_hint(seat, message))
         elif seat.get("haltedByUser"):
             self._set_state(FAINT, f"멈춤 · 시도 {attempts}회", "다시 하려면 위 버튼을 누르세요.")
         elif seat.get("lastError"):
@@ -1555,133 +1555,7 @@ class PureClickMacApp(tk.Tk):
         if dot is not None and dot.winfo_exists():
             dot.configure(fg=colour)
 
-    CAPTCHA_LABELS = {
-        "reading": "보안문자 읽는 중…",
-        "read": "보안문자 인식됨",
-        "unreadable": "보안문자 인식 실패 — 예매 창에서 직접 입력하세요",
-        "timeout": "보안문자 인식 무응답 — 예매 창에서 직접 입력하세요",
-    }
 
-    @classmethod
-    def _running_hint(cls, seat: dict, message: str) -> str:
-        """The one line worth reading while it runs."""
-        # A gateway block makes every other number meaningless.
-        blocked = int(seat.get("blockedForMs") or 0)
-        if blocked > 0:
-            return (
-                f"접속 차단 중 — {blocked // 1000}초 남음. "
-                "차단 중에는 좌석을 잡을 수 없고, 계속 시도하면 차단이 길어집니다."
-            )
-
-        # A captcha blocks everything else, so it outranks the rest.
-        captcha = seat.get("captcha") or {}
-        label = cls.CAPTCHA_LABELS.get(str(captcha.get("state") or ""))
-        if label:
-            detail = str(captcha.get("detail") or "")
-            return f"{label} · {detail}" if detail else label
-
-        # Losing seats to other buyers is the normal texture of a busy open, and
-        # it must not read like a stuck macro — it is the macro working. Ranked
-        # above the error-dialog line because during an open it is the common
-        # case and the more informative one.
-        conflicts = seat.get("takenConflicts") or 0
-        if conflicts:
-            cooling = seat.get("cooldownSeats") or 0
-            tail = f" · 대기 중인 자리 {cooling}석" if cooling else ""
-            return f"다른 사람이 먼저 잡은 자리 {conflicts}회 — 바로 다음 자리로 넘어갑니다{tail}"
-
-        # A dialog was covering the map and has been cleared. Worth saying: the
-        # run looked frozen for a long time before anything cleared these.
-        overlays = seat.get("overlaysDismissed") or 0
-        unknown = str(seat.get("unknownDialog") or "").strip()
-        if overlays and unknown:
-            return f"안내창 {overlays}회 닫고 계속합니다 — {unknown[:52]}"
-        if unknown:
-            return f"처음 보는 안내창이 떴습니다: {unknown[:70]}"
-
-        opened = str(seat.get("blockEntered") or "").strip()
-        misses = seat.get("blockEntryMisses") or 0
-        if misses:
-            return f"구역을 여는 데 {misses}번 실패했습니다 — 예매 창에서 구역을 직접 열어 주세요."
-        if opened:
-            return f"구역 {opened} 을(를) 열고 그 안에서 자리를 찾는 중입니다."
-
-        misses = seat.get("aimMisses") or 0
-        if misses:
-            return f"화면에 그려지지 않아 건너뛴 자리 {misses}석 — 맵을 확대하면 줄어듭니다."
-
-        dialogs = seat.get("seatErrorDialogs") or 0
-        if dialogs:
-            return f"좌석맵 오류창 {dialogs}회 자동으로 닫았습니다."
-
-        skipped = seat.get("skippedByMap") or 0
-        rejects = seat.get("consecutiveRejects") or 0
-        if rejects >= 3:
-            return (
-                f"연속 {rejects}회 거절 — 좌석맵이 보여주는 빈자리를 서버가 거부하고 있습니다. "
-                "계속되면 자동으로 멈춥니다."
-            )
-        if skipped:
-            return f"좌석맵이 선택 불가로 표시한 {skipped}석은 건너뛰었습니다."
-        # A drawn area holding no seats is silently replaced with the whole
-        # venue — seen as "감시 구역: 지정됨 · 0석" while the watch swept
-        # everything. An area that does nothing has to say so.
-        note = str(seat.get("triggerNote") or "").strip()
-        if seat.get("running") and note:
-            return note
-
-        if seat.get("watchRectIgnored"):
-            return "감시 구역에 좌석이 없습니다 · 전체를 감시하는 중 — [범위 정하기]에서 다시 그어 주세요"
-
-        # The only latency that decides whether a seat is yours: from the
-        # moment it opened to the moment we clicked it.
-        caught = seat.get("catchLatencyMs") or 0
-        if caught:
-            via_freed = {"page": " · 예매 창 통신으로 먼저 발견", "poll": ""}.get(
-                str(seat.get("lastFreedVia") or ""), ""
-            )
-            won = {"api": "API 선점", "click": "맵 클릭"}.get(str(seat.get("wonVia") or ""), "")
-            verdict = "빠릅니다" if caught <= 400 else "느립니다 — 범위를 좁혀 보세요"
-            tail = f" · {won}" if won else ""
-            return f"빈자리 발견 후 {caught}ms 만에 잡음{tail}{via_freed} · {verdict}"
-
-        # The gap this whole design turns on: how long the 예매 창 takes to agree
-        # that a seat the server already freed is actually free. If this is
-        # small the page keeps up on its own; if it is large, that wait is the
-        # race we were losing.
-        agreed = seat.get("domAgreedMs") or 0
-        if agreed and seat.get("running"):
-            worst = seat.get("domAgreedWorstMs") or agreed
-            nudges = seat.get("nudges") or 0
-            note = f"예매 창이 빈자리를 인식하는 데 {agreed}ms (최대 {worst}ms)"
-            if nudges:
-                note += f" · 맵 새로고침 {nudges}회"
-            return note
-
-        # How long one full sweep of what you are watching takes. Losing a race
-        # is usually this number rather than click speed: the watch used to poll
-        # two blocks per tick across the whole venue, so a 43-block stadium took
-        # nearly nine seconds to come back round to any one block.
-        watched = seat.get("watchedBlocks") or 0
-        ticks = seat.get("sweepTicks") or 0
-        if seat.get("running") and watched and ticks:
-            # The measured tick, not the configured sleep. A tick is the sleep
-            # *plus* the request, and seatStatus costs ~58ms — so reporting
-            # ticks x 200ms understated every sweep by about a third, in the
-            # one number you read when deciding whether to narrow the range.
-            tick = seat.get("observedTickMs") or cls.CATCH_TICK_MS
-            sweep = ticks * tick
-            note = f"감시 {watched}구역 · 한 바퀴 {sweep}ms"
-            # A sweep this long is the race, not a detail. Watching the whole
-            # venue means a seat freeing just behind the cursor waits a full
-            # lap before we even look at it.
-            if sweep >= 1000:
-                note += f" · 범위를 정하면 {tick}ms로 줄어듭니다"
-            return note
-
-        # Everything after the first ' · ' is the explanation the toast carries.
-        parts = message.split(" · ", 1)
-        return parts[1] if len(parts) > 1 else ""
 
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from pureclick_seat_core import (
+from core.seat import (
     SeatAutopilotError,
     SeatCandidate,
     SeatPreferences,
@@ -17,6 +17,8 @@ from pureclick_seat_core import (
     rank_seats,
     resolve_seat_type,
     map_move_lines,
+    CATCH_TICK_MS,
+    running_hint,
     seat_order_lines,
     select_seat_unit,
 )
@@ -34,7 +36,7 @@ class PureClickSeatCoreTests(unittest.TestCase):
         )
 
     def test_pick_adjacent_seats(self) -> None:
-        from pureclick_seat_core import pick_adjacent_seats
+        from core.seat import pick_adjacent_seats
 
         seats = [
             SeatCandidate("a", "5", "지정석 P", "A열", "1"),
@@ -413,6 +415,67 @@ class MapMoveLinesTest(unittest.TestCase):
         # A watch inside one 구역 never travels, and its scan cost is still the
         # thing worth knowing.
         self.assertTrue(map_move_lines({"domScans": 5, "domScanMs": 20.0, "domScanWorstMs": 6}))
+
+
+class RunningHintTest(unittest.TestCase):
+    """The line you read while a run is going.
+
+    119 lines of branching that lived inside the GUI class and had never had a
+    test — you cannot instantiate a tkinter app in a unit test, so nobody could.
+    It is now a plain function, and these pin the order it resolves in, because
+    the order *is* the design: the thing that stops everything else outranks the
+    thing that is merely interesting.
+    """
+
+    def test_a_gateway_block_outranks_everything(self) -> None:
+        # While blocked, no seat can be taken and retrying lengthens the block,
+        # so every other number on screen is noise.
+        hint = running_hint(
+            {"blockedForMs": 90_000, "takenConflicts": 5,
+             "captcha": {"state": "unreadable"}, "seatErrorDialogs": 3},
+            "취소표 감시 중",
+        )
+        self.assertIn("접속 차단", hint)
+        self.assertIn("90초", hint)
+
+    def test_a_captcha_outranks_the_rest(self) -> None:
+        hint = running_hint(
+            {"captcha": {"state": "unreadable"}, "takenConflicts": 4}, "감시 중"
+        )
+        self.assertIn("보안문자", hint)
+
+    def test_losing_a_race_reads_as_working_not_broken(self) -> None:
+        # A busy open means other buyers take seats first. That is the macro
+        # working, and it used to read like a stall.
+        hint = running_hint({"takenConflicts": 7, "cooldownSeats": 3}, "감시 중")
+        self.assertIn("7", hint)
+        self.assertIn("다음 자리", hint)
+
+    def test_it_reports_the_measured_tick_not_the_configured_one(self) -> None:
+        # A tick is the sleep plus the request; seatStatus measures 58ms, so
+        # ticks x 200 understated every sweep by about a third — in the one
+        # number you read when deciding whether to narrow the 감시 구역.
+        seat = {"running": True, "watchedBlocks": 34, "sweepTicks": 17,
+                "observedTickMs": 258}
+        self.assertIn(str(17 * 258), running_hint(seat, "감시 중"))
+
+    def test_it_falls_back_to_the_default_tick_before_one_is_measured(self) -> None:
+        seat = {"running": True, "watchedBlocks": 4, "sweepTicks": 2}
+        self.assertIn(str(2 * CATCH_TICK_MS), running_hint(seat, "감시 중"))
+
+    def test_a_blind_trigger_says_so(self) -> None:
+        # When the one-request trigger cannot see, the watch is paying a full
+        # sweep for every look and the user can act on that.
+        hint = running_hint(
+            {"running": True, "triggerNote": "잔여석 0 — 판매 중이 아닌 회차일 수 있습니다"},
+            "감시 중",
+        )
+        self.assertIn("판매 중이 아닌", hint)
+
+    def test_an_empty_status_still_returns_something(self) -> None:
+        # It is rendered on every poll, including before anything has happened.
+        self.assertIsInstance(running_hint({}, "대기 중"), str)
+        self.assertIsInstance(running_hint({}, ""), str)
 
 
 if __name__ == "__main__":

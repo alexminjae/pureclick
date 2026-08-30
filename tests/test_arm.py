@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from pureclick_arm_core import ArmPayload, browser_config_snippet
+from core.arm import ArmPayload, browser_config_snippet
 
 
 class PureClickArmCoreTests(unittest.TestCase):

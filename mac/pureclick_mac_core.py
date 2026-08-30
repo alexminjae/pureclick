@@ -7,7 +7,7 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from pureclick_core import ClickError, PureClickError
+from core.clock import ClickError, PureClickError
 
 if TYPE_CHECKING:
     from types import TracebackType
