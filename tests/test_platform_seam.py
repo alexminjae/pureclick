@@ -202,6 +202,104 @@ class WindowsCookieTests(unittest.TestCase):
         self.assertEqual(windows.restore_cookies(self.window, [{"Value": "x"}]), 0)
 
 
+class Webview2RuntimeDetectionTests(unittest.TestCase):
+    """Reported live: a healthy-looking 조작판 next to a blank 예매창.
+
+    ensure_ready() previously only checked that the Python/.NET interop
+    bindings load — bundled with the app, so they load regardless of whether
+    the actual native WebView2 Runtime is installed. The runtime is only
+    touched later, inside EnsureCoreWebView2Async, and pywebview's own handler
+    for that failing is a bare logger.error with no exception — so the false
+    "ready" reached the panel and the real failure reached nobody. This checks
+    the registry directly instead, the same way Microsoft's own detection
+    sample does.
+
+    winreg does not exist on macOS, so it is fully faked here — a fake module
+    installed into sys.modules, exercising _webview2_runtime_version's actual
+    branching logic rather than skipping the test.
+    """
+
+    def setUp(self) -> None:
+        self._real_winreg = sys.modules.get("winreg")
+
+    def tearDown(self) -> None:
+        if self._real_winreg is not None:
+            sys.modules["winreg"] = self._real_winreg
+        else:
+            sys.modules.pop("winreg", None)
+
+    def _install_fake_registry(self, entries: dict[tuple[int, str], str]):
+        """entries maps (hive, subkey) -> the "pv" value, or absent if not found."""
+        import types
+
+        fake = types.ModuleType("winreg")
+        fake.HKEY_LOCAL_MACHINE = 1
+        fake.HKEY_CURRENT_USER = 2
+
+        class _Key:
+            def __init__(self, hive, subkey):
+                self.hive, self.subkey = hive, subkey
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def OpenKey(hive, subkey):
+            if (hive, subkey) not in entries:
+                raise OSError("not found")
+            return _Key(hive, subkey)
+
+        def QueryValueEx(key, name):
+            assert name == "pv"
+            return entries[(key.hive, key.subkey)], 1
+
+        fake.OpenKey = OpenKey
+        fake.QueryValueEx = QueryValueEx
+        sys.modules["winreg"] = fake
+
+    def test_no_key_anywhere_means_not_installed(self) -> None:
+        self._install_fake_registry({})
+        self.assertEqual(windows._webview2_runtime_version(), "")
+
+    def test_a_key_present_with_all_zeros_means_not_installed(self) -> None:
+        """A key can exist without the runtime being there — not hypothetical,
+        it is the exact case Microsoft's own detection sample guards against."""
+        key = (1, f"SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{windows._WEBVIEW2_CLIENT_GUID}")
+        self._install_fake_registry({key: "0.0.0.0"})
+        self.assertEqual(windows._webview2_runtime_version(), "")
+
+    def test_a_real_version_in_the_machine_key_is_found(self) -> None:
+        key = (1, f"SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{windows._WEBVIEW2_CLIENT_GUID}")
+        self._install_fake_registry({key: "128.0.2739.42"})
+        self.assertEqual(windows._webview2_runtime_version(), "128.0.2739.42")
+
+    def test_a_per_user_install_with_no_admin_rights_is_still_found(self) -> None:
+        key = (2, f"SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{windows._WEBVIEW2_CLIENT_GUID}")
+        self._install_fake_registry({key: "120.0.0.0"})
+        self.assertEqual(windows._webview2_runtime_version(), "120.0.0.0")
+
+    def test_ensure_ready_actually_calls_the_registry_check_and_raises_on_empty(self) -> None:
+        """The exact gap this exists to close: bindings fine, runtime absent.
+
+        ensure_ready() cannot be run end to end from here — its first line is
+        `if platform.system() != "Windows": raise`, and pythonnet is not
+        installed on this machine either, so any real call raises for reasons
+        that have nothing to do with what changed. Source inspection is the
+        honest check: that the registry lookup is actually wired into the
+        guard, in the right order, with the right condition. Wiring a check no
+        caller ever reaches is exactly as useless as not having it.
+        """
+        import inspect
+
+        source = inspect.getsource(windows.ensure_ready)
+        self.assertIn("_webview2_runtime_version()", source,
+                     "ensure_ready must call the registry check, not just define it")
+        self.assertIn("if not _webview2_runtime_version()", source,
+                     "must raise specifically when the runtime is absent, not on any falsy value")
+
+
 class SeamContractTests(unittest.TestCase):
     def test_both_backends_expose_the_same_interface(self) -> None:
         for name in ("ensure_ready", "lock_exclusive", "unlock",

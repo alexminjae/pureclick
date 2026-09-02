@@ -101,6 +101,55 @@ def prepare_display() -> None:
     return None
 
 
+# The WebView2 Runtime's own installer-detection GUID, the same one Microsoft's
+# own sample code checks — not something specific to this app.
+_WEBVIEW2_CLIENT_GUID = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+
+
+def _webview2_runtime_version() -> str:
+    """The installed WebView2 Runtime's version, or "" if none is found.
+
+    Checked directly against the registry rather than trusting that the Python
+    bindings loading means the runtime is present — they do not depend on each
+    other. edgechromium.py's interop DLLs are bundled with this app and load
+    fine regardless of whether msedgewebview2.exe exists on the machine; the
+    runtime itself is only touched later, inside EnsureCoreWebView2Async — and
+    pywebview's own handler for that call failing is a bare `logger.error(...)`
+    with no exception raised. Measured live: a panel that reported everything
+    fine, next to a 예매창 that never rendered anything, because ensure_ready()
+    had only verified the bindings, which is not the same claim as "this will
+    work" and was quietly standing in for it.
+
+    Checks the three locations Microsoft's own installation-detection sample
+    checks: the per-machine key under both hives a 64-bit Windows install can
+    land in, and the per-user key for an install made without admin rights.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return ""  # not Windows; callers only reach here on Windows
+
+    for hive, subkey in (
+        (winreg.HKEY_LOCAL_MACHINE,
+         f"SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{_WEBVIEW2_CLIENT_GUID}"),
+        (winreg.HKEY_LOCAL_MACHINE,
+         f"SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{_WEBVIEW2_CLIENT_GUID}"),
+        (winreg.HKEY_CURRENT_USER,
+         f"SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{_WEBVIEW2_CLIENT_GUID}"),
+    ):
+        try:
+            with winreg.OpenKey(hive, subkey) as key:
+                version, _ = winreg.QueryValueEx(key, "pv")
+        except OSError:
+            continue
+        # An empty or all-zero version is how the key can exist without the
+        # runtime actually being installed — not hypothetical, it is exactly
+        # what Microsoft's own detection sample checks for.
+        if version and str(version) != "0.0.0.0":
+            return str(version)
+    return ""
+
+
 def ensure_ready() -> None:
     if platform.system() != "Windows":
         raise RuntimeError("app_platform.windows loaded on a non-Windows system")
@@ -111,12 +160,20 @@ def ensure_ready() -> None:
     try:
         from webview.platforms import edgechromium  # noqa: F401  # type: ignore[import-not-found]
     except Exception as exc:  # noqa: BLE001
-        # This is what a missing WebView2 runtime looks like, and it is the most
-        # likely thing to go wrong on a machine that has never run this.
+        # This is what a missing WebView2 runtime *can* look like, but it is
+        # not the only shape the failure takes — see _webview2_runtime_version.
         raise RuntimeError(
             "WebView2 런타임이 없습니다. 아래 주소에서 'Evergreen Bootstrapper'를 "
             f"설치한 뒤 다시 실행하세요:\n{WEBVIEW2_DOWNLOAD}\n({exc})"
         ) from exc
+    if not _webview2_runtime_version():
+        # The bindings loaded, but the native runtime itself is not there — the
+        # failure a bundled interop DLL cannot see. Left unchecked, this is the
+        # one that produces a healthy-looking panel next to a blank 예매창.
+        raise RuntimeError(
+            "WebView2 런타임을 찾지 못했습니다. 아래 주소에서 'Evergreen Bootstrapper'를 "
+            f"설치한 뒤 다시 실행하세요:\n{WEBVIEW2_DOWNLOAD}"
+        )
 
 
 def install_document_start_script(window: Any, source: str) -> bool:
