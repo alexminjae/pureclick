@@ -488,7 +488,12 @@ def main() -> None:
 
     threading.Thread(target=watch_state, args=(window, stop_event), daemon=True).start()
     threading.Thread(target=poll_context, args=(window, stop_event), daemon=True).start()
-    webview.start()
+    # debug=True turns on DevTools (right-click → 검사, or F12) inside the 예매
+    # 창 itself. Every diagnostic added so far only sees the Python side — a
+    # page that draws nothing, with nothing crashing or hanging on the Python
+    # side, is exactly the case where the real answer is in the browser's own
+    # console or network tab, which nothing here has ever been able to see.
+    webview.start(debug=True)
 
 
 if __name__ == "__main__":

@@ -320,6 +320,20 @@ class SameThreadCallTests(unittest.TestCase):
             windows._script_ids.clear()
 
 
+class DebugModeTests(unittest.TestCase):
+    """Every diagnostic added so far only sees the Python side. A page that
+    draws nothing, with nothing crashing or hanging on the Python side, is
+    exactly the case where the real answer is in the browser's own console or
+    network tab — invisible without this.
+    """
+
+    def test_webview_start_runs_with_debug_enabled(self) -> None:
+        source = (ROOT / "mac" / "browser_host.py").read_text(encoding="utf-8")
+        self.assertIn("webview.start(debug=True)", source,
+                     "DevTools must actually be reachable (F12 / right-click → 검사), "
+                     "not just theoretically available")
+
+
 class DisableGpuRenderingTests(unittest.TestCase):
     """Reported live: panel healthy, no crash, no hang — the timeouts and the
     thread-crash hook added for exactly those would have caught either — and
