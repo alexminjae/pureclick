@@ -154,11 +154,57 @@ def install_document_start_script(window: webview.Window) -> bool:
         return False
 
 
+# pywebview's own evaluate_js — third-party, not ours to edit — does a bare
+# `semaphore.acquire()` with no timeout. If WebView2's own message loop never
+# processes the queued call, for any reason on any machine, the calling thread
+# blocks forever: no exception, no log, nothing. Measured live: the 예매 창
+# rendered once and then poll_context never wrote another bridge health
+# report — and no crash.log either, because nothing ever raised. A thread stuck
+# inside a third-party library's own untimed wait is invisible to every check
+# this app already has.
+_EVALUATE_JS_TIMEOUT = 8.0
+# poll_context runs every 400ms and is the only source of the bridge health
+# report the panel reads — a stuck call there has to be noticed and reported
+# within a few ticks, not eventually.
+_POLL_CONTEXT_TIMEOUT = 3.0
+
+
+def _call_with_timeout(fn: Any, *, timeout: float, label: str) -> Any:
+    """Run `fn()` and give up after `timeout`s instead of waiting forever.
+
+    Runs `fn` in a disposable thread and gives this caller its own thread back
+    if it does not return in time. The stuck call itself is not cancelled —
+    there is no way to interrupt a blocked WebView2 Invoke from here — but the
+    poller that called this can report the timeout and try again next tick,
+    instead of silently ceasing to exist.
+    """
+    box: dict[str, Any] = {}
+    errors: list[BaseException] = []
+
+    def runner() -> None:
+        try:
+            box["result"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread below
+            errors.append(exc)
+
+    worker = threading.Thread(target=runner, name=f"evaluate_js:{label}", daemon=True)
+    worker.start()
+    worker.join(timeout=timeout)
+    if worker.is_alive():
+        raise TimeoutError(f"{label}: evaluate_js did not return within {timeout:g}s")
+    if errors:
+        raise errors[0]
+    return box.get("result")
+
+
 def reinstall_autopilot_scripts(window: webview.Window) -> None:
     """Refresh both the document-start snapshot and the live page copy."""
     install_document_start_script(window)
     if not (window.get_current_url() or "").startswith(("about:", "data:")):
-        window.evaluate_js(load_script())
+        _call_with_timeout(
+            lambda: window.evaluate_js(load_script()),
+            timeout=_EVALUATE_JS_TIMEOUT, label="reinstall_autopilot_scripts",
+        )
 
 
 def read_state() -> dict[str, Any]:
@@ -232,7 +278,10 @@ def apply_state(window: webview.Window) -> None:
     if not scripts:
         return
 
-    window.evaluate_js("\n".join(scripts))
+    _call_with_timeout(
+        lambda: window.evaluate_js("\n".join(scripts)),
+        timeout=_EVALUATE_JS_TIMEOUT, label="apply_state",
+    )
 
     drop = []
     if command:
@@ -263,7 +312,10 @@ def inject_autopilot(window: webview.Window) -> None:
     # arrived one moment too late to be read, which is how you can land on the
     # seat map after the queue and have nothing start.
     apply_state(window)
-    window.evaluate_js(load_script())
+    _call_with_timeout(
+        lambda: window.evaluate_js(load_script()),
+        timeout=_EVALUATE_JS_TIMEOUT, label="inject_autopilot",
+    )
     # And once more, for anything the panel wrote while the script was loading.
     apply_state(window)
 
@@ -341,7 +393,13 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
                     browser_session.save_jar(COOKIE_PATH, jar)
                     saved_jar = jar
 
-            snapshot = window.evaluate_js(_SNAPSHOT_JS)
+            # Shorter than the other call sites: this runs every 400ms and is
+            # the only source of the bridge health the panel reads, so a stuck
+            # call here has to be noticed and reported quickly, not eventually.
+            snapshot = _call_with_timeout(
+                lambda: window.evaluate_js(_SNAPSHOT_JS),
+                timeout=_POLL_CONTEXT_TIMEOUT, label="poll_context",
+            )
             if isinstance(snapshot, dict):
                 for key, field in (
                     ("page_context", "context"),
