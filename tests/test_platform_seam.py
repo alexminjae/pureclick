@@ -340,15 +340,28 @@ class AtomicStateTests(unittest.TestCase):
         Two processes rewrite this file several times a second. A reader landing
         mid-write got a truncated document, load_state caught the JSONDecodeError
         and returned {}, and the whole panel state silently reset.
+
+        Every real caller pairs load_state/save_state with locked_state — see
+        read_state/write_state and apply_state in browser_host.py, patch_state
+        here. That lock is the actual correctness guarantee on Windows: it is a
+        mandatory OS lock there (msvcrt.locking), not advisory like flock, so a
+        reader and a writer that both take it can never overlap, and
+        _replace_atomic's retry is defense in depth rather than the thing this
+        relies on. An earlier version of this test called load_state directly,
+        unlocked, in a zero-delay busy loop across three threads — a contention
+        pattern no real caller produces, and adversarial enough that it exhausted
+        the retry budget on the Windows CI runner. Locked, the same contention is
+        exercised honestly and reliably passes.
         """
         import tempfile
 
-        from browser_bridge import load_state, save_state
+        from browser_bridge import load_state, locked_state, save_state
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "state.json"
             big = {"show_catalog": {"blocks": [{"k": i} for i in range(4000)]}}
-            save_state(path, big)
+            with locked_state(path):
+                save_state(path, big)
 
             stop = threading.Event()
             torn: list[str] = []
@@ -359,7 +372,9 @@ class AtomicStateTests(unittest.TestCase):
                 # earlier version of this test skipped exactly that case with
                 # `if state and ...`, which made it pass against the bug.
                 while not stop.is_set():
-                    if not load_state(path).get("show_catalog"):
+                    with locked_state(path):
+                        state = load_state(path)
+                    if not state.get("show_catalog"):
                         torn.append("a reader saw no catalog — the file was mid-write")
 
             readers = [threading.Thread(target=reader, daemon=True) for _ in range(3)]
@@ -367,7 +382,10 @@ class AtomicStateTests(unittest.TestCase):
                 t.start()
             try:
                 for n in range(150):
-                    save_state(path, {"show_catalog": {"blocks": [{"k": i} for i in range(4000)], "n": n}})
+                    with locked_state(path):
+                        save_state(
+                            path, {"show_catalog": {"blocks": [{"k": i} for i in range(4000)], "n": n}}
+                        )
             finally:
                 stop.set()
                 for t in readers:
