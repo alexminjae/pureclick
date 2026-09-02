@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime
 import sys
+import threading
 import traceback
 from pathlib import Path
 
@@ -50,6 +51,27 @@ def _log_crash(role: str, exc: BaseException) -> None:
             traceback.print_exception(type(exc), exc, exc.__traceback__, file=fh)
     except Exception:  # noqa: BLE001 - see above
         pass
+
+
+def _thread_crashed(args: threading.ExceptHookArgs) -> None:
+    """Catch what the try/except in `main()` structurally cannot.
+
+    watch_state and poll_context — the browser process's two pollers, and the
+    only thing that ever writes the bridge health report the panel reads —
+    run as background threads, not as calls inside main()'s own call stack. An
+    exception there does not propagate up to main() to be caught by its
+    try/except; Python hands it to this hook instead and the thread just ends.
+    That is precisely the shape the msvcrt intra-process lock bug had, and it
+    is the first place to look for a report of "worked for a moment, then the
+    예매 창 went blank again" — a poller dying mid-session, after the first
+    successful render, rather than before it.
+    """
+    if args.exc_value is not None:
+        _log_crash(f"thread '{args.thread.name if args.thread else '?'}'", args.exc_value)
+    threading.__excepthook__(args)  # still prints to stderr when a console exists
+
+
+threading.excepthook = _thread_crashed
 
 
 def main() -> None:

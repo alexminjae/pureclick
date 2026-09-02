@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -87,3 +88,53 @@ class CrashLogTests(unittest.TestCase):
         expected = app_platform.user_data_dir() / "crash.log"
         pureclick_main._crash_log_path = self._original  # the real function, not setUp's fake
         self.assertEqual(pureclick_main._crash_log_path(), expected)
+
+
+class BackgroundThreadCrashTests(unittest.TestCase):
+    """The gap the main-thread try/except cannot cover by construction.
+
+    watch_state and poll_context — the browser process's two pollers, and the
+    only thing that ever writes the bridge health report the panel reads — run
+    as background threads. An exception there does not propagate up through
+    main()'s own call stack to be caught by its try/except; Python routes it to
+    threading.excepthook instead, and the thread just ends. This is precisely
+    the shape the msvcrt intra-process lock bug had, and reported live as the
+    예매 창 rendering once and then going blank again — a poller dying
+    mid-session, after the first successful render, not before it.
+    """
+
+    def setUp(self) -> None:
+        self._original_hook = threading.excepthook
+        self._tmp = tempfile.TemporaryDirectory()
+        self.log_path = Path(self._tmp.name) / "crash.log"
+        self._original_path_fn = pureclick_main._crash_log_path
+        pureclick_main._crash_log_path = lambda: self.log_path
+
+    def tearDown(self) -> None:
+        threading.excepthook = self._original_hook
+        pureclick_main._crash_log_path = self._original_path_fn
+        self._tmp.cleanup()
+
+    def test_pureclick_main_installs_the_hook_at_import_time(self) -> None:
+        """Not a helper nobody calls — this is what makes it actually run."""
+        self.assertIs(threading.excepthook, pureclick_main._thread_crashed)
+
+    def test_an_exception_in_a_background_thread_is_logged(self) -> None:
+        def poller() -> None:
+            raise ValueError("simulated poll_context crash")
+
+        t = threading.Thread(target=poller, name="poll_context")
+        t.start()
+        t.join(timeout=5)
+
+        self.assertTrue(self.log_path.is_file(),
+                        "the try/except in main() cannot see this — only the hook can")
+        text = self.log_path.read_text(encoding="utf-8")
+        self.assertIn("poll_context", text, "must name which thread died, not just that one did")
+        self.assertIn("simulated poll_context crash", text)
+
+    def test_a_clean_thread_exit_logs_nothing(self) -> None:
+        t = threading.Thread(target=lambda: None, name="watch_state")
+        t.start()
+        t.join(timeout=5)
+        self.assertFalse(self.log_path.exists(), "a log on every ordinary exit would bury the real one")
