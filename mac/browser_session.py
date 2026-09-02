@@ -7,99 +7,68 @@ next run. Without this module every launch starts logged out, and NOL's Naver
 button is a full OAuth redirect carrying `auth_type=reauthenticate`, so "logged
 out" means a real Naver login, by hand, every single time.
 
-So the jar is carried across launches explicitly, through WKHTTPCookieStore.
-That also preserves `cf_clearance`, without which Cloudflare re-challenges.
+So the jar is carried across launches explicitly, through whichever cookie
+store the platform has — WKHTTPCookieStore on macOS, CoreWebView2.CookieManager
+on Windows, both behind app_platform. That also preserves `cf_clearance`,
+without which Cloudflare re-challenges.
 
-The file is a live session — anyone holding it is logged in as you. It is
-written 0600 and is in .gitignore. Delete it to sign out.
+The file is a live session — anyone holding it is logged in as you. It is in
+.gitignore, and on macOS it is written 0600. **On Windows chmod only toggles
+the read-only bit and applies no ACL**, so there the file is readable by any
+other account on the machine. Delete it to sign out.
 """
 
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
-from threading import Semaphore
 from typing import Any
+
+import app_platform
 
 # Cookie fields worth carrying. `Expires` is an NSDate and needs converting;
 # the rest round-trip as strings.
-_STRING_KEYS = ("Name", "Value", "Domain", "Path", "Secure", "Version", "Comment")
-
-
-def _cookie_store(window: Any) -> Any | None:
-    """The live WKHTTPCookieStore behind a pywebview window, or None."""
-    try:
-        from webview.platforms import cocoa
-
-        instance = cocoa.BrowserView.instances[window.uid]
-        return instance.webview.configuration().websiteDataStore().httpCookieStore()
-    except Exception:
-        return None
+# Cookie access is the one part of this that is per-platform: WKHTTPCookieStore
+# on macOS, CoreWebView2.CookieManager on Windows. Both live in app_platform, so
+# nothing here imports Foundation or pythonnet — see the guard in
+# tests/test_platform_seam.py.
+#
+# What is shared is everything that matters to callers: the jar shape on disk and
+# the fact that a failure is reported rather than looking like an empty jar. The
+# old `_cookie_store` swallowed every exception and returned None, so on any
+# platform it could not reach, `dump()` returned [] and `restore()` returned 0 —
+# presented to the user as a working app that happens to be logged out, i.e. a
+# full manual Naver login on every single launch with nothing said.
+LAST_ERROR = ""
 
 
 def dump(window: Any, *, timeout: float = 5.0) -> list[dict[str, Any]]:
     """Every cookie the browser currently holds, including HttpOnly ones."""
-    store = _cookie_store(window)
-    if store is None:
+    global LAST_ERROR
+    try:
+        rows = app_platform.dump_cookies(window, timeout=timeout)
+        LAST_ERROR = ""
+        return rows
+    except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+        LAST_ERROR = f"쿠키를 저장하지 못했습니다: {exc}"
+        print(f"[pureclick] {LAST_ERROR}", file=sys.stderr)
         return []
-
-    from PyObjCTools import AppHelper
-
-    done = Semaphore(0)
-    rows: list[dict[str, Any]] = []
-
-    def handler(cookies) -> None:
-        try:
-            for cookie in cookies:
-                properties = cookie.properties()
-                row: dict[str, Any] = {}
-                for key in _STRING_KEYS:
-                    value = properties.objectForKey_(key)
-                    if value is not None:
-                        row[key] = str(value)
-                expires = properties.objectForKey_("Expires")
-                if expires is not None:
-                    row["Expires"] = float(expires.timeIntervalSince1970())
-                if properties.objectForKey_("HttpOnly") is not None:
-                    row["HttpOnly"] = True
-                if row.get("Name"):
-                    rows.append(row)
-        finally:
-            done.release()
-
-    AppHelper.callAfter(lambda: store.getAllCookies_(handler))
-    if not done.acquire(timeout=timeout):
-        return []
-    return rows
 
 
 def restore(window: Any, rows: list[dict[str, Any]]) -> int:
     """Put a saved jar back. Must run before the first navigation."""
-    store = _cookie_store(window)
-    if store is None:
+    global LAST_ERROR
+    if not rows:
         return 0
-
-    import Foundation
-    from PyObjCTools import AppHelper
-
-    restored = 0
-    for row in rows:
-        properties = Foundation.NSMutableDictionary.dictionary()
-        for key in _STRING_KEYS:
-            if row.get(key) is not None:
-                properties.setObject_forKey_(row[key], key)
-        if row.get("Expires"):
-            properties.setObject_forKey_(
-                Foundation.NSDate.dateWithTimeIntervalSince1970_(row["Expires"]), "Expires"
-            )
-        if row.get("HttpOnly"):
-            properties.setObject_forKey_("TRUE", "HttpOnly")
-        cookie = Foundation.NSHTTPCookie.cookieWithProperties_(properties)
-        if cookie is None:
-            continue
-        AppHelper.callAfter(lambda c=cookie: store.setCookie_completionHandler_(c, None))
-        restored += 1
-    return restored
+    try:
+        restored = app_platform.restore_cookies(window, rows)
+        LAST_ERROR = ""
+        return restored
+    except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+        LAST_ERROR = f"로그인 정보를 복원하지 못했습니다: {exc}"
+        print(f"[pureclick] {LAST_ERROR}", file=sys.stderr)
+        return 0
 
 
 def load_jar(path: Path) -> list[dict[str, Any]]:

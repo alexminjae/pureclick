@@ -138,6 +138,34 @@ const seat = (id, grade, gradeName, rowNo, seatNo, extra = {}) => ({
   label: `[${gradeName}] ${rowNo} ${seatNo}`,
 });
 
+// Puts the sandbox on a NOL product page with an armed, re-entry-enabled config.
+// Returns a restore function. `targetOffsetSeconds` is relative to now: negative
+// means the open has passed.
+function armFixture({ targetOffsetSeconds }) {
+  const loc = sandbox.location;
+  const before = { href: loc.href, pathname: loc.pathname, hostname: loc.hostname };
+  loc.hostname = "nol.yanolja.com";
+  loc.pathname = "/ticket/products/26012515";
+  loc.href = "https://nol.yanolja.com/ticket/products/26012515";
+  sandbox.localStorage.setItem("pureclick_arm_v1", JSON.stringify({
+    enabled: true,
+    fired: false,
+    goods_code: "26012515",
+    play_date: "20260901",
+    play_seq: "001",
+    target_server_unix: Date.now() / 1000 + targetOffsetSeconds,
+    offset_seconds: 0,
+    use_waiting_api: true,
+  }));
+  sandbox.localStorage.setItem("pureclick_seat_v1", JSON.stringify({ reentry: true, quantity: 1 }));
+  return () => {
+    Object.assign(loc, before);
+    sandbox.localStorage.removeItem("pureclick_arm_v1");
+    sandbox.localStorage.removeItem("pureclick_seat_v1");
+    sandbox.window.PureClick.race.resetReentryState();
+  };
+}
+
 const tests = {
   "grade order matches by name, not per-show code"() {
     const musical = [
@@ -230,6 +258,86 @@ const tests = {
     assert.deepEqual(masks[0].slice(0, 4), [true, true, true, true]);
     assert.deepEqual(masks[1].slice(0, 4), [false, false, false, false]);
     assert.deepEqual(picker.parseSeatStatus(null), []);
+  },
+
+  "a missing block keeps its slot instead of shifting its neighbours"() {
+    // Position is the only thing tying a mask to a block: seatStatus answers
+    // one string per requested block and carries no keys, so every consumer
+    // matches by index. Filtering non-strings out compacted the array, and one
+    // null entry handed every block after it its neighbour's bitmap — the run
+    // then clicked seats that were never free and read as "연속 N회 거절".
+    const masks = picker.parseSeatStatus({ data: ["00", null, "FF"] });
+    assert.equal(masks.length, 3, "three requested, three slots back");
+    assert.deepEqual(masks[0].slice(0, 4), [false, false, false, false]);
+    assert.equal(masks[1], null, "unknown, not somebody else's bitmap");
+    assert.deepEqual(masks[2].slice(0, 4), [true, true, true, true]);
+  },
+
+  "a venue with no burst to wait for spends its request budget"() {
+    // The one-request budget is an average: cheap while quiet so a trigger can
+    // spend the whole sweep at once. That bargain needs a trigger. A show that
+    // hides its remaining-seat count has none — watch_trigger reports
+    // usable:false and triggerBursts stays 0 — so the saving was never spent
+    // and the watch ran at its slowest rate forever. Measured on 26006903:
+    // 75 blocks, 1 request per 154ms tick, a 5.9 second lap.
+    const { steadyRequestsPerTick } = sandbox.window.PureClick.picker;
+    const state = sandbox.window.PureClick.__seatState ?? null;
+
+    // 75 blocks -> 38 requests. With a trigger, stay at one and wait for it.
+    sandbox.window.PureClick.setWatchTrigger({ usable: true, total: 5 });
+    assert.equal(steadyRequestsPerTick(38, 100), 1, "a usable trigger keeps the saving");
+
+    sandbox.window.PureClick.setWatchTrigger({ usable: false, total: 0 });
+    assert.equal(steadyRequestsPerTick(38, 100), 4, "nothing to save for, so spend");
+
+    // A venue small enough to lap quickly gains nothing and asks for nothing.
+    assert.equal(steadyRequestsPerTick(2, 100), 1);
+    assert.equal(steadyRequestsPerTick(6, 100), 1, "a 6-request lap is already under target");
+
+    // A user-slowed tick still cannot be pushed past the ceiling.
+    assert.ok(steadyRequestsPerTick(400, 100) <= 4);
+  },
+
+  "the watch tick honours a slower setting but never a faster one"() {
+    const { catchPollMs } = sandbox.window.PureClick.picker;
+    assert.equal(catchPollMs({}), 100, "absent means the floor");
+    assert.equal(catchPollMs({ speed_ms: 0 }), 100, "0 means the floor");
+    assert.equal(catchPollMs({ speed_ms: 50 }), 100, "a faster number cannot lower the floor");
+    assert.equal(catchPollMs({ speed_ms: 400 }), 400, "a slower one is honoured");
+  },
+
+  "빈 좌석 counts only seats a run could actually take"() {
+    // It counted raw bitmap bits, so blocks that are not selling this round
+    // were counted in — 26012673 has 622 such seats across 1F/2F D and E. The
+    // panel then reported hundreds of free seats no run could take, and
+    // explained the contradiction with a grade filter that does not exist.
+    const { seatSellable } = sandbox.window.PureClick.picker;
+    assert.equal(seatSellable({ isExposable: true, seatGrade: "1", seatInfoId: "x" }), true);
+    assert.equal(seatSellable({ isExposable: true, seatGrade: "", seatInfoId: "x" }), false,
+      "no grade means not on sale this round");
+    assert.equal(seatSellable({ isExposable: false, seatGrade: "1", seatInfoId: "x" }), false);
+    assert.equal(seatSellable({ isExposable: true, seatGrade: "1" }), false,
+      "nothing to click without a seatInfoId");
+    assert.equal(seatSellable(null), false);
+  },
+
+  "the watch explains itself without naming a filter that was removed"() {
+    const { catchStatusText } = sandbox.window.PureClick.picker;
+    const withRect = catchStatusText([], 12, 100, false, [0, 0, 10, 10]);
+    assert.match(withRect, /감시 구역 밖/);
+    assert.doesNotMatch(withRect, /등급/, "there is no grade selection in the panel");
+
+    const noRect = catchStatusText([], 12, 100, false, null);
+    assert.doesNotMatch(noRect, /등급/);
+
+    const quiet = catchStatusText([], 0, 100, false, null);
+    assert.match(quiet, /빈 좌석 0석/);
+  },
+
+  "a null mask is never read as a free seat"() {
+    // The safe direction: no information must mean "do not try", never "free".
+    assert.equal(picker.seatIsFree({ mask: null }, 0), false);
+    assert.equal(picker.seatIsFree({ mask: [true] }, 0), true);
   },
 
 
@@ -431,12 +539,17 @@ const tests = {
     // load, and the watch took max(budget, configured) — so raising the pace to
     // 200ms changed nothing at all: measured live at "400ms 간격" with a
     // 12-tick sweep, i.e. 4.8s, exactly the speed it had before the work.
+    // The tick now lives in one function, catchPollMs, shared by the run loop
+    // and by the request budget — they used to compute it separately, which is
+    // how a budget change could miss the loop that spends it.
     const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
-    const at = source.indexOf("const askedMs =");
-    assert.ok(at > 0, "the configured value must be read separately");
+    const at = source.indexOf("function catchPollMs(");
+    assert.ok(at > 0, "the configured value must be read in one place");
     const region = source.slice(at, at + 400);
-    assert.match(region, /askedMs > 0 \? askedMs : CATCH_MIN_POLL_MS/,
+    assert.match(region, /asked > 0 \? asked : CATCH_MIN_POLL_MS/,
       "an absent or zero speed must fall back to the budget, not to 400");
+    assert.match(region, /Math\.max\(CATCH_MIN_POLL_MS/,
+      "a configured speed may only ever slow the watch down");
 
     const panel = readFileSync(resolve(here, "../mac/pureclick.py"), "utf8");
     assert.ok(
@@ -1786,9 +1899,13 @@ const tests = {
     const text = (l, free, exhausted) => picker.catchStatusText(l, free, 400, exhausted);
 
     assert.match(text([], 0, false), /빈 좌석 0석/);
-    // Seats exist but none match the chosen grades — the case that looked
-    // identical to "no seats at all" before.
-    assert.match(text([], 126, false), /내 조건에 맞는 등급이 없음/);
+    // Free seats exist but none is a candidate — the case that looked identical
+    // to "no seats at all" before. It used to blame a grade filter; there is no
+    // grade selection in the panel, and rankGrade drops nothing on an empty
+    // grade_order, so the branch now reports what is actually true.
+    assert.match(text([], 126, false), /빈 좌석 126석/);
+    assert.match(text([], 126, false), /잡을 수 있는 자리가 아닙니다/);
+    assert.doesNotMatch(text([], 126, false), /등급/);
     assert.match(text(live, 126, true), /남이 먼저 가져감/);
     assert.match(text(live, 126, true), /자동으로 다시 시도/);
     assert.match(text(live, 126, false), /후보 2석/);
@@ -2618,6 +2735,680 @@ const tests = {
     ];
     assert.deepEqual(span(out, "x"), span(points, "x"), "x bounds must be preserved");
     assert.deepEqual(span(out, "y"), span(points, "y"), "y bounds must be preserved");
+  },
+
+  // ---- 취켓팅 reliability: a decline has to survive its tick -------------
+  //
+  // Reported live: "이미 선택된 좌석입니다" over and over, and then the watch
+  // catching nothing while seats were plainly free. One chain. A seat we were
+  // already holding was re-offered by every collector; the decline that
+  // followed was recorded only in a local array that 취켓팅 rebuilds from
+  // freed/live at the top of every pass; so the same seat came back every tick
+  // until eight of them tripped the catchLiveTries brake and the watch went
+  // quiet in front of a full map.
+
+  // fetchWaitingUrl records the cooldown and throws on BL / 403 / 429, but the
+  // throw was caught per-attempt and acquireWaitingUrl carried on — 20ms apart
+  // through the decisive window, then 80ms, for the remaining fifteen seconds.
+  // ~50 requests a second against an already-locked account, each able to push
+  // the lockout further past the open.
+  async "a gateway block ends the queue attempt instead of extending it"() {
+    const { race } = sandbox.window.PureClick;
+    const before = race.state.blockedUntil;
+    try {
+      race.noteGatewayBlock(race.BLOCK_FALLBACK_MS, "/v1/goods/x/waiting");
+      assert.ok(race.gatewayBlockRemainingMs() > 0, "the cooldown is running");
+
+      const started = Date.now();
+      let threw = null;
+      try {
+        // Target in the past, so without the check the loop would burn its whole
+        // 15s window right here.
+        await race.acquireWaitingUrl(
+          { goods_code: "1", play_date: "20260901", play_seq: "001",
+            target_server_unix: Date.now() / 1000 - 1 },
+          { windowMs: 15000 },
+        );
+      } catch (error) {
+        threw = error;
+      }
+      const spent = Date.now() - started;
+
+      assert.ok(threw, "a block must surface, not be retried past");
+      assert.match(String(threw.message), /차단/, "and must say so");
+      assert.ok(spent < 1000, `must give up at once, took ${spent}ms`);
+    } finally {
+      race.state.blockedUntil = before;
+      race.state.blockedEndpoint = "";
+    }
+  },
+
+  // Two functions named isVisible were declared in the same IIFE scope. Function
+  // declarations hoist, so the later one won for the entire file — including the
+  // call sites written above it — and the general test was dead code. Every
+  // button and input was judged against a 40x20 minimum meant for alert boxes,
+  // with the opacity test silently gone.
+  "there is only one isVisible"() {
+    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const declarations = source.match(/function isVisible\s*\(/g) || [];
+    assert.equal(declarations.length, 1,
+                 "a second declaration of this name silently replaces the first for the whole file");
+  },
+
+  "the element test and the dialog test do different jobs"() {
+    const { race } = sandbox.window.PureClick;
+    const node = (w, h, opacity = "1") => ({
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: w, height: h }),
+      __style: { opacity, visibility: "visible", display: "block" },
+    });
+    const styleOf = (el) => el.__style;
+    const original = sandbox.window.getComputedStyle;
+    try {
+      sandbox.window.getComputedStyle = styleOf;
+
+      // A small label-carrying span is a real target for the booking-notice
+      // fallback and the confirm-button search. The dialog minimum rejected it.
+      assert.equal(race.isVisible(node(24, 12)), true, "a small element is still an element");
+      assert.equal(race.isVisibleDialog(node(24, 12)), false, "but it is not an alert box");
+
+      // A modal fading out is not blocking the map any more; without the opacity
+      // test every detector in the file thought it was.
+      assert.equal(race.isVisible(node(400, 300, "0")), false, "opacity 0 is not visible");
+
+      assert.equal(race.isVisible(node(1, 1)), false, "and nothing is 1x1 on purpose");
+      assert.equal(race.isVisibleDialog(node(400, 300)), true, "a real dialog still counts");
+    } finally {
+      sandbox.window.getComputedStyle = original;
+    }
+  },
+
+  // The 보안문자 box submits on a button reading 확인 — exactly what
+  // confirmButtonIn matches and what NEVER_CLICK does not exclude. Nothing in
+  // the overlay-dismissing path knew what a captcha was, and waitForCaptchaClear
+  // ran that path every 400ms for up to two minutes while the user typed.
+  "the captcha box is never dismissed for the user"() {
+    const { race } = sandbox.window.PureClick;
+    const originalQsa = sandbox.document.querySelectorAll;
+    let pressed = 0;
+    try {
+      const captcha = {
+        getBoundingClientRect: () => ({ left: 0, top: 0, width: 420, height: 260 }),
+        innerText: "화면의 문자를 입력해주세요",
+        getAttribute: () => "nds-e-dialog captcha",
+        querySelectorAll: () => [
+          { textContent: "확인", click: () => { pressed += 1; }, getAttribute: () => "", closest: () => null },
+        ],
+      };
+      sandbox.document.querySelectorAll = (sel) =>
+        String(sel).includes("dialog") || String(sel).includes("modal") ? [captcha] : [];
+
+      assert.equal(race.dismissAnyBlockingOverlay(), false,
+                   "the 보안문자 box must be left alone");
+      assert.equal(pressed, 0, "its 확인 is the user's submit button, not ours to press");
+    } finally {
+      sandbox.document.querySelectorAll = originalQsa;
+    }
+  },
+
+  // An ordinary unknown modal must still be cleared — the guard has to be about
+  // captchas, not about giving up on blocking dialogs.
+  "an ordinary blocking modal is still dismissed"() {
+    const { race } = sandbox.window.PureClick;
+    const originalQsa = sandbox.document.querySelectorAll;
+    let pressed = 0;
+    try {
+      const modal = {
+        getBoundingClientRect: () => ({ left: 0, top: 0, width: 420, height: 260 }),
+        innerText: "알 수 없는 안내입니다",
+        getAttribute: () => "nds-e-dialog",
+        querySelectorAll: () => [
+          { textContent: "확인", click: () => { pressed += 1; }, getAttribute: () => "", closest: () => null },
+        ],
+      };
+      sandbox.document.querySelectorAll = (sel) =>
+        String(sel).includes("dialog") || String(sel).includes("modal") ? [modal] : [];
+
+      assert.equal(race.dismissAnyBlockingOverlay(), true, "an unknown modal still blocks the map");
+      assert.equal(pressed, 1, "and still gets closed");
+    } finally {
+      sandbox.document.querySelectorAll = originalQsa;
+    }
+  },
+
+  // The wait must not run the dismisser on every pass, whatever the dismisser
+  // does — leaving the user alone while they type is the whole job.
+  "the captcha wait does not run the dismisser on every pass"() {
+    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const fn = source.slice(source.indexOf("async function waitForCaptchaClear("));
+    const body = fn.slice(0, fn.indexOf("function clickFirstMatching"));
+    const loop = body.slice(body.indexOf("while (Date.now() < deadline)"));
+    assert.equal(loop.includes("dismissBlockingDialogs"), false,
+                 "clearing belongs before the wait, not inside it");
+    assert.ok(body.includes("dismissBlockingDialogs"),
+              "but something stacked on top of the captcha must still be cleared once");
+  },
+
+  // ---- 오픈 대기: re-entry must be a recovery, not a second front door ----
+  //
+  // maybeReenter ran from the 400ms watcher with no in-flight latch and no check
+  // that the open had happened, and the setInterval callback does not await. So
+  // from the instant an arm landed, every tick started a *new* fireEntry, each
+  // parking until T-400ms and then polling /waiting at 20ms for fifteen seconds.
+  // 41 of them stacked inside ~16s, aimed at the endpoint that answers
+  // GATEWAY_ABUSE_BLOCKED with a ~165s lockout, at the moment it cannot be
+  // recovered from.
+  async "re-entry does not fire before the open"() {
+    const { race } = sandbox.window.PureClick;
+    const restore = armFixture({ targetOffsetSeconds: +600 });
+    try {
+      race.resetReentryState();
+      await race.maybeReenter();
+      await race.maybeReenter();
+      assert.equal(race.armState.reentryTries, 0,
+                   "before T the scheduler is already waiting; this would be a duplicate");
+    } finally {
+      restore();
+    }
+  },
+
+  async "only one re-entry is ever in flight"() {
+    const { race } = sandbox.window.PureClick;
+    const restore = armFixture({ targetOffsetSeconds: -600 });
+    try {
+      race.resetReentryState();
+      // Deliberately not awaited, exactly as the 400ms watcher calls it.
+      const first = race.maybeReenter();
+      // Back-date the last-attempt stamp so the spacing floor cannot be what
+      // refuses the next call. A real attempt easily outlasts the floor — a
+      // 15s /waiting window does — so this is the case that matters, and with
+      // the floor standing in for it the latch was never actually tested.
+      race.armState.reentryAt = 0;
+      await race.maybeReenter();
+      race.armState.reentryAt = 0;
+      await race.maybeReenter();
+      await first;
+      assert.equal(race.armState.reentryTries, 1,
+                   "the watcher does not await, so the latch is the only guard left");
+    } finally {
+      restore();
+    }
+  },
+
+  async "re-entry keeps a floor on the gap between attempts"() {
+    const { race } = sandbox.window.PureClick;
+    const restore = armFixture({ targetOffsetSeconds: -600 });
+    try {
+      race.resetReentryState();
+      await race.maybeReenter();
+      assert.equal(race.armState.reentryTries, 1, "first attempt runs");
+      await race.maybeReenter();
+      assert.equal(race.armState.reentryTries, 1,
+                   `a second attempt inside ${race.REENTRY_SPACING_MS}ms must be refused`);
+      assert.ok(race.REENTRY_SPACING_MS >= 1000, "and that floor must be seconds, not 400ms");
+    } finally {
+      restore();
+    }
+  },
+
+  async "re-entry stops at its limit"() {
+    const { race } = sandbox.window.PureClick;
+    const restore = armFixture({ targetOffsetSeconds: -600 });
+    try {
+      race.resetReentryState();
+      race.armState.reentryTries = race.REENTRY_LIMIT;
+      await race.maybeReenter();
+      assert.equal(race.armState.reentryTries, race.REENTRY_LIMIT,
+                   "at the cap it must stop, not roll past it");
+    } finally {
+      restore();
+    }
+  },
+
+  async "an arm already in progress blocks re-entry"() {
+    const { race } = sandbox.window.PureClick;
+    const restore = armFixture({ targetOffsetSeconds: -600 });
+    const was = race.armState.running;
+    try {
+      race.resetReentryState();
+      race.armState.running = true;
+      await race.maybeReenter();
+      assert.equal(race.armState.reentryTries, 0,
+                   "the scheduler owns the queue endpoint while it is running");
+    } finally {
+      race.armState.running = was;
+      restore();
+    }
+  },
+
+  "a seat we are already holding is never offered again"() {
+    const { race } = sandbox.window.PureClick;
+    const state = race.state;
+    const blocks = [{
+      blockKey: "001:001",
+      mask: [true, true],
+      seats: [
+        { seatInfoId: "held", seatGrade: "1", seatGradeName: "R석", rowNo: "A", seatNo: "1",
+          isExposable: true, posLeft: 10, posTop: 10 },
+        { seatInfoId: "free", seatGrade: "1", seatGradeName: "R석", rowNo: "A", seatNo: "2",
+          isExposable: true, posLeft: 20, posTop: 10 },
+      ],
+    }];
+    const heldBefore = new Set(state.heldSeatIds);
+    try {
+      state.heldSeatIds.clear();
+      assert.deepEqual(race.collectFromBlocks(blocks, {}).map((s) => s.seatInfoId).sort(),
+                       ["free", "held"], "both are free to begin with");
+
+      // The bitmap trails a selection by whole ticks, so the seat we just took
+      // still reads free here. Offering it again is how the macro produced its
+      // own 이미 선택된 좌석입니다 on a 매수 2 order.
+      state.heldSeatIds.add("held");
+      assert.deepEqual(race.collectFromBlocks(blocks, {}).map((s) => s.seatInfoId),
+                       ["free"], "a seat in our own cart must not be a candidate");
+    } finally {
+      state.heldSeatIds.clear();
+      heldBefore.forEach((id) => state.heldSeatIds.add(id));
+    }
+  },
+
+  // The freed path is the fastest one and had no filtering at all — neither
+  // held nor cooled — so a seat both collectors were correctly skipping walked
+  // straight back in through here.
+  // selectedSeatCount() went through document.body.innerText — a full-document
+  // layout on a 21,460-seat venue, on the catch loop's own thread. Scoping it
+  // to the box that carries the number is worth real time, but a wrong count
+  // here is destructive rather than slow: `held > quantity` hands back seats we
+  // are holding. So the scoped node is verified, never simply trusted.
+  "the scoped seat count agrees with the full read, modal and all"() {
+    const { race } = sandbox.window.PureClick;
+    const originalQsa = sandbox.document.querySelectorAll;
+    const originalText = sandbox.document.body.innerText;
+    try {
+      race.resetSeatCountScope();
+      // The Interpark modal copy is why the broad read exists in the first
+      // place; the scoped path must not change what it answers.
+      sandbox.document.body.innerText =
+        "예매를 잃게 됩니다 예매확인/취소로 이동 선택 좌석 2 결제하기";
+      sandbox.document.querySelectorAll = () => [];
+      assert.equal(race.selectedSeatCount(), 2, "the body read is unchanged");
+
+      sandbox.document.body.innerText = "선택한 좌석이 없습니다";
+      assert.equal(race.selectedSeatCount(), 0, "and still reads the empty case");
+    } finally {
+      sandbox.document.querySelectorAll = originalQsa;
+      sandbox.document.body.innerText = originalText;
+      race.resetSeatCountScope();
+    }
+  },
+
+  "the scoped read tracks the tightest box that carries the number"() {
+    const { race } = sandbox.window.PureClick;
+    const originalQsa = sandbox.document.querySelectorAll;
+    const originalText = sandbox.document.body.innerText;
+    try {
+      race.resetSeatCountScope();
+      const tight = { innerText: "선택 좌석 2", isConnected: true };
+      const wrapper = { innerText: "좌석을 선택해 주세요 선택 좌석 2 결제하기", isConnected: true };
+      sandbox.document.body.innerText = wrapper.innerText;
+      sandbox.document.querySelectorAll = (sel) =>
+        String(sel).includes("div") ? [wrapper, tight] : [];
+
+      assert.equal(race.selectedSeatCount(), 2, "discovery happens on a body read");
+
+      // From here the box is read on its own. Move it, leave the body stale:
+      // the scoped value is the one that must come back.
+      tight.innerText = "선택 좌석 3";
+      assert.equal(race.selectedSeatCount(), 3, "the tightest box is what gets tracked");
+
+      // And a box that leaves the document is dropped rather than believed.
+      tight.isConnected = false;
+      assert.equal(race.selectedSeatCount(), 2, "a detached box falls back to the body");
+    } finally {
+      sandbox.document.querySelectorAll = originalQsa;
+      sandbox.document.body.innerText = originalText;
+      race.resetSeatCountScope();
+    }
+  },
+
+  "a scoped box that stops tracking is caught and abandoned"() {
+    const { race } = sandbox.window.PureClick;
+    const originalQsa = sandbox.document.querySelectorAll;
+    const originalText = sandbox.document.body.innerText;
+    try {
+      race.resetSeatCountScope();
+      const box = { innerText: "선택 좌석 1", isConnected: true };
+      sandbox.document.body.innerText = "선택 좌석 1";
+      sandbox.document.querySelectorAll = (sel) => (String(sel).includes("div") ? [box] : []);
+      assert.equal(race.selectedSeatCount(), 1, "discovered");
+
+      // React swapped what the page shows without touching this node. The
+      // scoped read is now silently stale — the failure mode that would have
+      // the loop clear seats it is holding.
+      sandbox.document.body.innerText = "선택 좌석 4";
+      let answers = [];
+      for (let at = 0; at < 40; at += 1) answers.push(race.selectedSeatCount());
+
+      assert.ok(answers.includes(4), "the periodic audit must notice the disagreement");
+      assert.equal(race.selectedSeatCount(), 4, "and every read after it is the truthful one");
+      assert.equal(race.state.seatCountScopeBroken, true, "and it says so");
+    } finally {
+      sandbox.document.querySelectorAll = originalQsa;
+      sandbox.document.body.innerText = originalText;
+      race.resetSeatCountScope();
+    }
+  },
+
+  "the rendered-map collector also refuses a seat we hold"() {
+    const { race } = sandbox.window.PureClick;
+    const state = race.state;
+    const circle = (id) => ({
+      getAttribute: (name) => (name === "r" ? "4" : ""),
+      __reactFiber$t: {
+        memoizedProps: {
+          blockKey: "001:001",
+          isDisabled: false,
+          seat: {
+            seatInfoId: id, seatGrade: "1", seatGradeName: "R석", rowNo: "A", seatNo: id,
+            isExposable: true, posLeft: 10, posTop: 10,
+          },
+        },
+        return: null,
+      },
+    });
+    const nodes = [circle("held"), circle("free")];
+    const originalQsa = sandbox.document.querySelectorAll;
+    const heldBefore = new Set(state.heldSeatIds);
+    try {
+      sandbox.document.querySelectorAll = (sel) => (String(sel).includes("circle") ? nodes : []);
+      state.heldSeatIds.clear();
+      assert.deepEqual(race.collectDomCandidates([], [], {}).map((s) => s.seatInfoId).sort(),
+                       ["free", "held"], "both circles are clickable to begin with");
+
+      state.heldSeatIds.add("held");
+      assert.deepEqual(race.collectDomCandidates([], [], {}).map((s) => s.seatInfoId),
+                       ["free"], "the DOM path must refuse it too, not only the bitmap path");
+    } finally {
+      sandbox.document.querySelectorAll = originalQsa;
+      state.heldSeatIds.clear();
+      heldBefore.forEach((id) => state.heldSeatIds.add(id));
+    }
+  },
+
+  "the freed path skips held seats but still catches an abandoned one"() {
+    const { race } = sandbox.window.PureClick;
+    const state = race.state;
+    const seats = [
+      { seatInfoId: "held", seatGrade: "1", seatGradeName: "R석", rowNo: "A", seatNo: "1",
+        isExposable: true, posLeft: 10, posTop: 10 },
+      { seatInfoId: "lost", seatGrade: "1", seatGradeName: "R석", rowNo: "A", seatNo: "2",
+        isExposable: true, posLeft: 20, posTop: 10 },
+      { seatInfoId: "open", seatGrade: "1", seatGradeName: "R석", rowNo: "A", seatNo: "3",
+        isExposable: true, posLeft: 30, posTop: 10 },
+    ];
+    const baselineBefore = state.runBaseline;
+    const heldBefore = new Set(state.heldSeatIds);
+    const takenBefore = new Map(state.takenUntil);
+    try {
+      state.runBaseline = null;
+      state.heldSeatIds.clear();
+      state.takenUntil.clear();
+      state.heldSeatIds.add("held");
+      // "lost" is on the 30s lost-race cooldown: another buyer took it.
+      race.markSeatTaken("lost");
+
+      // All three flip 0 -> 1 in the same reading: a genuine opening.
+      const block = { blockKey: "001:001", mask: [false, false, false], seats };
+      const freed = race.applyBlockMask(block, [true, true, true], {}).map((s) => s.seatInfoId);
+
+      assert.equal(freed.includes("held"), false, "never a seat already in our cart");
+      // The distinction that matters. A 0->1 transition is direct evidence the
+      // seat is free right now, and a buyer abandoning a cart inside those 30s
+      // is the exact cancellation 취켓팅 exists to catch — suppressing it here
+      // would cost the core case.
+      assert.equal(freed.includes("lost"), true,
+                   "a fresh transition outranks a lost-race guess");
+      assert.equal(freed.includes("open"), true, "and an ordinary opening is reported");
+
+      // The other half of the distinction: a seat our own click path just
+      // failed on is skipped even on a fresh transition, because the next
+      // attempt would fail the same way and that is the loop we are breaking.
+      state.unreachableUntil.clear();
+      race.markSeatUnreachable("open");
+      block.mask = [false, false, false];
+      const again = race.applyBlockMask(block, [true, true, true], {}).map((s) => s.seatInfoId);
+      assert.equal(again.includes("open"), false,
+                   "a seat we could not reach is not offered straight back");
+    } finally {
+      state.runBaseline = baselineBefore;
+      state.heldSeatIds.clear();
+      heldBefore.forEach((id) => state.heldSeatIds.add(id));
+      state.takenUntil.clear();
+      state.unreachableUntil.clear();
+      takenBefore.forEach((v, k) => state.takenUntil.set(k, v));
+    }
+  },
+
+  // NOL's real conflict modal is an nds-e-dialog__overlay whose text neither
+  // phrase pattern claims — which is why blockingOverlayNodes() was written.
+  // It was never consulted inside the wait, so the one modal it exists for was
+  // the one that paid the full ~1.5s timeout on every attempt.
+  async "a modal that answers ends the wait with no matching phrase"() {
+    const { race } = sandbox.window.PureClick;
+    const originalQsa = sandbox.document.querySelectorAll;
+    const originalText = sandbox.document.body.innerText;
+    try {
+      sandbox.document.body.innerText = "선택 좌석 0";
+      const overlay = {
+        getBoundingClientRect: () => ({ left: 0, top: 0, width: 600, height: 300 }),
+        innerText: "좌석 처리 중 문제가 발생했습니다",  // matches no phrase pattern
+        getAttribute: () => "nds-e-dialog__overlay",
+        querySelectorAll: () => [{ textContent: "확인", click: noop }],
+      };
+      sandbox.document.querySelectorAll = (sel) =>
+        String(sel).includes("dialog") || String(sel).includes("modal") ? [overlay] : [];
+
+      assert.equal(race.blockingOverlayAnswered(), true,
+                   "a big visible box owning 확인 is an answer");
+      assert.equal(race.seatTakenDialogVisible(), false, "and no phrase pattern claims it");
+
+      const started = Date.now();
+      const registered = await race.pageRegisteredSelection(0, 1);
+      const spent = Date.now() - started;
+      assert.equal(registered, false, "the modal answered: this seat is not ours");
+      assert.ok(spent < 400, `must not run to the full timeout, took ${spent}ms`);
+    } finally {
+      sandbox.document.querySelectorAll = originalQsa;
+      sandbox.document.body.innerText = originalText;
+    }
+  },
+
+  // Ordering, not decoration: an overlay can be up for reasons that have
+  // nothing to do with this seat, and none of them may be allowed to discard a
+  // selection the page actually registered.
+  async "a registered selection is never masked by an overlay"() {
+    const { race } = sandbox.window.PureClick;
+    const originalQsa = sandbox.document.querySelectorAll;
+    const originalText = sandbox.document.body.innerText;
+    try {
+      sandbox.document.body.innerText = "선택 좌석 1";
+      const overlay = {
+        getBoundingClientRect: () => ({ left: 0, top: 0, width: 600, height: 300 }),
+        innerText: "안내",
+        getAttribute: () => "modal",
+        querySelectorAll: () => [{ textContent: "확인", click: noop }],
+      };
+      sandbox.document.querySelectorAll = (sel) =>
+        String(sel).includes("dialog") || String(sel).includes("modal") ? [overlay] : [];
+
+      assert.equal(await race.pageRegisteredSelection(0, 1), true,
+                   "the count rose; the overlay is irrelevant");
+    } finally {
+      sandbox.document.querySelectorAll = originalQsa;
+      sandbox.document.body.innerText = originalText;
+    }
+  },
+
+  "a decline that is not a lost race still leaves the pool"() {
+    const { race } = sandbox.window.PureClick;
+    const state = race.state;
+    const takenBefore = new Map(state.takenUntil);
+    // The sandbox is shared, so these counters carry earlier tests' values.
+    // What matters is the delta this call produces.
+    const conflicts = state.takenConflicts || 0;
+    const skips = state.unreachableSkips || 0;
+    try {
+      state.takenUntil.clear();
+      state.unreachableUntil.clear();
+      race.markSeatUnreachable("s1");
+      assert.equal(race.seatUnreachableNow("s1"), true,
+                   "a declined seat must be parked somewhere that outlives the tick");
+      assert.equal(race.seatInCooldown("s1"), false,
+                   "but not as a lost race — that is a different fact");
+      assert.ok((state.unreachableUntil.get("s1") || 0) <= Date.now() + race.UNREACHABLE_COOLDOWN_MS,
+                "and parked briefly — it may be reachable next pass");
+      assert.equal(state.takenConflicts || 0, conflicts,
+                   "this is not a lost race and must not be counted as one");
+      assert.equal((state.unreachableSkips || 0) - skips, 1, "it is counted as its own thing");
+    } finally {
+      state.takenUntil.clear();
+      takenBefore.forEach((v, k) => state.takenUntil.set(k, v));
+    }
+  },
+
+  // A cooldown that never lifts is the same silent blindness by another route:
+  // every seat that ever declined leaves the pool for good and the watch runs
+  // out of candidates without saying why.
+  "a parked seat comes back when its cooldown runs out"() {
+    const { race } = sandbox.window.PureClick;
+    const state = race.state;
+    const takenBefore = new Map(state.takenUntil);
+    try {
+      state.takenUntil.clear();
+      state.unreachableUntil.clear();
+
+      race.markSeatUnreachable("s1");
+      assert.equal(race.seatUnreachableNow("s1"), true, "parked to begin with");
+      state.unreachableUntil.set("s1", Date.now() - 1);
+      assert.equal(race.seatUnreachableNow("s1"), false, "and released once it expires");
+      assert.equal(state.unreachableUntil.has("s1"), false,
+                   "an expired entry is dropped, not left to grow for the sitting");
+
+      race.markSeatTaken("s2");
+      state.takenUntil.set("s2", Date.now() - 1);
+      assert.equal(race.seatInCooldown("s2"), false, "the lost-race map releases too");
+    } finally {
+      state.takenUntil.clear();
+      state.unreachableUntil.clear();
+      takenBefore.forEach((v, k) => state.takenUntil.set(k, v));
+      state.takenConflicts = 0;
+      state.unreachableSkips = 0;
+    }
+  },
+
+  "the two kinds of cooldown do not weaken each other"() {
+    const { race } = sandbox.window.PureClick;
+    const state = race.state;
+    const takenBefore = new Map(state.takenUntil);
+    try {
+      state.takenUntil.clear();
+      state.unreachableUntil.clear();
+      race.markSeatTaken("s1");
+      const until = state.takenUntil.get("s1");
+      race.markSeatUnreachable("s1");
+      assert.equal(state.takenUntil.get("s1"), until,
+                   "a seat someone else holds for 30s must not return in 3");
+      assert.equal(race.seatUnreachableNow("s1"), true, "and both facts are recorded");
+
+      // Steady-state candidates need either one to be enough to keep the seat
+      // out; only the freed path treats them differently.
+      const blocks = [{
+        blockKey: "001:001",
+        mask: [true],
+        seats: [{ seatInfoId: "s1", seatGrade: "1", seatGradeName: "R석", rowNo: "A",
+                  seatNo: "1", isExposable: true, posLeft: 1, posTop: 1 }],
+      }];
+      assert.deepEqual(race.collectFromBlocks(blocks, {}), [],
+                       "the steady-state pool honours both");
+    } finally {
+      state.takenUntil.clear();
+      state.unreachableUntil.clear();
+      takenBefore.forEach((v, k) => state.takenUntil.set(k, v));
+      state.takenConflicts = 0;
+      state.unreachableSkips = 0;
+    }
+  },
+
+  // The decline branch is inside runSeatAutopilot's loop, which needs a live
+  // page to drive. What has to be true is that the cooldown — the only record
+  // that survives the tick — is written there at all: the local filter beside
+  // it is discarded before anything reads it.
+  "the decline branch parks the seat, not just the local array"() {
+    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const loop = source.slice(source.indexOf("async function runSeatAutopilot("));
+    const branch = loop.slice(loop.indexOf("if (blocked.length) {", loop.indexOf('reason === "taken"') + 1));
+    const body = branch.slice(0, branch.indexOf("await sleep(config.retry_ms)"));
+    assert.match(body, /markSeatUnreachable/,
+                 "a decline that is not a lost race must still be recorded across ticks");
+    assert.ok(body.indexOf("markSeatUnreachable") < body.indexOf("candidates = candidates.filter"),
+              "record it before filtering, so an early return cannot skip it");
+  },
+
+  "the live-pool signature moves when its members do"() {
+    const { race } = sandbox.window.PureClick;
+    const pool = (ids) => ids.map((id) => ({ seatInfoId: id }));
+    // The brake resets only when this string changes. Length with the two end
+    // ids could not see a swap in the middle, so a pool that was genuinely
+    // moving read as static and the watch stayed switched off in front of it.
+    assert.notEqual(race.liveSignature(pool(["a", "b", "c"])),
+                    race.liveSignature(pool(["a", "x", "c"])),
+                    "same length, same ends, different seats");
+    assert.notEqual(race.liveSignature(pool(["a", "b", "c"])),
+                    race.liveSignature(pool(["a", "b"])),
+                    "a seat leaving the pool must register");
+    assert.equal(race.liveSignature(pool(["a", "b", "c"])),
+                 race.liveSignature(pool(["c", "b", "a"])),
+                 "the same seats ranked differently are the same pool");
+  },
+
+  // The regression that produced the silent watch: eight declines with nothing
+  // recorded across ticks left catchLiveTries pinned at the cap and the
+  // signature unchanged, so the live path never came back.
+  "declines shrink the pool, which is what releases the brake"() {
+    const { race } = sandbox.window.PureClick;
+    const state = race.state;
+    const blocks = [{
+      blockKey: "001:001",
+      mask: [true, true, true],
+      seats: ["a", "b", "c"].map((id, at) => ({
+        seatInfoId: id, seatGrade: "1", seatGradeName: "R석", rowNo: "A", seatNo: String(at),
+        isExposable: true, posLeft: 10 * at, posTop: 10,
+      })),
+    }];
+    const takenBefore = new Map(state.takenUntil);
+    try {
+      state.takenUntil.clear();
+      state.unreachableUntil.clear();
+      const before = race.liveSignature(race.collectFromBlocks(blocks, {}));
+      race.markSeatUnreachable("b");
+      const after = race.liveSignature(race.collectFromBlocks(blocks, {}));
+      assert.notEqual(before, after,
+                      "a parked seat leaves live, the signature moves, catchLiveTries resets");
+    } finally {
+      state.takenUntil.clear();
+      state.unreachableUntil.clear();
+      takenBefore.forEach((v, k) => state.takenUntil.set(k, v));
+      state.unreachableSkips = 0;
+    }
+  },
+
+  "the click-confirm ceiling survives the faster first look"() {
+    const { race } = sandbox.window.PureClick;
+    assert.equal(race.settleDelayFor(0), 16, "React settles in about a frame; look then");
+    assert.ok(race.settleDelayFor(race.SEAT_MAP_SETTLE_TRIES - 1) > 16,
+              "and widen afterwards rather than polling hard for a second and a half");
+    const budget = race.settleBudgetMs();
+    assert.ok(budget >= 1200 && budget <= 1900,
+              `the ~1.5s ceiling must survive the faster first look, got ${budget}ms`);
   },
 
   "a small venue passes through the sampler untouched": () => {

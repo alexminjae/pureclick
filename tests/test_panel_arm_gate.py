@@ -43,7 +43,8 @@ def _methods(*names):
     return ns
 
 
-NS = _methods("_update_guidance", "_sale_open", "_open_time", "_set_enabled")
+NS = _methods("_update_guidance", "_show_guidance", "_sale_open", "_open_time",
+              "_set_enabled")
 FUTURE = (datetime.now(KST) + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
 PAST = (datetime.now(KST) - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -67,21 +68,44 @@ class _Button:
         self.enabled = "!disabled" in flags
 
 
+class _Box:
+    """Stands in for the tip box, which is packed and unpacked."""
+
+    def __init__(self) -> None:
+        self.shown = True
+
+    def winfo_exists(self) -> bool:
+        return True
+
+    def winfo_manager(self) -> str:
+        return "pack" if self.shown else ""
+
+    def pack(self, **_kwargs) -> None:
+        self.shown = True
+
+    def pack_forget(self) -> None:
+        self.shown = False
+
+
 class _Panel:
     """Enough of the panel to run _update_guidance without a display."""
 
-    def __init__(self, info: dict | None, page: str = "nol") -> None:
+    def __init__(self, info: dict | None, page: str = "nol",
+                 seat: dict | None = None) -> None:
         self._show_info_data = info
         self.guidance = _Var()
         self.open_note = _Var()
         self.btn_arm = _Button()
         self.btn_catch = _Button()
         self.btn_test = _Button()
+        self.tip_edge = _Box()
+        self.aim_card = None
         self._open_time = lambda: NS["_open_time"](self)
         self._sale_open = lambda: NS["_sale_open"](self)
         self._browser_goods_code = lambda ctx: (ctx or {}).get("goods_code")
         self._set_enabled = staticmethod(NS["_set_enabled"])
-        NS["_update_guidance"](self, {"page": page, "goods_code": "26099999"})
+        self._show_guidance = lambda visible: NS["_show_guidance"](self, visible)
+        NS["_update_guidance"](self, {"page": page, "goods_code": "26099999"}, seat)
 
 
 class ArmGateTest(unittest.TestCase):
@@ -114,6 +138,37 @@ class ArmGateTest(unittest.TestCase):
         # It arms the real scheduler, so it can only work where one can run.
         self.assertTrue(_Panel({"ticket_open_kst": FUTURE}, page="nol").btn_test.enabled)
         self.assertFalse(_Panel({"ticket_open_kst": FUTURE}, page="seat").btn_test.enabled)
+
+
+class GuidanceStandsDownTest(unittest.TestCase):
+    """지금 할 일 is the only thing on screen addressed to the user, and the live
+    band reports the macro. That division held until the macro started working:
+    `_update_guidance` read `page` and nothing else, so arriving at a seat map
+    pinned it to "[감시 시작]을 누르면…" and it said that while the watch ran and
+    while a seat was held. Two boxes described the same moment, and one of them
+    named a button you had already pressed."""
+
+    ON_MAP = {"ticket_open_kst": FUTURE}
+
+    def test_it_is_there_while_there_is_something_to_press(self) -> None:
+        panel = _Panel(self.ON_MAP, page="seat")
+        self.assertTrue(panel.tip_edge.shown)
+        self.assertIn("감시 시작", panel.guidance.get())
+
+    def test_a_running_watch_takes_it_away(self) -> None:
+        panel = _Panel(self.ON_MAP, page="seat", seat={"running": True})
+        self.assertFalse(panel.tip_edge.shown)
+
+    def test_so_does_a_held_seat(self) -> None:
+        panel = _Panel(self.ON_MAP, page="seat", seat={"locked": True})
+        self.assertFalse(panel.tip_edge.shown)
+
+    def test_and_it_comes_back_when_the_macro_stops(self) -> None:
+        panel = _Panel(self.ON_MAP, page="seat", seat={"running": True})
+        self.assertFalse(panel.tip_edge.shown)
+        NS["_update_guidance"](panel, {"page": "seat", "goods_code": "26099999"},
+                               {"running": False, "haltedByUser": True})
+        self.assertTrue(panel.tip_edge.shown)
 
 
 class LookupRetryTest(unittest.TestCase):

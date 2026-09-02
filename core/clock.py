@@ -42,6 +42,12 @@ class TimeSample:
     local_recv_perf: float = 0.0
 
 
+# How far the monotonic anchor may drift from the wall clock before the sync is
+# treated as describing the past rather than the present. Sleep produces hours;
+# an NTP slew produces well under a second, so this separates them cleanly.
+ANCHOR_DRIFT_TOLERANCE_SECONDS = 2.0
+
+
 @dataclass(frozen=True)
 class SyncResult:
     offset_seconds: float
@@ -49,6 +55,11 @@ class SyncResult:
     samples: tuple[TimeSample, ...]
     anchor_perf: float = 0.0
     anchor_server_unix: float = 0.0
+    # The wall clock at the same instant as anchor_perf. perf_counter is
+    # mach_absolute_time() on macOS and does not advance while the machine
+    # sleeps, so the monotonic anchor alone cannot tell a long sleep from a
+    # short one — and there is nothing to compare it against without this.
+    anchor_wall_unix: float = 0.0
     mode: str = "median"
 
     @property
@@ -59,9 +70,31 @@ class SyncResult:
 
     @property
     def age_seconds(self) -> float:
+        """How long ago this sync happened, in real time.
+
+        Measured on the wall clock. perf_counter stops during sleep, so a sync
+        taken before a 23-hour sleep reported as hours younger than it was —
+        on the reading whose whole job is to say "this is too old to trust".
+        """
+        if self.anchor_wall_unix:
+            return max(0.0, time.time() - self.anchor_wall_unix)
         if not self.anchor_perf:
             return 0.0
         return max(0.0, time.perf_counter() - self.anchor_perf)
+
+    @property
+    def anchor_drift_seconds(self) -> float:
+        """How far the monotonic anchor and the wall clock have diverged.
+
+        Positive means real time has advanced further than perf_counter, i.e.
+        the machine slept. An NTP step shows up here too. Either way the sync is
+        no longer describing the present.
+        """
+        if not self.anchor_perf or not self.anchor_wall_unix:
+            return 0.0
+        monotonic_elapsed = time.perf_counter() - self.anchor_perf
+        wall_elapsed = time.time() - self.anchor_wall_unix
+        return wall_elapsed - monotonic_elapsed
 
 
 def parse_http_date(value: str) -> float:
@@ -261,6 +294,7 @@ class ServerClock:
             samples=best,
             anchor_perf=anchor_perf,
             anchor_server_unix=anchor_server_unix,
+            anchor_wall_unix=time.time(),
             mode="median",
         )
         with self._lock:
@@ -361,21 +395,53 @@ class ServerClock:
             samples=selected,
             anchor_perf=best.local_mid_perf,
             anchor_server_unix=best.server_unix,
+            anchor_wall_unix=best.server_unix - best.offset_seconds,
             mode="tick",
         )
         with self._lock:
             self._sync_result = result
         return result
 
+    def anchor_is_stale(self, tolerance_seconds: float = ANCHOR_DRIFT_TOLERANCE_SECONDS) -> bool:
+        """True when the monotonic anchor no longer describes the present.
+
+        The anchor is monotonic on purpose: over the seconds around a ticket open
+        it is immune to an NTP step that would otherwise move the target. Held
+        for hours it is the opposite of safe, because perf_counter is
+        mach_absolute_time() and does not advance while the Mac sleeps.
+
+        On Windows perf_counter is QueryPerformanceCounter, which *does* keep
+        advancing across sleep, so there this catches only NTP steps and never
+        a resume. That is benign — the anchor stays valid, which is why nothing
+        branches on the platform here — but it means the wake-up re-sync in the
+        panel is a macOS safety net, not a cross-platform one. Worth knowing
+        before relying on it.
+
+        Observed: a panel left running from 20:45 across 23 hours of sleep had a
+        clock 19 hours behind. `_sale_open()` reads datetime.now() and correctly
+        said 판매 중, while the countdown beside it read this clock and was still
+        counting down to an open that had already happened. Same panel, two
+        clocks, no way to tell which was lying.
+        """
+        result = self.sync_result
+        if not result:
+            return False
+        return abs(result.anchor_drift_seconds) > tolerance_seconds
+
     def server_time_unix(self) -> float:
         result = self.sync_result
         if not result:
             return time.time()
+        if self.anchor_is_stale():
+            # The wall clock survived the sleep; the anchor did not. The measured
+            # offset is still the best correction we have, so keep it and drop
+            # only the anchor.
+            return time.time() + result.offset_seconds
         return result.anchor_server_unix + (time.perf_counter() - result.anchor_perf)
 
     def deadline_for_server_time(self, target_server_unix: float) -> float:
         result = self.sync_result
-        if not result:
+        if not result or self.anchor_is_stale():
             return time.perf_counter() + (target_server_unix - self.server_time_unix())
         return result.anchor_perf + (target_server_unix - result.anchor_server_unix)
 

@@ -97,6 +97,11 @@ class PlacedSeat:
     y: float
     venue_x: float
     venue_y: float
+    # False when seatMeta reports isExposable: false for it — a real seat in a
+    # block this round is not selling. Drawn, so the picker shows the same room
+    # the 예매 창 does, but never watched: no cancellation can appear in a seat
+    # nobody can buy.
+    sellable: bool = True
 
 
 @dataclass(frozen=True)
@@ -132,11 +137,11 @@ class VenueView:
         return normalize_rect((x0, y0, x1, y1))
 
 
-def primary_frame_seats(seats: Sequence[tuple[str, float, float]]) -> list[tuple[str, float, float]]:
+def primary_frame_seats(seats: Sequence[tuple]) -> list[tuple]:
     """Keep the main house for framing — drop far-away side blocks like 002."""
     if len(seats) < 8:
         return list(seats)
-    by_key: dict[str, list[tuple[str, float, float]]] = {}
+    by_key: dict[str, list[tuple]] = {}
     for item in seats:
         by_key.setdefault(item[0], []).append(item)
     if len(by_key) <= 1:
@@ -145,10 +150,12 @@ def primary_frame_seats(seats: Sequence[tuple[str, float, float]]) -> list[tuple
     # Largest block is the house the official map zooms to.
     primary_key = max(by_key.items(), key=lambda item: len(item[1]))[0]
     prim = by_key[primary_key]
-    left = min(x for _, x, _ in prim)
-    top = min(y for _, _, y in prim)
-    right = max(x for _, x, _ in prim)
-    bottom = max(y for _, _, y in prim)
+    # Indexed, not unpacked: a point carries a sellability flag as well now, and
+    # this function has no interest in it.
+    left = min(point[1] for point in prim)
+    top = min(point[2] for point in prim)
+    right = max(point[1] for point in prim)
+    bottom = max(point[2] for point in prim)
 
     # The gap has to scale with the venue, not be a fixed number of units.
     # Seat coordinates are in each show's own space with no common scale: on
@@ -161,12 +168,61 @@ def primary_frame_seats(seats: Sequence[tuple[str, float, float]]) -> list[tuple
     for key, pts in by_key.items():
         if key == primary_key:
             continue
-        cx = sum(x for _, x, _ in pts) / len(pts)
-        cy = sum(y for _, _, y in pts) / len(pts)
+        cx = sum(point[1] for point in pts) / len(pts)
+        cy = sum(point[2] for point in pts) / len(pts)
         # Outside the house with a clear gap → hide from the framed copy.
         if cx < left - gap or cx > right + gap or cy < top - gap or cy > bottom + gap:
             continue
         kept.extend(pts)
+    return kept
+
+
+def house_frame(points: Sequence[tuple]) -> list[tuple]:
+    """Bounds for a selection map: everything sellable, plus any dark block
+    sitting against it.
+
+    `include_all` exists because framing on the main house alone dropped whole
+    floors — 3 blocks of 17 on one venue — and a seat that is not drawn cannot
+    be dragged over. But framing on *literally* everything is no better: once
+    the sketch started carrying blocks that are not on sale, a 90-seat side
+    island 50 units clear of the house stretched the frame by a third and
+    squeezed the real room into three quarters of the canvas.
+
+    So the rule is about what you can buy, not about size: a block with sellable
+    seats always frames. A block with none frames only if it touches the house.
+    """
+    live = [point for point in points if point[3]]
+    if not live:
+        return list(points)
+
+    left = min(point[1] for point in live)
+    top = min(point[2] for point in live)
+    right = max(point[1] for point in live)
+    bottom = max(point[2] for point in live)
+    # Same scaling as primary_frame_seats: seat coordinates have no common
+    # scale between venues, so a fixed gap drops a second floor on one map and
+    # keeps a car park on the next.
+    gap = max(CLUSTER_GAP, (right - left) * 0.6, (bottom - top) * 0.6)
+
+    dark: dict[str, list[tuple]] = {}
+    for point in points:
+        if not point[3]:
+            dark.setdefault(point[0], []).append(point)
+
+    kept = list(live)
+    for pts in dark.values():
+        # Nearest edge, not the centroid. A block's centre is half its width
+        # away from the house it is touching, so a centroid test called the
+        # blocks immediately beside the sellable ones distant and clipped them:
+        # on 26012673 the D column starts 5 units past the last sellable seat
+        # and its centre sits 55 further still.
+        if (
+            min(point[1] for point in pts) <= right + gap
+            and max(point[1] for point in pts) >= left - gap
+            and min(point[2] for point in pts) <= bottom + gap
+            and max(point[2] for point in pts) >= top - gap
+        ):
+            kept.extend(pts)
     return kept
 
 
@@ -295,26 +351,26 @@ def project_venue(
     padding: float = 18.0,
     include_all: bool = False,
 ) -> VenueView:
-    points: list[tuple[str, float, float]] = []
+    points: list[tuple[str, float, float, bool]] = []
     for seat in seats or []:
         key = str(seat.get("k") or seat.get("key") or seat.get("block_key") or "").strip()
         x = _num(seat.get("x", seat.get("posLeft")))
         y = _num(seat.get("y", seat.get("posTop")))
         if not key or x is None or y is None:
             continue
-        points.append((key, x, y))
+        points.append((key, x, y, is_sellable(seat)))
 
     # Framing normally follows the main house so one far island cannot shrink
     # it. `include_all` overrides that for a *selection* surface, where a seat
     # that is not drawn cannot be dragged over: measured on the saved maps,
     # framing-only drawing reached 3 blocks of 17 on 26011315 and 1 of 3 on
     # 26005128, silently putting most of the venue out of reach of 취켓팅.
-    frame = points if include_all else (primary_frame_seats(points) if points else [])
+    frame = house_frame(points) if include_all else (primary_frame_seats(points) if points else [])
     if frame and width > padding * 2 and height > padding * 2:
-        left = min(x for _, x, _ in frame)
-        top = min(y for _, _, y in frame)
-        right = max(x for _, x, _ in frame)
-        bottom = max(y for _, _, y in frame)
+        left = min(point[1] for point in frame)
+        top = min(point[2] for point in frame)
+        right = max(point[1] for point in frame)
+        bottom = max(point[2] for point in frame)
         # Slight pad so edge seats are not clipped.
         pad = max((right - left) * 0.04, (bottom - top) * 0.04, 2.0)
         left -= pad
@@ -324,9 +380,9 @@ def project_venue(
         scale, offset_x, offset_y = _fit(left, top, right, bottom, width, height, padding)
         # Draw only seats that land in the framed house (side islands stay out).
         drawn = [
-            (key, x, y)
-            for key, x, y in points
-            if left <= x <= right and top <= y <= bottom
+            point
+            for point in points
+            if left <= point[1] <= right and top <= point[2] <= bottom
         ]
         placed_seats = tuple(
             PlacedSeat(
@@ -335,8 +391,9 @@ def project_venue(
                 y=offset_y + (y - top) * scale,
                 venue_x=x,
                 venue_y=y,
+                sellable=sellable,
             )
-            for key, x, y in drawn
+            for key, x, y, sellable in drawn
         )
         names = {
             str(block.get("key") or block.get("block_key") or ""): str(
@@ -365,9 +422,9 @@ def project_venue(
         # assumption 무대 가까운 순 already sorts on), so the rows nearest the
         # front say where the stage is and how wide it reads.
         front_cut = top + (bottom - top) * STAGE_FRONT_BAND
-        front_xs = [x for _key, x, y in drawn if y <= front_cut]
+        front_xs = [point[1] for point in drawn if point[2] <= front_cut]
         if not front_xs:
-            front_xs = [x for _key, x, _y in drawn]
+            front_xs = [point[1] for point in drawn]
         stage_left = offset_x + (min(front_xs) - left) * scale
         stage_right = offset_x + (max(front_xs) - left) * scale
         if stage_right - stage_left < STAGE_MIN_WIDTH:
@@ -401,6 +458,49 @@ def project_venue(
     )
 
 
+def live_block_keys(seats: Sequence[dict[str, Any]]) -> set[str]:
+    """Blocks with anything on sale this round.
+
+    Block granularity, deliberately. A seat's own `isExposable` says whether it
+    is on sale *now*, and a 취켓팅 range is a boundary, not a snapshot: the seats
+    inside it that are currently taken are the entire point, because those are
+    the ones a cancellation comes from. Filtering the range per seat meant a box
+    drawn tightly around a sold-out section watched nothing at all.
+
+    What is worth distinguishing is a block with *nothing* on sale — D and E on
+    26012673 are not being sold this round at any price, so no cancellation can
+    ever appear there.
+    """
+    live: set[str] = set()
+    for seat in seats or []:
+        if not is_sellable(seat):
+            continue
+        key = str(seat.get("k") or seat.get("key") or seat.get("block_key") or "").strip()
+        if key:
+            live.add(key)
+    return live
+
+
+def is_sellable(seat: dict[str, Any]) -> bool:
+    """Whether this seat is part of the sellable map for this round.
+
+    seatMeta's `isExposable` does not mean "free" — a sold-out show still
+    reports it true for every seat. False means the seat is not being sold at
+    all this round, which is what a partial house looks like: 26012673 sells
+    1F/2F A-C and reports 712 real seats across D, E and one side block with no
+    grade and isExposable false throughout.
+
+    The sketch carries `s: 0` for those and omits the key otherwise, so absence
+    means sellable — the flag is written for the minority and the sketch travels
+    through a state file that is already 300KB.
+    """
+    return seat.get("s", seat.get("sellable", 1)) not in (0, False)
+
+
+def sellable_seats(seats: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [seat for seat in seats if is_sellable(seat)]
+
+
 def seats_in_watch_rect(
     seats: Sequence[dict[str, Any]],
     rect: tuple[float, float, float, float] | None,
@@ -427,8 +527,15 @@ def block_keys_in_watch_rect(
         return []
     found: list[str] = []
     seen: set[str] = set()
+    # Whole blocks, not individual seats. A range is a boundary: the taken seats
+    # inside it are what 취켓팅 exists to watch. Only a block with nothing on
+    # sale at all is skipped — nothing can free up there, and polling it costs a
+    # request every sweep.
+    live = live_block_keys(seats)
     for seat in seats_in_watch_rect(seats, rect):
         key = str(seat.get("k") or seat.get("key") or seat.get("block_key") or "").strip()
+        if key not in live:
+            continue
         if key and key not in seen:
             seen.add(key)
             found.append(key)
@@ -441,7 +548,12 @@ def keys_in_lasso(view: VenueView, lasso: tuple[float, float, float, float]) -> 
     if view.seats:
         found: list[str] = []
         seen: set[str] = set()
+        dead = {seat.key for seat in view.seats} - {
+            seat.key for seat in view.seats if seat.sellable
+        }
         for seat in view.seats:
+            if seat.key in dead:
+                continue
             if point_in_rect(seat.venue_x, seat.venue_y, venue) and seat.key not in seen:
                 seen.add(seat.key)
                 found.append(seat.key)
@@ -454,7 +566,14 @@ def key_at_point(view: VenueView, x: float, y: float) -> str | None:
     if view.seats:
         best: PlacedSeat | None = None
         best_d = CLICK_RADIUS_PX * CLICK_RADIUS_PX
+        dead = {seat.key for seat in view.seats} - {
+            seat.key for seat in view.seats if seat.sellable
+        }
         for seat in view.seats:
+            # A block with nothing on sale is drawn but not selectable; a sold
+            # seat in a live block is very much selectable.
+            if seat.key in dead:
+                continue
             dx = seat.x - x
             dy = seat.y - y
             dist = dx * dx + dy * dy

@@ -1,6 +1,7 @@
 # PureClick
 
-NOL / Interpark ticket assistant for macOS. Two jobs, and nothing else:
+NOL / Interpark ticket assistant for macOS and Windows. Two jobs, and nothing
+else:
 
 - **오픈 대기** — be first into the queue the instant a show opens
 - **취켓팅** — watch an area of the seat map you drew and take whatever
@@ -8,9 +9,21 @@ NOL / Interpark ticket assistant for macOS. Two jobs, and nothing else:
 
 ## Run
 
+**macOS** — from a checkout:
+
 ```bash
 cd mac && ./run_pureclick.sh
 ```
+
+**Windows** — download `PureClick.exe` from the
+[Releases](../../releases) page and double-click it. Nothing to install: the
+exe carries its own Python. It needs the WebView2 runtime, which ships with
+Windows 11 and with current Edge; if it is missing the app says so and links to
+it rather than failing quietly.
+
+To run from source on Windows instead — which is what you want when the exe
+misbehaves and you need to see the error — double-click `PureClick.bat`. That
+one needs Python installed.
 
 Two windows open: the 조작판 (control panel) and the 예매 창 (an embedded
 browser). You log in and type any 보안문자 yourself in the 예매 창; everything
@@ -24,6 +37,10 @@ was measured, and what it will not do. This page is only the map.
 | | |
 |---|---|
 | `mac/` | the app — panel, browser host, bridge, session store |
+| `app_platform/` | the only place the OS matters: WKWebView vs WebView2, flock vs msvcrt |
+| `pureclick_main.py` | the entry point, for both the panel and the browser process |
+| `app_update.py` | version check, and a checksum-verified refresh of the automation |
+| `tools/` | the static audit, and the Windows icon |
 | `browser/pureclick_autopilot.js` | everything that happens inside the booking page |
 | `core/` | pure logic — no tkinter, no pywebview, no filesystem, all tested |
 | `tests/` | `pytest tests/` and `node tests/test_autopilot_picker.mjs` |
@@ -43,3 +60,22 @@ node tests/test_autopilot_picker.mjs
 Korea's 공연법 (amended, effective March 2024) makes macro ticket purchasing an
 offence when combined with resale — up to 1 year imprisonment or a ₩10M fine.
 Automated booking also breaches the site's terms of use.
+
+## Updates on Windows
+
+A downloaded exe is a snapshot, but the part that goes stale fastest is not the
+Python — it is `browser/pureclick_autopilot.js`, because it tracks NOL's markup.
+So on launch the app checks the release manifest:
+
+- a newer exe is **reported** with a link; nothing installs itself
+- newer automation is downloaded, **verified against the manifest's SHA-256**,
+  and only then used
+
+Any failure — offline, bad checksum, unreachable manifest — falls back to the
+bundled copy and says so on the panel. The checksum refuses a tampered or
+truncated download; it does not protect against whoever can publish to this
+repo, which is the trust root for anyone you hand the exe to.
+
+Builds come from `.github/workflows/windows-build.yml`, which runs the test
+suite on a Windows runner before it packages anything. Tag `v*` to publish a
+Release.

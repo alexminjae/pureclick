@@ -15,3 +15,14 @@ mac/pureclick_seat_config.json
 mac/pureclick_arm_config.json
 mac/.pureclick_cookies.json
 mac/.pureclick_bridge_health.json
+
+# Built by mac/make_app.sh — regenerate, do not commit
+mac/PureClick.icns
+mac/PureClick.iconset/
+
+# Written by the Windows build immediately before PyInstaller runs, so the exe
+# knows its own version and where to look for newer automation. Not source.
+VERSION
+UPDATE_URL
+build/
+dist/

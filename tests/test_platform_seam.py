@@ -1,0 +1,350 @@
+"""The platform seam, and the Windows half of it exercised on a Mac.
+
+None of the Windows code can be run against a real WebView2 from here, so what
+is testable is its *logic*, with the native calls faked. That is worth doing
+because the two things most likely to go wrong are logic, not API:
+
+  * WebView2 has no `removeAllUserScripts()`. It returns a script id, and the
+    previous one has to be removed by id — otherwise every `reload_autopilot`
+    stacks another copy of a 325 KB script that runs on every document creation.
+  * The CoreWebView2 object is null until initialisation finishes, exactly as
+    the Cocoa `.webview` is, so both need the same wait.
+
+The last test here is the one that keeps Windows working after I stop looking:
+it fails if any shared module imports a platform-only library again.
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+import sys
+import threading
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if str(ROOT / "mac") not in sys.path:
+    sys.path.insert(0, str(ROOT / "mac"))
+
+import app_platform  # noqa: E402
+from app_platform import darwin, windows  # noqa: E402
+
+
+# ---- fakes standing in for pythonnet and WebView2 -------------------------
+
+class _FakeTask:
+    def __init__(self, result):
+        self.Result = result
+
+    def ContinueWith(self, action, _scheduler):
+        action(self)          # the real scheduler runs it on the UI thread
+        return self
+
+
+class _Generic:
+    """Stands in for `Func[Object]` / `Action[Task[Object]]` — identity."""
+
+    def __class_getitem__(cls, _item):
+        return lambda fn: fn
+
+
+def _fake_clr():
+    return _Generic, _Generic, object, str, _Generic
+
+
+class _FakeCore:
+    def __init__(self):
+        self.added: list[str] = []
+        self.removed: list[str] = []
+        self._next = 0
+        self.CookieManager = _FakeCookieManager()
+
+    def AddScriptToExecuteOnDocumentCreatedAsync(self, source):
+        self._next += 1
+        script_id = f"id-{self._next}"
+        self.added.append(script_id)
+        assert source, "an empty script would silently disable the macro"
+        return _FakeTask(script_id)
+
+    def RemoveScriptToExecuteOnDocumentCreated(self, script_id):
+        self.removed.append(script_id)
+
+
+class _FakeCookie:
+    def __init__(self, name, value, domain, path):
+        self.Name, self.Value, self.Domain, self.Path = name, value, domain, path
+        self.Expires, self.IsSecure, self.IsHttpOnly = -1.0, False, False
+
+
+class _FakeCookieManager:
+    def __init__(self):
+        self.stored: list[_FakeCookie] = []
+
+    def CreateCookie(self, name, value, domain, path):
+        return _FakeCookie(name, value, domain, path)
+
+    def AddOrUpdateCookie(self, cookie):
+        self.stored.append(cookie)
+
+    def GetCookiesAsync(self, _url):
+        return _FakeTask(list(self.stored))
+
+
+class _FakeControl:
+    def __init__(self, core):
+        self.CoreWebView2 = core
+
+    def Invoke(self, fn):
+        return fn()
+
+
+class _FakeBrowser:
+    def __init__(self, core):
+        self.webview = _FakeControl(core)
+        self.syncContextTaskScheduler = object()
+
+
+class WindowsInjectionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.core = _FakeCore()
+        self.browser = _FakeBrowser(self.core)
+        self._clr, self._browser = windows._clr, windows._browser
+        windows._clr = _fake_clr
+        windows._browser = lambda _window: self.browser
+        windows._script_ids.clear()
+        self.window = type("W", (), {"uid": "master"})()
+
+    def tearDown(self) -> None:
+        windows._clr, windows._browser = self._clr, self._browser
+        windows._script_ids.clear()
+
+    def test_the_previous_script_is_removed_before_the_new_one(self) -> None:
+        windows.install_document_start_script(self.window, "// v1")
+        self.assertEqual(self.core.added, ["id-1"])
+        self.assertEqual(self.core.removed, [])
+
+        windows.install_document_start_script(self.window, "// v2")
+        # Every reload_autopilot goes through here. Without the removal, WebView2
+        # keeps running v1 as well, forever.
+        self.assertEqual(self.core.removed, ["id-1"], "the old script must be dropped")
+        self.assertEqual(self.core.added, ["id-1", "id-2"])
+
+    def test_only_one_script_is_ever_registered(self) -> None:
+        for n in range(5):
+            windows.install_document_start_script(self.window, f"// v{n}")
+        live = set(self.core.added) - set(self.core.removed)
+        self.assertEqual(len(live), 1, f"exactly one document-start script, got {live}")
+
+    def test_a_missing_webview_is_an_error_not_a_silent_pass(self) -> None:
+        windows._browser = lambda _window: None
+        with self.assertRaises(RuntimeError):
+            windows.install_document_start_script(self.window, "// v1")
+
+    def test_the_wait_gives_up_rather_than_hanging(self) -> None:
+        """A null CoreWebView2 must not spin forever on the caller's thread."""
+        import webview.platforms  # noqa: F401  - only to prove the import shape
+
+        windows._browser = self._browser          # the real waiter
+        original_tries = windows._WEBVIEW_WAIT_TRIES
+        windows._WEBVIEW_WAIT_TRIES = 2
+        windows._WEBVIEW_WAIT_SECONDS = 0.001
+        try:
+            done = threading.Event()
+            result: list[object] = []
+
+            def run() -> None:
+                try:
+                    result.append(windows._browser(self.window))
+                except Exception as exc:  # noqa: BLE001
+                    result.append(exc)
+                done.set()
+
+            threading.Thread(target=run, daemon=True).start()
+            self.assertTrue(done.wait(5), "the wait must be bounded")
+        finally:
+            windows._WEBVIEW_WAIT_TRIES = original_tries
+
+
+class WindowsCookieTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.core = _FakeCore()
+        self.browser = _FakeBrowser(self.core)
+        self._clr, self._browser = windows._clr, windows._browser
+        windows._clr = _fake_clr
+        windows._browser = lambda _window: self.browser
+        self.window = type("W", (), {"uid": "master"})()
+
+    def tearDown(self) -> None:
+        windows._clr, windows._browser = self._clr, self._browser
+
+    def test_a_jar_survives_a_round_trip(self) -> None:
+        """This is the difference between logging in once and logging in daily."""
+        jar = [
+            {"Name": "NID_AUT", "Value": "abc", "Domain": ".naver.com", "Path": "/",
+             "Secure": "TRUE", "HttpOnly": True, "Expires": 1788253200.0},
+            {"Name": "NID_SES", "Value": "xyz", "Domain": ".naver.com", "Path": "/"},
+        ]
+        self.assertEqual(windows.restore_cookies(self.window, jar), 2)
+        back = {row["Name"]: row for row in windows.dump_cookies(self.window)}
+
+        self.assertEqual(back["NID_AUT"]["Value"], "abc")
+        self.assertEqual(back["NID_AUT"]["Domain"], ".naver.com")
+        self.assertEqual(back["NID_AUT"]["Secure"], "TRUE")
+        self.assertIs(back["NID_AUT"]["HttpOnly"], True)
+        self.assertAlmostEqual(back["NID_AUT"]["Expires"], 1788253200.0)
+        # A session cookie is recorded by omission, which is what restore expects.
+        self.assertNotIn("Expires", back["NID_SES"])
+
+    def test_a_nameless_row_is_skipped_not_stored(self) -> None:
+        self.assertEqual(windows.restore_cookies(self.window, [{"Value": "x"}]), 0)
+
+
+class SeamContractTests(unittest.TestCase):
+    def test_both_backends_expose_the_same_interface(self) -> None:
+        for name in ("ensure_ready", "lock_exclusive", "unlock",
+                     "install_document_start_script", "cookie_store",
+                     "dump_cookies", "restore_cookies", "timing_precision"):
+            self.assertTrue(hasattr(darwin, name), f"darwin is missing {name}")
+            self.assertTrue(hasattr(windows, name), f"windows is missing {name}")
+            self.assertTrue(hasattr(app_platform, name), f"the seam is missing {name}")
+
+    def test_both_backends_import_on_this_machine(self) -> None:
+        """A typo in the Windows module must not wait until it reaches Windows."""
+        self.assertEqual(darwin.NAME, "darwin")
+        self.assertEqual(windows.NAME, "windows")
+
+    # The regression that would quietly re-break Windows: a platform-only import
+    # creeping back into shared code. `import fcntl` at module scope in
+    # browser_bridge.py is what made the app unable to start there at all.
+    FORBIDDEN = {
+        "fcntl": "POSIX only",
+        "WebKit": "macOS only",
+        "Foundation": "macOS only",
+        "objc": "macOS only",
+        "PyObjCTools": "macOS only",
+        "msvcrt": "Windows only",
+    }
+
+    def test_no_shared_module_imports_a_platform_only_library(self) -> None:
+        allowed = {ROOT / "app_platform" / "darwin.py", ROOT / "app_platform" / "windows.py"}
+        offenders: list[str] = []
+        for path in sorted(list((ROOT / "mac").glob("*.py")) + list((ROOT / "core").glob("*.py"))):
+            if path in allowed:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                names = []
+                if isinstance(node, ast.Import):
+                    names = [a.name.split(".")[0] for a in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    names = [node.module.split(".")[0]]
+                for name in names:
+                    if name in self.FORBIDDEN:
+                        offenders.append(
+                            f"{path.relative_to(ROOT)}:{node.lineno} imports {name} "
+                            f"({self.FORBIDDEN[name]})"
+                        )
+        self.assertEqual(offenders, [], "platform-only imports belong in app_platform:\n  "
+                                       + "\n  ".join(offenders))
+
+
+class PlatformNoteTests(unittest.TestCase):
+    """The self-check has to reach the screen, or it is not a self-check.
+
+    Document-start injection is the one hook whose failure is invisible: the
+    fallback still loads the autopilot on `loaded`, so the panel fills in and
+    the app looks right while the popup shim is missing and the first few
+    hundred milliseconds on the seat map are gone. On a machine neither of us
+    can test, this line is the difference between "it doesn't work" and an
+    answer.
+    """
+
+    def setUp(self) -> None:
+        from core.seat import bridge_line, platform_note
+
+        self.platform_note = platform_note
+        self.bridge_line = bridge_line
+        import time as _time
+
+        self.now = _time.time()
+
+    def _health(self, **over):
+        health = {"seen_at": self.now, "last_ok": self.now, "failures": 0, "last_error": "",
+                  "platform": "windows", "document_start": "ok",
+                  "document_start_error": "", "autopilot_source": "bundled"}
+        health.update(over)
+        return health
+
+    def test_a_working_run_says_nothing_extra(self) -> None:
+        self.assertEqual(self.platform_note(self._health()), "")
+
+    def test_a_failed_injection_is_named_on_the_line(self) -> None:
+        note = self.platform_note(
+            self._health(document_start="failed", document_start_error="no WebView2 yet")
+        )
+        self.assertIn("사전 주입 실패", note)
+        self.assertIn("no WebView2 yet", note)
+
+        line = self.bridge_line(
+            self._health(document_start="failed", document_start_error="no WebView2 yet"),
+            {"page": "seat"}, {}, now=self.now,
+        )
+        self.assertIn("사전 주입 실패", line, "the panel line must carry it, not just the helper")
+
+    def test_an_unreadable_update_is_named(self) -> None:
+        note = self.platform_note(self._health(autopilot_source="bundled (업데이트 읽기 실패: denied)"))
+        self.assertIn("업데이트 읽기 실패", note)
+
+    def test_a_normal_update_is_not_reported_as_trouble(self) -> None:
+        self.assertEqual(self.platform_note(self._health(autopilot_source="updated")), "")
+
+    def test_missing_health_is_not_a_crash(self) -> None:
+        self.assertEqual(self.platform_note(None), "")
+        self.assertEqual(self.platform_note({}), "")
+
+
+class AtomicStateTests(unittest.TestCase):
+    def test_a_reader_never_sees_a_half_written_state_file(self) -> None:
+        """save_state was write_text: truncate, then fill.
+
+        Two processes rewrite this file several times a second. A reader landing
+        mid-write got a truncated document, load_state caught the JSONDecodeError
+        and returned {}, and the whole panel state silently reset.
+        """
+        import tempfile
+
+        from browser_bridge import load_state, save_state
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.json"
+            big = {"show_catalog": {"blocks": [{"k": i} for i in range(4000)]}}
+            save_state(path, big)
+
+            stop = threading.Event()
+            torn: list[str] = []
+
+            def reader() -> None:
+                # A torn read makes load_state raise JSONDecodeError internally
+                # and return {} — so an empty result IS the failure, and an
+                # earlier version of this test skipped exactly that case with
+                # `if state and ...`, which made it pass against the bug.
+                while not stop.is_set():
+                    if not load_state(path).get("show_catalog"):
+                        torn.append("a reader saw no catalog — the file was mid-write")
+
+            readers = [threading.Thread(target=reader, daemon=True) for _ in range(3)]
+            for t in readers:
+                t.start()
+            try:
+                for n in range(150):
+                    save_state(path, {"show_catalog": {"blocks": [{"k": i} for i in range(4000)], "n": n}})
+            finally:
+                stop.set()
+                for t in readers:
+                    t.join(timeout=5)
+
+            self.assertEqual(torn, [], "os.replace must make the swap atomic")
+            self.assertTrue(json.loads(path.read_text())["show_catalog"]["blocks"])

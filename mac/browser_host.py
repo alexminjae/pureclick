@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import threading
@@ -16,15 +17,38 @@ try:
 except ImportError as exc:
     raise SystemExit("pywebview is required. Run: pip install pywebview") from exc
 
+import app_platform  # noqa: E402
 import browser_session  # noqa: E402
 from browser_bridge import load_state, locked_state, merge_if_changed, patch_state, save_state  # noqa: E402
+
+# What the platform hooks actually did, so a first run on an unfamiliar machine
+# can say which one failed instead of looking healthy. Published with the bridge
+# health, which the panel already renders.
+PLATFORM_STATE: dict[str, Any] = {
+    "platform": app_platform.NAME,
+    "document_start": "unknown",
+    "document_start_error": "",
+    "autopilot_source": "bundled",
+}
 
 STATE_PATH = (
     Path(sys.argv[1])
     if len(sys.argv) > 1
     else Path(__file__).with_name(".pureclick_browser_state.json")
 )
-SCRIPT_PATH = ROOT_DIR / "browser" / "pureclick_autopilot.js"
+def _bundled_script_path() -> Path:
+    """Where the autopilot lives, from a checkout or inside a frozen bundle.
+
+    PyInstaller one-file builds unpack to a temp directory and expose it as
+    `sys._MEIPASS`; a path built from `__file__` finds nothing there.
+    """
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        return Path(base) / "browser" / "pureclick_autopilot.js"
+    return ROOT_DIR / "browser" / "pureclick_autopilot.js"
+
+
+SCRIPT_PATH = _bundled_script_path()
 COOKIE_PATH = Path(__file__).with_name(".pureclick_cookies.json")
 START_URL = "https://nol.yanolja.com/ticket"
 
@@ -56,12 +80,43 @@ _COMMAND_JS = {
 }
 
 
+def autopilot_cache_path() -> Path:
+    """Where a verified autopilot update is kept, outside the bundle.
+
+    A frozen build unpacks read-only to a temp directory, so an update cannot be
+    written next to the bundled copy.
+    """
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    else:
+        base = Path.home() / "Library" / "Application Support"
+    return base / "PureClick" / "pureclick_autopilot.js"
+
+
 def load_script() -> str:
+    """The autopilot source: a verified update if there is one, else the bundle.
+
+    The update is only ever written after its SHA-256 matched the release
+    manifest (see app_update.py), so reaching for it here does not re-open that
+    decision. Anything unreadable falls back to the bundled copy and says so,
+    because an unverified or missing update must never look like a good one.
+    """
+    cached = autopilot_cache_path()
+    try:
+        if cached.is_file():
+            source = cached.read_text(encoding="utf-8")
+            if source.strip():
+                PLATFORM_STATE["autopilot_source"] = "updated"
+                return source
+    except OSError as exc:
+        PLATFORM_STATE["autopilot_source"] = f"bundled (업데이트 읽기 실패: {exc})"
+    else:
+        PLATFORM_STATE["autopilot_source"] = "bundled"
     return SCRIPT_PATH.read_text(encoding="utf-8")
 
 
 def install_document_start_script(window: webview.Window) -> bool:
-    """Register the autopilot as a WKUserScript that runs at document start.
+    """Register the autopilot to run at document start, before any page script.
 
     Injecting on the `loaded` event is too late for the parts that matter: the
     popup shim has to be in place before NOL's own bundle wires up 예매하기, and
@@ -69,47 +124,26 @@ def install_document_start_script(window: webview.Window) -> bool:
     whether a seat is still there. A user script is evaluated before any page
     script on every navigation and in every frame, so nothing has to be timed.
 
-    Reaching into pywebview's Cocoa backend for the WKWebView is deliberate —
-    pywebview exposes no API for document-start injection. Failure is not fatal;
-    `inject_autopilot` on `loaded` remains as the fallback.
+    pywebview exposes no API for this on either platform, so app_platform reaches
+    into the backend: a WKUserScript on macOS, AddScriptToExecuteOnDocumentCreated
+    on Windows. Failure is not fatal — `inject_autopilot` on `loaded` remains as
+    the fallback — but it is no longer only a line on stderr. On Windows this is
+    the most likely thing to fail, and the fallback still *looks* like a working
+    app while losing the one race the whole macro exists to win, so the outcome
+    is recorded and shown on the panel.
 
     IMPORTANT: the script source is snapshotted when this runs. Call it again
     whenever autopilot.js changes (reload_autopilot), or navigations keep
     re-injecting a stale copy that still does background PreselectSeat.
     """
     try:
-        import WebKit
-        from webview.platforms import cocoa
-
-        # On the `shown` event the window is on screen but pywebview has not
-        # always finished registering it, and the KeyError that follows was
-        # being reported as "injection unavailable" on every launch — which
-        # meant the very first page load ran without the popup shim. Wait the
-        # few milliseconds out rather than falling back for the whole session.
-        # Registration and the WKWebView itself land separately, and `shown`
-        # can beat both: first it was a KeyError on the uid, then a
-        # BrowserView with no `.webview` yet. Either was reported as
-        # "injection unavailable", which meant the very first page load ran
-        # without the popup shim. Wait for a usable webview instead.
-        webview_obj = None
-        for _ in range(60):
-            instance = cocoa.BrowserView.instances.get(window.uid)
-            webview_obj = getattr(instance, "webview", None) if instance else None
-            if webview_obj is not None:
-                break
-            time.sleep(0.05)
-        if webview_obj is None:
-            raise RuntimeError(f"window {window.uid!r} has no webview yet")
-        controller = webview_obj.configuration().userContentController()
-        controller.removeAllUserScripts()
-        script = WebKit.WKUserScript.alloc().initWithSource_injectionTime_forMainFrameOnly_(
-            load_script(),
-            0,  # WKUserScriptInjectionTimeAtDocumentStart
-            False,  # all frames, not just the main one
-        )
-        controller.addUserScript_(script)
+        app_platform.install_document_start_script(window, load_script())
+        PLATFORM_STATE["document_start"] = "ok"
+        PLATFORM_STATE["document_start_error"] = ""
         return True
     except Exception as exc:  # noqa: BLE001 - fall back to on-load injection
+        PLATFORM_STATE["document_start"] = "failed"
+        PLATFORM_STATE["document_start_error"] = str(exc)[:160]
         print(f"[pureclick] document-start injection unavailable: {exc}", file=sys.stderr)
         return False
 
@@ -332,6 +366,9 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
             "last_ok": last_ok,
             "failures": failures,
             "last_error": last_error,
+            # Which platform hooks took. On a machine neither of us has tested,
+            # this is what turns "it doesn't work" into a specific answer.
+            **PLATFORM_STATE,
         })
         stop_event.wait(0.4)
 

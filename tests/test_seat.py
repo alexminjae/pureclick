@@ -18,7 +18,7 @@ from core.seat import (
     resolve_seat_type,
     map_move_lines,
     CATCH_TICK_MS,
-    running_hint,
+    watch_note,
     waiting_log_lines,
     seat_order_lines,
     select_seat_unit,
@@ -428,70 +428,67 @@ class RunningHintTest(unittest.TestCase):
     thing that is merely interesting.
     """
 
-    def test_a_block_names_the_endpoint_that_earned_it(self) -> None:
-        # The question the repo could not answer after the fact: which call was
-        # throttled, the queue or the seat path. They need different answers.
-        hint = running_hint(
-            {"blockedForMs": 90_000, "blockedEndpoint": "/onestop/api/seatStatus"},
-            "감시 중",
-        )
-        self.assertIn("/onestop/api/seatStatus", hint)
-        self.assertIn("90초", hint)
-
-    def test_a_block_with_no_endpoint_still_reports_cleanly(self) -> None:
-        hint = running_hint({"blockedForMs": 12_000}, "감시 중")
-        self.assertIn("12초", hint)
-        self.assertNotIn("()", hint, "no empty parenthesis where a name would go")
-
     def test_a_gateway_block_outranks_everything(self) -> None:
         # While blocked, no seat can be taken and retrying lengthens the block,
-        # so every other number on screen is noise.
-        hint = running_hint(
-            {"blockedForMs": 90_000, "takenConflicts": 5,
-             "captcha": {"state": "unreadable"}, "seatErrorDialogs": 3},
-            "취소표 감시 중",
+        # so nothing else on screen is worth acting on.
+        note = watch_note(
+            {"running": True, "blockedForMs": 90_000, "takenConflicts": 5,
+             "captcha": {"state": "unreadable"}, "consecutiveRejects": 12}
         )
-        self.assertIn("접속 차단", hint)
-        self.assertIn("90초", hint)
+        self.assertIn("차단", note)
 
     def test_a_captcha_outranks_the_rest(self) -> None:
-        hint = running_hint(
-            {"captcha": {"state": "unreadable"}, "takenConflicts": 4}, "감시 중"
+        note = watch_note(
+            {"running": True, "captcha": {"state": "unreadable"},
+             "blockEntryMisses": 4}
         )
-        self.assertIn("보안문자", hint)
+        self.assertIn("보안문자", note)
 
-    def test_losing_a_race_reads_as_working_not_broken(self) -> None:
-        # A busy open means other buyers take seats first. That is the macro
-        # working, and it used to read like a stall.
-        hint = running_hint({"takenConflicts": 7, "cooldownSeats": 3}, "감시 중")
-        self.assertIn("7", hint)
-        self.assertIn("다음 자리", hint)
-
-    def test_it_reports_the_measured_tick_not_the_configured_one(self) -> None:
-        # A tick is the sleep plus the request; seatStatus measures 58ms, so
-        # ticks x 200 understated every sweep by about a third — in the one
-        # number you read when deciding whether to narrow the 감시 구역.
-        seat = {"running": True, "watchedBlocks": 34, "sweepTicks": 17,
-                "observedTickMs": 258}
-        self.assertIn(str(17 * 258), running_hint(seat, "감시 중"))
-
-    def test_it_falls_back_to_the_default_tick_before_one_is_measured(self) -> None:
-        seat = {"running": True, "watchedBlocks": 4, "sweepTicks": 2}
-        self.assertIn(str(2 * CATCH_TICK_MS), running_hint(seat, "감시 중"))
+    def test_a_map_refusing_seats_is_named_but_a_lost_race_is_not(self) -> None:
+        # These need opposite responses and used to read alike. Losing a seat
+        # to a faster buyer is the macro *working* — it needs no words, and
+        # counting it on screen made a healthy watch look like a fault. A map
+        # that keeps refusing seats it calls free is the macro fighting itself,
+        # and that does need saying.
+        lost = watch_note({"running": True, "takenConflicts": 7, "cooldownSeats": 3})
+        refused = watch_note({"running": True, "consecutiveRejects": 12})
+        self.assertNotEqual(lost, refused)
+        self.assertIn("거부", refused)
+        self.assertIn("빈자리가 나오면", lost, "a busy open is the normal state")
 
     def test_a_blind_trigger_says_so(self) -> None:
-        # When the one-request trigger cannot see, the watch is paying a full
-        # sweep for every look and the user can act on that.
-        hint = running_hint(
-            {"running": True, "triggerNote": "잔여석 0 — 판매 중이 아닌 회차일 수 있습니다"},
-            "감시 중",
+        # When the one-request trigger cannot see, the watch pays a full sweep
+        # for every look and the user can act on that.
+        note = watch_note(
+            {"running": True,
+             "triggerNote": "잔여석 0 — 판매 중이 아닌 회차일 수 있습니다"}
         )
-        self.assertIn("판매 중이 아닌", hint)
+        self.assertIn("판매 중이 아닌", note)
 
-    def test_an_empty_status_still_returns_something(self) -> None:
+    def test_a_partly_blind_sweep_says_so(self) -> None:
+        # The venue may be bigger than what is being swept, and every other
+        # reading looks healthy either way.
+        self.assertIn("일부 구역", watch_note({"running": True, "batchFailures": 3}))
+
+    def test_an_empty_status_still_returns_a_string(self) -> None:
         # It is rendered on every poll, including before anything has happened.
-        self.assertIsInstance(running_hint({}, "대기 중"), str)
-        self.assertIsInstance(running_hint({}, ""), str)
+        self.assertEqual(watch_note({}), "")
+        self.assertEqual(watch_note(None), "")
+
+    def test_nothing_it_emits_carries_a_number(self) -> None:
+        # The band repaints twice a second and a running watch moves a dozen
+        # counters between repaints, so a counter in this text churns and
+        # churning text cannot be read. See tests/test_band_is_readable.py.
+        for seat in (
+            {"running": True},
+            {"running": True, "blockedForMs": 90_000, "blockedEndpoint": "/x"},
+            {"running": True, "captcha": {"state": "timeout"}},
+            {"running": True, "batchFailures": 3},
+            {"running": True, "blockEntryMisses": 18},
+            {"running": True, "consecutiveRejects": 12},
+            {"running": True, "watchRectIgnored": True},
+        ):
+            self.assertNotRegex(watch_note(seat), r"\d", f"{seat}")
 
 
 class WaitingLogTest(unittest.TestCase):

@@ -1,0 +1,85 @@
+name: Windows build
+
+# Produces the single PureClick.exe to hand to a Windows machine, plus the
+# manifest the running app checks for updates. Both are attached to a Release on
+# a tag, so the download link is stable.
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r mac/requirements.txt
+          pip install pyinstaller
+
+      # A build that ships a failing test suite is worse than no build: the whole
+      # point of the exe is that whoever runs it cannot debug it.
+      - name: Test on Windows
+        run: python -m pytest tests/ -q
+
+      # Both are read by app_update at runtime and bundled by the spec. They are
+      # written before the build so the exe knows its own version and where to
+      # look for newer automation.
+      - name: Stamp version and update source
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF -like 'refs/tags/*') { $env:GITHUB_REF -replace 'refs/tags/v?','' } else { "0.0.0+$($env:GITHUB_SHA.Substring(0,7))" }
+          Set-Content -NoNewline -Encoding utf8 VERSION $version
+          Set-Content -NoNewline -Encoding utf8 UPDATE_URL "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download/manifest.json"
+          Write-Host "version $version"
+
+      # Drawn from the same source as the macOS .icns, in pure Python — the
+      # macOS pipeline needs sips and iconutil, which do not exist here.
+      - name: Draw the icon
+        run: python tools/make_ico.py
+
+      - name: Build
+        run: pyinstaller pureclick.spec --noconfirm
+
+      - name: Write the update manifest
+        shell: pwsh
+        run: |
+          $version = Get-Content VERSION -Raw
+          $sha = (Get-FileHash -Algorithm SHA256 browser/pureclick_autopilot.js).Hash.ToLower()
+          $base = "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
+          @{
+            app_version      = $version
+            releases_url     = "https://github.com/$env:GITHUB_REPOSITORY/releases"
+            autopilot_sha256 = $sha
+            autopilot_url    = "$base/pureclick_autopilot.js"
+          } | ConvertTo-Json | Set-Content -Encoding utf8 dist/manifest.json
+          Copy-Item browser/pureclick_autopilot.js dist/pureclick_autopilot.js
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PureClick-windows
+          path: |
+            dist/PureClick.exe
+            dist/manifest.json
+            dist/pureclick_autopilot.js
+
+      # On a tag these become the stable download links the app checks against.
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/PureClick.exe
+            dist/manifest.json
+            dist/pureclick_autopilot.js

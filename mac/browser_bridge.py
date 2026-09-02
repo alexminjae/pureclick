@@ -1,23 +1,38 @@
 from __future__ import annotations
 
-import fcntl
 import json
+import os
 import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+# Both processes import this module, and neither can be relied on to have put the
+# repo root on the path first.
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+import app_platform  # noqa: E402
+
 
 @contextmanager
 def locked_state(path: Path) -> Iterator[None]:
+    """Serialise access to the state file across the panel and browser processes.
+
+    The lock itself is platform-specific — `flock` on macOS, `msvcrt.locking` on
+    Windows — and lives behind app_platform. `import fcntl` used to sit at module
+    scope here, which meant both processes died on import on Windows before a
+    line of the app ran.
+    """
     lock_path = path.with_name(path.name + ".lock")
     with open(lock_path, "a+") as fh:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        app_platform.lock_exclusive(fh)
         try:
             yield
         finally:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            app_platform.unlock(fh)
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -30,7 +45,19 @@ def load_state(path: Path) -> dict[str, Any]:
 
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    """Replace the state file in one step, never truncate-and-rewrite.
+
+    This was `path.write_text(...)`, which empties the file and then fills it.
+    Two processes rewrite this 300 KB file several times a second, so a reader
+    landing mid-write got a truncated document — `load_state` catches the
+    JSONDecodeError and returns `{}`, which silently resets the whole panel.
+    The flock made that unreachable on macOS; it would not have on Windows, and
+    `os.replace` is atomic on both, so the class is gone rather than relocated.
+    """
+    payload = json.dumps(state, ensure_ascii=False, indent=2)
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text(payload, encoding="utf-8")
+    os.replace(temp, path)
 
 
 def patch_state(
@@ -82,10 +109,21 @@ class BrowserBridge:
         """Launch the 예매 창. `geometry` tiles it beside the panel."""
         if self.running:
             return
-        argv = [sys.executable, str(self.host_script), str(self.state_path)]
+        # Frozen builds have no interpreter to invoke: sys.executable is the app
+        # itself, so it is re-run with a flag the entry point dispatches on.
+        # Passing host_script there would relaunch the control panel instead.
+        if getattr(sys, "frozen", False):
+            argv = [sys.executable, "--browser-host", str(self.state_path)]
+        else:
+            argv = [sys.executable, str(self.host_script), str(self.state_path)]
         if geometry:
             argv += [str(int(value)) for value in geometry]
-        self.process = subprocess.Popen(argv, cwd=str(self.mac_dir))
+        # Otherwise a console window opens beside the 예매 창 on Windows and
+        # stays there for the life of the app.
+        extra: dict[str, Any] = {}
+        if sys.platform == "win32":
+            extra["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        self.process = subprocess.Popen(argv, cwd=str(self.mac_dir), **extra)
 
     def stop(self) -> None:
         if not self.running or self.process is None:
@@ -125,6 +163,26 @@ class BrowserBridge:
     def read_autopilot_status(self) -> dict[str, Any] | None:
         status = self.read_state().get("autopilot_status")
         return status if isinstance(status, dict) else None
+
+    def read_snapshot(self) -> dict[str, dict[str, Any]]:
+        """Everything the panel polls, from a single parse of the state file.
+
+        `read_page_context`, `read_show_catalog` and `read_autopilot_status`
+        each load and parse the whole thing — 300KB once a seat map has been
+        read — so the 500ms poll parsed it five times a tick and held the lock
+        away from the host for every one of them.
+        """
+        state = self.read_state()
+
+        def as_dict(key: str) -> dict[str, Any]:
+            value = state.get(key)
+            return value if isinstance(value, dict) else {}
+
+        return {
+            "context": as_dict("page_context"),
+            "catalog": as_dict("show_catalog"),
+            "status": as_dict("autopilot_status"),
+        }
 
     def push(
         self,

@@ -248,6 +248,27 @@
   // requests a second when it opens a 구역; this sustains about eight.
   const CATCH_MIN_POLL_MS = 100;
   const CATCH_MAX_REQUESTS_PER_TICK = 1;
+  // What to spend when there is no burst to save for.
+  //
+  // The one-request budget is an *average*: it stays cheap while the venue is
+  // quiet so a trigger can spend the whole sweep at once the moment something
+  // frees. That bargain needs a trigger. A show that does not publish its
+  // remaining-seat count has none — watch_trigger reports usable:false and
+  // triggerBursts stays 0 forever — so the saving is never spent and the watch
+  // just runs at the slowest rate it has, permanently.
+  //
+  // Measured on 26006903: 75 blocks, 2 per request, 1 request per 154ms tick =
+  // a 5.9 second lap. A seat freeing behind the cursor is three seconds old
+  // before we look, which is the whole race.
+  //
+  // So when there is nothing to save for, spend. This is still an order of
+  // magnitude under the 460 requests a second the site's own page does when it
+  // opens a 구역, and the gateway backoff below is unchanged.
+  const CATCH_UNTRIGGERED_REQUESTS_PER_TICK = 4;
+  // Stop spending once a lap is this quick — past here the page's own render
+  // lag (domAgreedMs, ~1s on a busy map) dominates and more requests buy
+  // nothing but exposure.
+  const CATCH_TARGET_LAP_MS = 1200;
   const CATCH_LIVE_TRIES = 8;
   // 좌석 잡기 gives up after this many refusals in a row. 취켓팅 keeps watching,
   // because there the whole point is to wait for the map to change.
@@ -278,6 +299,7 @@
     // just took is not gone for good: holds expire and carts are abandoned, so
     // it rejoins the pool rather than being blacklisted for the run.
     takenUntil: new Map(),
+    unreachableUntil: new Map(),
     // Unix ms until a gateway block lifts, and which call earned it. Declared
     // rather than sprung into being, because every loop now reads them.
     blockedUntil: 0,
@@ -292,6 +314,10 @@
     syncedSummary: null,
     lastProbe: null,
     lastBlocks: null,
+    // Whether lastBlocks covers the whole venue, or is whatever an early-
+    // stopped 좌석 잡기 happened to fetch. The watch reads it as the venue.
+    lastBlocksComplete: true,
+    batchFailures: 0,
     awaitingPayment: false,
     stopRequested: false,
     lastStatusStamp: "",
@@ -310,7 +336,7 @@
   // outlives a reload_autopilot — it hangs off window, which is the point — so
   // without a version a fixed builder keeps serving the old build's output and
   // the fix looks like it did nothing. That cost a full round of debugging.
-  const SKETCH_CACHE_VERSION = 4;
+  const SKETCH_CACHE_VERSION = 5;
   const parkedSketch = (window.__pureclickZoneSketch = window.__pureclickZoneSketch || {
     points: [],
     key: null,
@@ -331,6 +357,12 @@
     waitingLog: [],
     queueHost: "",
     reentryTries: 0,
+    // On armState rather than in the closure so a stuck re-entry is visible in
+    // the status, and so the latch can be tested apart from the spacing floor —
+    // an attempt can easily outlast the floor, and then the latch is the only
+    // thing preventing overlap.
+    reentryInFlight: false,
+    reentryAt: 0,
     // What the last entry actually did, so a rehearsal has something to show.
     // fireEntry already measured the lateness and then discarded it.
     latenessMs: null,
@@ -888,7 +920,20 @@
   // is a container that merely happens to include the text, and is left alone.
   const SEAT_ERROR_MAX_TEXT = 200;
 
-  function isVisible(node) {
+  /**
+   * Visible *and* big enough to be a dialog.
+   *
+   * This was also called `isVisible`, declared in the same IIFE scope as the
+   * general one above. Function declarations hoist, so the later one won for the
+   * whole file — including the call sites written above it — and the general
+   * test was unreachable dead code. Every button and input in the app was being
+   * judged against a 40x20 minimum meant for alert boxes, with no opacity test:
+   * a small label-carrying span read as invisible, and a modal fading out at
+   * opacity 0 read as still blocking.
+   *
+   * Only the two dialog scans want this. Everything else wants isVisible.
+   */
+  function isVisibleDialog(node) {
     if (!node?.getBoundingClientRect) return false;
     const box = node.getBoundingClientRect();
     if (box.width < 40 || box.height < 20) return false;
@@ -930,7 +975,7 @@
       const text = (node.innerText || "").trim();
       if (!text || text.length > SEAT_ERROR_MAX_TEXT) continue;
       if (!pattern.test(text)) continue;
-      if (!isVisible(node)) continue;
+      if (!isVisibleDialog(node)) continue;
       if (!confirmButtonIn(node)) continue;
       hits.push({ node, len: text.length });
     }
@@ -982,7 +1027,7 @@
       const text = (node.innerText || "").trim();
       if (!text || text.length > SEAT_ERROR_MAX_TEXT) continue;
       if (SEAT_ERROR_DIALOG.test(text) || SEAT_TAKEN_DIALOG.test(text)) continue;
-      if (!isVisible(node)) continue;
+      if (!isVisibleDialog(node)) continue;
       return text.slice(0, 160);
     }
     return null;
@@ -1009,6 +1054,19 @@
     return out;
   }
 
+  /**
+   * A modal that is actually answering us, not merely present.
+   *
+   * blockingOverlayNodes() is deliberately broad — it feeds a dismisser that
+   * simply finds nothing to press on a false positive. Here a false positive
+   * would report a good selection as declined, so the dismiss button is
+   * required: that is what distinguishes an alert from a layout wrapper that
+   * happens to carry "dialog" in its class.
+   */
+  function blockingOverlayAnswered() {
+    return blockingOverlayNodes().some((node) => confirmButtonIn(node));
+  }
+
   function describeBlockingOverlay() {
     for (const node of blockingOverlayNodes()) {
       const text = (node.innerText || "").trim();
@@ -1031,6 +1089,12 @@
       const button = confirmButtonIn(node);
       if (!button) continue;
       const text = (node.innerText || "").trim();
+      // Never the 보안문자 box. Its submit button reads 확인, which is exactly
+      // what confirmButtonIn matches and what NEVER_CLICK does not exclude — and
+      // waitForCaptchaClear called this every 400ms for up to two minutes while
+      // the user was typing. That submits a half-typed captcha, repeatedly, and
+      // there was nothing anywhere in this path that knew what a captcha was.
+      if (isCaptchaPageCopy(text)) continue;
       owners.push({ node, button, len: text.length });
     }
     if (!owners.length) return false;
@@ -1171,8 +1235,11 @@
       if (pageHasSelectedSeats()) clearSelectedSeats();
       const held = [...seatState.heldSeatIds];
       if (held.length) {
-        await releasePreselected(held);
-        seatState.heldSeatIds.clear();
+        // Only on success. releasePreselected already prunes what it released.
+        if (!(await releasePreselected(held))) {
+          seatState.lastError =
+            `좌석 ${held.length}석을 반납하지 못했습니다 — 예매 창에서 [전체삭제]를 눌러 주세요.`;
+        }
       }
       seatState.locked = false;
       seatState.awaitingPayment = false;
@@ -1187,8 +1254,10 @@
     await sleep(500);
     const held = [...seatState.heldSeatIds];
     if (held.length) {
-      await releasePreselected(held);
-      seatState.heldSeatIds.clear();
+      if (!(await releasePreselected(held))) {
+        seatState.lastError =
+          `좌석 ${held.length}석을 반납하지 못했습니다 — 예매 창에서 [전체삭제]를 눌러 주세요.`;
+      }
     }
     seatState.locked = false;
     seatState.awaitingPayment = false;
@@ -1344,12 +1413,14 @@
     }
 
     const deadline = Date.now() + timeoutMs;
+    // Once, for anything already stacked on top of the captcha. Not on every
+    // pass: the point of this wait is to leave the user alone while they type,
+    // and a dismisser running ten times a second is the opposite of that.
     dismissBlockingDialogs();
     setCaptchaReport("waiting", "예매 창에서 6자리를 입력하세요");
     updateOverlay("보안문자 — 예매 창에서 직접 입력하세요<br>통과하면 바로 이어서 진행합니다", "warn");
 
     while (Date.now() < deadline) {
-      dismissBlockingDialogs();
       if (!captchaPresent()) {
         setCaptchaReport("idle");
         updateOverlay("보안문자 통과 — 이어서 진행합니다", "ok");
@@ -1621,6 +1692,23 @@
     let attempts = 0;
     let lastError = null;
     while (serverTimeUnix() < giveUpAt) {
+      // A block ends the attempt, immediately.
+      //
+      // fetchWaitingUrl throws on BL / 403 / 429 after recording the cooldown,
+      // but the throw was caught per-attempt and the loop carried on — 20ms
+      // apart through the decisive window, then 80ms, for the remaining fifteen
+      // seconds. That is ~50 requests a second against an account that is
+      // already locked, and every one of them can push the lockout further past
+      // the open, which is the one moment it cannot be waited out. The catch
+      // loop has checked this on every tick for a while; this one never did.
+      const blockedFor = gatewayBlockRemainingMs();
+      if (blockedFor > 0) {
+        armState.waitingAttempts = attempts;
+        throw new Error(
+          `접속 차단 — ${Math.ceil(blockedFor / 1000)}초 후에 다시 시도하세요.` +
+            (seatState.blockedEndpoint ? ` (${seatState.blockedEndpoint})` : ""),
+        );
+      }
       attempts += 1;
       const sentOffsetMs = Math.round((serverTimeUnix() - target) * 1000);
       const startedPerf = performance.now();
@@ -1850,7 +1938,11 @@
     if (!arm) return refuse("예약 정보가 없습니다 — 조작판에서 다시 [대기 시작]을 누르세요.");
     if (!arm.enabled) return refuse("예약이 꺼져 있습니다.");
     if (arm.fired || armState.fired) return refuse("이미 이번 예약으로 진입했습니다.");
-    if (armState.running) return;
+    // Was a bare `return`. When `running` could get stuck true this was the
+    // silence the user actually experienced: press 대기 시작, nothing happens,
+    // nothing said. It cannot get stuck any more, but a concurrent press still
+    // deserves an answer.
+    if (armState.running) return refuse("이미 대기 예약이 진행 중입니다.");
 
     // The entry only means anything where an entry can happen. On the seat map
     // or inside the queue there is no line left to join.
@@ -1878,51 +1970,114 @@
       return;
     }
 
+    // Everything from here on is inside one try/finally.
+    //
+    // `running` used to be set here, with two awaits — syncServerClock and
+    // waitUntilServerUnix — outside the try that resets it. A throw from either
+    // left it true forever, and because bootRoute calls this without awaiting,
+    // the rejection went nowhere. The guard at the top of this function is
+    // `if (armState.running) return`, so the next press, and every press after
+    // it, was refused in silence. One bad sync disabled 대기 시작 for the life of
+    // the page and said nothing.
     armState.running = true;
-    updateOverlay("서버 시각 동기화 중…", "info");
-    // Where the time goes, so "it took too long" can be answered with numbers
-    // rather than argued about.
-    const syncStarted = performance.now();
-    await syncServerClock(Number(arm.offset_seconds || 0));
-    armState.syncMs = Math.round(performance.now() - syncStarted);
-    armState.clockQuality = clockState.quality;
-    armState.clockOffsetMs = Math.round((clockState.offsetSeconds || 0) * 1000);
-    armState.queueHost = preconnectQueueHost();
-    const remaining = arm.target_server_unix - serverTimeUnix();
-    updateOverlay(`${arm.dry_run ? "테스트 " : ""}대기열 예약<br>${Math.max(0, remaining).toFixed(1)}초`, "info");
-    // Stop short of the open by exactly the lead the request loop expects.
-    // Waiting out the full deadline here is what made that lead dead code.
-    await waitUntilServerUnix(armEntryStartUnix(arm) ?? Number(arm.target_server_unix));
-
-    const firedPerf = performance.now();
     try {
-      await fireEntry(arm);
-      armState.enterMs = Math.round(performance.now() - firedPerf);
-      arm.fired = true;
-      armState.fired = true;
-      saveArmConfig({ ...arm, fired: true });
+      updateOverlay("서버 시각 동기화 중…", "info");
+      // Where the time goes, so "it took too long" can be answered with numbers
+      // rather than argued about.
+      const syncStarted = performance.now();
+      await syncServerClock(Number(arm.offset_seconds || 0));
+      armState.syncMs = Math.round(performance.now() - syncStarted);
+      armState.clockQuality = clockState.quality;
+      armState.clockOffsetMs = Math.round((clockState.offsetSeconds || 0) * 1000);
+      armState.queueHost = preconnectQueueHost();
+      const remaining = arm.target_server_unix - serverTimeUnix();
+      updateOverlay(`${arm.dry_run ? "테스트 " : ""}대기열 예약<br>${Math.max(0, remaining).toFixed(1)}초`, "info");
+      // Stop short of the open by exactly the lead the request loop expects.
+      // Waiting out the full deadline here is what made that lead dead code.
+      await waitUntilServerUnix(armEntryStartUnix(arm) ?? Number(arm.target_server_unix));
+
+      const firedPerf = performance.now();
+      try {
+        await fireEntry(arm);
+        armState.enterMs = Math.round(performance.now() - firedPerf);
+        arm.fired = true;
+        armState.fired = true;
+        saveArmConfig({ ...arm, fired: true });
+      } catch (error) {
+        armState.lastError = String(error);
+        updateOverlay(`진입 실패: ${error}`, "error");
+      }
     } catch (error) {
-      armState.lastError = String(error);
-      updateOverlay(`진입 실패: ${error}`, "error");
+      // Anything before the fire — a sync, a preconnect, the wait itself.
+      armState.lastError = `예약 준비 실패: ${String(error).slice(0, 90)}`;
+      updateOverlay(`예약 준비 실패: ${error}`, "error");
+      traceCall("armFailed", null, String(error).slice(0, 120));
     } finally {
       armState.running = false;
     }
   }
 
+  /**
+   * Try the entry again after we have been bounced back to the product page.
+   *
+   * Re-entry is a recovery. It used to be a second front door, and an unguarded
+   * one: driven by the 400ms watcher with no in-flight latch, no check that the
+   * open had even happened, and a `setInterval` callback that does not await, so
+   * nothing serialised the attempts. From the instant an arm landed, every tick
+   * started a *new* fireEntry — each parking until T-400ms and then polling
+   * /waiting at 20ms for fifteen seconds. Within ~16s there were 41 of them
+   * stacked, all aimed at the one endpoint that answers GATEWAY_ABUSE_BLOCKED
+   * with a ~165s lockout, at the exact moment a lockout cannot be recovered
+   * from. `reentryTries`, the only trace, was published and rendered nowhere.
+   *
+   * Three things hold it down now: one attempt in flight at a time, nothing
+   * before the target time, and a floor on the gap between attempts.
+   */
+  const REENTRY_SPACING_MS = 3000;
+  const REENTRY_LIMIT = 40;
+
+  function resetReentryState() {
+    armState.reentryInFlight = false;
+    armState.reentryAt = 0;
+    armState.reentryTries = 0;
+  }
+
   async function maybeReenter() {
+    // The latch, not armState.running: fireEntry called from here never sets
+    // that flag, so `running` alone left the attempts free to overlap.
+    if (armState.reentryInFlight) return;
+    // An arm already in progress owns the queue endpoint. Re-entering beside it
+    // is the storm, not a recovery.
+    if (armState.running) return;
     const seat = loadSeatConfig();
     const arm = loadArmConfig();
     if (!seat.reentry || !arm?.enabled) return;
+    // Before the open there is nothing to recover from — the scheduler is
+    // already waiting for T, and a second entry beside it is a duplicate. This
+    // is deliberately keyed off the target rather than `fired`, because `fired`
+    // does not survive: apply_state rewrites pureclick_arm_v1 from the panel's
+    // copy, which stays false, on every state-file change.
+    const target = Number(arm.target_server_unix);
+    if (Number.isFinite(target) && target > 0 && serverTimeUnix() < target) return;
     if (isSeatPage() && getInitData()?.sessionId) return;
-    if (armState.reentryTries > 40) return;
+    if (armState.reentryTries >= REENTRY_LIMIT) return;
     if (isWaitingPage() || isGatesPage()) return;
     if (!(isNolProductPage() || isGoodsPage())) return;
+    if (armState.reentryAt && Date.now() - armState.reentryAt < REENTRY_SPACING_MS) return;
+
+    armState.reentryInFlight = true;
+    armState.reentryAt = Date.now();
     armState.reentryTries += 1;
     updateOverlay(`재진입 ${armState.reentryTries}회`, "warn");
     try {
       await fireEntry({ ...arm, dry_run: false, fired: false });
     } catch (error) {
+      // Was console-only, so a re-entry that could never work looked exactly
+      // like one that was about to.
+      armState.lastError = `재진입 실패: ${String(error).slice(0, 80)}`;
       log("reentry failed", error);
+    } finally {
+      armState.reentryInFlight = false;
     }
   }
 
@@ -2325,10 +2480,63 @@
   // enough that an abandoned cart comes back within one 취켓팅 sitting.
   const TAKEN_COOLDOWN_MS = 30000;
 
+  // A seat the map would not give us, as opposed to one another buyer holds.
+  // Shorter, because the cause is usually local and momentary — the circle was
+  // not drawn, the block was not open, a modal swallowed the click — and the
+  // seat is often takeable on the very next pass.
+  const UNREACHABLE_COOLDOWN_MS = 3000;
+
   function markSeatTaken(seatInfoId) {
     if (!seatInfoId) return;
     seatState.takenUntil.set(String(seatInfoId), Date.now() + TAKEN_COOLDOWN_MS);
     seatState.takenConflicts = (seatState.takenConflicts || 0) + 1;
+  }
+
+  /**
+   * Park a seat the page declined for any reason other than a lost race.
+   *
+   * This is the only thing that makes a decline survive its tick. 취켓팅 rebuilds
+   * `candidates` from freed/live at the top of every pass, so the decline
+   * branch's local `candidates.filter(...)` was discarded before anything read
+   * it — the same seat came back every 100ms, forever, at ~1.5s an attempt.
+   * `seatState.takenUntil` is the one place that outlives a tick, and both
+   * bitmap and DOM collectors already honour it.
+   */
+  function markSeatUnreachable(seatInfoId) {
+    if (!seatInfoId) return;
+    const id = String(seatInfoId);
+    // Its own map, not takenUntil. "We could not reach it" and "someone else is
+    // holding it" are different facts with different consequences: only the
+    // first should suppress a fresh 0->1 transition, because a buyer abandoning
+    // a cart is precisely the cancellation 취켓팅 exists to catch.
+    const until = Date.now() + UNREACHABLE_COOLDOWN_MS;
+    if ((seatState.unreachableUntil.get(id) || 0) >= until) return;
+    seatState.unreachableUntil.set(id, until);
+    // Counted apart from takenConflicts. Which of the two is climbing says
+    // whether we are losing to other people or to our own seat map.
+    seatState.unreachableSkips = (seatState.unreachableSkips || 0) + 1;
+  }
+
+  function seatUnreachableNow(seatInfoId) {
+    const until = seatState.unreachableUntil.get(String(seatInfoId));
+    if (!until) return false;
+    if (Date.now() >= until) {
+      seatState.unreachableUntil.delete(String(seatInfoId));
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Already in our own cart.
+   *
+   * The bitmap trails a selection by whole ticks — only two blocks are re-read
+   * per tick — so on a 매수 2 order the seat we just took still reads free, gets
+   * picked again as the adjacent pair, and the click comes back
+   * 이미 선택된 좌석입니다. That conflict is one the macro generates itself.
+   */
+  function seatHeldByUs(seatInfoId) {
+    return seatState.heldSeatIds.has(String(seatInfoId));
   }
 
   function seatInCooldown(seatInfoId) {
@@ -2347,6 +2555,9 @@
     const now = Date.now();
     for (const [id, until] of seatState.takenUntil) {
       if (now >= until) seatState.takenUntil.delete(id);
+    }
+    for (const [id, until] of seatState.unreachableUntil) {
+      if (now >= until) seatState.unreachableUntil.delete(id);
     }
   }
 
@@ -3168,6 +3379,8 @@
       if (!seat?.seatInfoId || !seat?.seatGrade) continue;
       if (seat.isExposable === false) continue;
       if (seatInCooldown(seat.seatInfoId)) continue;
+      if (seatUnreachableNow(seat.seatInfoId)) continue;
+      if (seatHeldByUs(seat.seatInfoId)) continue;
       if (seat.seatGroupId && config.allow_group_seats === false) continue;
       if (!seatInWatchRect(seat, watch)) continue;
       const row = seat.rowNo || seat.areaName || "";
@@ -3480,6 +3693,53 @@
     return null;
   }
 
+  // Which 구역 to stand in, given we can only stand in one.
+  //
+  // A seat that is not drawn cannot be clicked, and the map only mounts the
+  // block in the viewport — so on a big venue the watch is genuinely fast in
+  // exactly one block and pays leaveBlock + enterBlock + fitBlock (~640ms,
+  // measured) for a seat that frees anywhere else. Which block that is
+  // therefore matters, and it used to be whichever came first out of
+  // block-data: `discoveredBlocks.find(...)`. Standing in E7 with E7 watched,
+  // the run would leave it and travel to E1 because E1 sorted earlier — paying
+  // the full cost to end up somewhere no better.
+  function blockToStandIn(watchedKeys, openNow) {
+    const watched = new Set((watchedKeys || []).map(String));
+    const blocks = (seatState.discoveredBlocks || []).filter((block) =>
+      watched.has(String(block.blockKey)),
+    );
+    if (!blocks.length) return null;
+
+    // Already somewhere we are watching: stay. Travel costs ~640ms and buys
+    // nothing, and the user may have navigated here deliberately.
+    if (openNow && watched.has(String(openNow))) {
+      return (
+        blocks.find((block) => String(block.blockKey) === String(openNow)) || {
+          blockKey: String(openNow),
+        }
+      );
+    }
+
+    // Otherwise the block with the most seats in it. We can only be fast in
+    // one, so be fast in the one most likely to produce a cancellation.
+    const sizes = new Map(
+      (seatState.lastBlocks || []).map((block) => [
+        String(block.blockKey),
+        (block.seats || []).filter(seatSellable).length,
+      ]),
+    );
+    let best = blocks[0];
+    let bestSize = sizes.get(String(best.blockKey)) || 0;
+    for (const block of blocks.slice(1)) {
+      const size = sizes.get(String(block.blockKey)) || 0;
+      if (size > bestSize) {
+        best = block;
+        bestSize = size;
+      }
+    }
+    return best;
+  }
+
   async function fetchBlockKeys(rawInitData) {
     const initData = withLivePlaySeq(rawInitData);
     const goods = initData.goods;
@@ -3772,15 +4032,31 @@
       )
     ).flat();
     const points = [];
-    for (const block of seatingBlocks(metaBlocks)) {
+    // Every block with seats, not just the sellable ones.
+    //
+    // seatingBlocks() drops a block that has no exposable seat and lies clear
+    // of the exposable bounds. For the *watch* that is right — nothing can free
+    // up in a block nobody can buy from. For the *picker* it silently deletes
+    // part of the room: 26012673 sells 1F/2F A-C only, so D, E and one side
+    // block — 712 real seats, five of eleven — vanished, and the drawn map had
+    // three columns where the 예매 창 beside it showed five. A map that is not a
+    // map of the room cannot be aimed with.
+    //
+    // So: draw everything, mark what cannot sell, and let the watch filter.
+    for (const block of metaBlocks || []) {
       const key = String(block?.blockKey || "");
-      if (!key) continue;
+      if (!key || !(block.seats || []).length) continue;
       for (const seat of block.seats || []) {
         const x = numOrNull(seat.posLeft);
         const y = numOrNull(seat.posTop);
         // Include sold seats too — the grey dots are what make the house shape.
         if (x == null || y == null) continue;
-        points.push({ k: key, x, y });
+        // `s` is written only for the minority that cannot sell; absent means
+        // sellable. The sketch rides in a state file that is already ~300KB and
+        // is parsed on every poll.
+        const point = { k: key, x, y };
+        if (seat.isExposable === false) point.s = 0;
+        points.push(point);
       }
     }
     return downsampleSketch(points);
@@ -4292,22 +4568,40 @@
   // Stadium-sized venues have hundreds of blocks. Firing every seatMeta request
   // at once gets the session throttled, so requests run with a fixed number of
   // workers and `shouldStop` lets a caller bail as soon as it has enough seats.
+  // Whether the last mapLimit returned everything it was asked for. A batch
+  // that throws is dropped from the results and the caller cannot tell the
+  // difference between "the venue has six blocks" and "five requests failed" —
+  // which is exactly how a picker comes to draw half a house and a watch comes
+  // to sweep half a venue, both in silence.
+  let lastMapComplete = true;
+
   async function mapLimit(items, limit, worker, shouldStop = () => false) {
     const results = [];
     let cursor = 0;
+    let failed = 0;
+    let stopped = false;
     const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
       while (cursor < items.length) {
-        if (shouldStop(results)) return;
+        if (shouldStop(results)) {
+          stopped = true;
+          return;
+        }
         const index = cursor;
         cursor += 1;
         try {
           results.push(await worker(items[index], index));
         } catch (error) {
+          failed += 1;
           log("mapLimit item failed", error);
         }
       }
     });
     await Promise.all(runners);
+    lastMapComplete = !failed && !stopped;
+    if (failed) {
+      seatState.batchFailures = (seatState.batchFailures || 0) + failed;
+      traceCall("batchDropped", null, { failed, of: items.length });
+    }
     return results;
   }
 
@@ -4343,7 +4637,22 @@
   function parseSeatStatus(payload) {
     const data = payload && !Array.isArray(payload) ? payload.data : payload;
     if (!Array.isArray(data)) return [];
-    return data.filter((entry) => typeof entry === "string").map(decodeStatusMask);
+    // Position is the only thing tying a mask to a block.
+    //
+    // seatStatus answers with one hex string per *requested* block and no keys,
+    // so every consumer matches masks to blocks by index — fetchBlockSeats does
+    // `masks[index]` against `meta[index]`, and fetchMasksFor's own docstring
+    // spells out that collapsing a failure "would shift every later mask onto
+    // the wrong block — silently, and it would read as seats freeing in places
+    // they did not". That guard was built at the request level and then undone
+    // here: filtering non-strings out compacted the array, so one null entry
+    // handed every block after it its neighbour's bitmap.
+    //
+    // A null mask is safe (seatIsFree returns false for it). A shifted one is
+    // not: it sends the run clicking seats that were never free, which is what
+    // "연속 N회 거절 — 좌석맵이 보여주는 빈자리를 서버가 거부하고 있습니다" looks
+    // like from the panel.
+    return data.map((entry) => (typeof entry === "string" ? decodeStatusMask(entry) : null));
   }
 
   async function fetchSeatStatus(rawInitData, blockKeys = []) {
@@ -4627,6 +4936,13 @@
     );
     const blocks = collected.flat();
     seatState.lastBlocks = blocks;
+    // 좌석 잡기 stops fetching the moment it has 40 free seats to choose from —
+    // right for grabbing a seat now, poisonous for the watch, which reads
+    // lastBlocks as its whole picture of the venue and only rebuilds it when
+    // it is *empty*. So one 좌석 잡기 on a busy show left the following 취켓팅
+    // sweeping the two or three blocks that happened to satisfy the quota,
+    // silently, for as long as it ran.
+    seatState.lastBlocksComplete = lastMapComplete;
     seatState.mapCenterX = venueCenterX(blocks);
     seatState.mapStage = stagePoint(blocks);
     if (!seatState.showCatalog?.sketch?.length) {
@@ -4648,11 +4964,27 @@
       fetchSeatStatus(initData, blockKeys),
     ]);
     const masks = parseSeatStatus(status);
-    return (meta || []).map((block, index) => ({
-      blockKey: block?.blockKey || blockKeys[index] || null,
-      seats: block?.seats || [],
-      mask: masks[index] || null,
-    }));
+    // Key the mask to the block, not to its position in a different response.
+    //
+    // seatStatus is positional against `blockKeys`, but this maps over `meta`,
+    // which is a *separate* call and need not answer for every key it was
+    // given. Request [A, B], get meta [B] because A had nothing: meta[0] is B
+    // and masks[0] is A's, so B is handed A's bitmap under B's own name. The
+    // sweep at applyBlockMask already does this correctly — it looks the block
+    // up by key and only trusts position for the mask — and this is the same
+    // pairing done the unsafe way.
+    const maskByKey = new Map(
+      blockKeys.map((key, index) => [String(key), masks[index] ?? null]),
+    );
+    return (meta || []).map((block, index) => {
+      const key = block?.blockKey || blockKeys[index] || null;
+      const keyed = key != null && maskByKey.has(String(key));
+      return {
+        blockKey: key,
+        seats: block?.seats || [],
+        mask: keyed ? maskByKey.get(String(key)) : masks[index] || null,
+      };
+    });
   }
 
   function seatIsFree(block, position) {
@@ -4664,7 +4996,7 @@
     let total = 0;
     for (const block of blocks || []) {
       for (let index = 0; index < (block.seats || []).length; index += 1) {
-        if (block.seats[index]?.isExposable && seatIsFree(block, index)) total += 1;
+        if (seatSellable(block.seats[index]) && seatIsFree(block, index)) total += 1;
       }
     }
     return total;
@@ -4746,6 +5078,8 @@
         // for a while, so without this the next pass offers the same seat and
         // races the same person for it again.
         if (seatInCooldown(seat.seatInfoId)) continue;
+        if (seatUnreachableNow(seat.seatInfoId)) continue;
+        if (seatHeldByUs(seat.seatInfoId)) continue;
         if (seat.seatGroupId && config.allow_group_seats === false) continue;
         anywhere.push([seat, block.blockKey]);
         if (!seatInWatchRect(seat, watch)) continue;
@@ -5178,17 +5512,111 @@
   // The page has to make its own round trip and re-render before 선택 좌석 fills
   // in. Roughly 1.5s of headroom: falling through now means "the page declined
   // this seat", so being impatient would discard seats that were about to work.
-  const SEAT_MAP_SETTLE_MS = 100;
-  const SEAT_MAP_SETTLE_TRIES = 15;
+  const SEAT_MAP_SETTLE_MS = 16;
+  const SEAT_MAP_SETTLE_TRIES = 24;
+  const SEAT_MAP_SETTLE_FAST_TRIES = 6;
+  const SEAT_MAP_SETTLE_SLOW_MS = 80;
+
+  // React settles in about a frame, so the first look used to be ~84ms later
+  // than it needed to be — on every attempt, winning ones included, and on a
+  // lost race that is the delay before the next seat is even tried. Look fast
+  // first, then widen: a selection still missing after ~100ms is waiting on the
+  // network, not on a render, and polling it hard only costs layouts. The
+  // ceiling stays about the same 1.5s.
+  function settleDelayFor(attempt) {
+    return attempt < SEAT_MAP_SETTLE_FAST_TRIES ? SEAT_MAP_SETTLE_MS : SEAT_MAP_SETTLE_SLOW_MS;
+  }
+
+  function settleBudgetMs() {
+    let total = 0;
+    for (let attempt = 0; attempt < SEAT_MAP_SETTLE_TRIES; attempt += 1) total += settleDelayFor(attempt);
+    return total;
+  }
 
   // How many seats the page currently holds. It renders the number itself
   // ("선택 좌석 4"), which is the only reading that stays correct once more than
   // one seat is involved.
-  function selectedSeatCount() {
-    const text = pageTextWithoutOverlay();
+  function countFromText(text) {
     if (/선택한\s*좌석이\s*없습니다/.test(text)) return 0;
     const match = text.match(/선택\s*좌석\s*(\d+)/);
     return match ? Number(match[1]) : -1;
+  }
+
+  /**
+   * Read 선택 좌석 without laying out the whole document.
+   *
+   * The number lives in one small box, but this read went through
+   * document.body.innerText — a full-document layout, on a 21,460-seat venue,
+   * on the catch loop's own thread, ten times a second and again on every poll
+   * of a click it is waiting to confirm.
+   *
+   * Every judgement about page state reads through here, and a wrong count is
+   * not a slow macro but a destructive one: `held > quantity` hands back seats
+   * we are holding. So the scoped node is never simply trusted. It is found by
+   * agreeing with the body read, dropped the moment it stops parsing or leaves
+   * the document, and re-checked against the body read periodically — one
+   * disagreement and this gives up on scoping for good.
+   */
+  let seatCountNode = null;
+  let seatCountScoped = 0;
+  let seatCountScopeBroken = false;
+  let seatCountSearchedAt = 0;
+  const SEAT_COUNT_REVERIFY_EVERY = 25;
+  const SEAT_COUNT_SEARCH_EVERY_MS = 2000;
+
+  // The box belongs to a page. A run may start on a different one, and giving
+  // up on scoping once must not condemn the whole session to the slow read.
+  function resetSeatCountScope() {
+    seatCountNode = null;
+    seatCountScoped = 0;
+    seatCountScopeBroken = false;
+    seatCountSearchedAt = 0;
+    seatState.seatCountScopeBroken = false;
+  }
+
+  function findSeatCountNode(expected) {
+    let best = null;
+    for (const node of document.querySelectorAll("div,section,aside,p,span")) {
+      const text = node.innerText || "";
+      // The tightest box that carries the number, not the panel containing it.
+      if (!text || text.length > 120) continue;
+      if (countFromText(text) !== expected) continue;
+      if (!best || text.length < best.len) best = { node, len: text.length };
+    }
+    return best?.node || null;
+  }
+
+  function selectedSeatCount() {
+    if (seatCountNode) {
+      const connected = seatCountNode.isConnected !== false;
+      const scoped = connected ? countFromText(seatCountNode.innerText || "") : -1;
+      if (scoped >= 0) {
+        seatCountScoped += 1;
+        if (seatCountScoped % SEAT_COUNT_REVERIFY_EVERY !== 0) return scoped;
+        // Periodic audit. React can swap the box for one that renders a stale
+        // number, and a scoped read that has silently stopped tracking is worse
+        // than the slow read it replaced.
+        const truth = countFromText(pageTextWithoutOverlay());
+        if (truth === scoped) return scoped;
+        seatCountNode = null;
+        seatCountScopeBroken = true;
+        seatState.seatCountScopeBroken = true;
+        return truth;
+      }
+      seatCountNode = null;
+    }
+
+    const count = countFromText(pageTextWithoutOverlay());
+    if (
+      count >= 0 &&
+      !seatCountScopeBroken &&
+      Date.now() - seatCountSearchedAt > SEAT_COUNT_SEARCH_EVERY_MS
+    ) {
+      seatCountSearchedAt = Date.now();
+      seatCountNode = findSeatCountNode(count);
+      seatCountScoped = 0;
+    }
+    return count;
   }
 
   // Wait for the page's own count to rise by `added`.
@@ -5202,14 +5630,24 @@
   async function pageRegisteredSelection(before, added) {
     if (before < 0) return false; // count not readable; caller falls back
     for (let attempt = 0; attempt < SEAT_MAP_SETTLE_TRIES; attempt += 1) {
-      await sleep(SEAT_MAP_SETTLE_MS);
+      await sleep(settleDelayFor(attempt));
+      // Success first, deliberately. A modal can be on screen for reasons that
+      // have nothing to do with this seat, and no overlay test may be allowed
+      // to mask a selection the page actually registered.
+      const now = selectedSeatCount();
+      if (now >= before + added) return true;
       // The page has already answered — stop waiting on a count that will never
       // arrive. Polling the full 1.5s here is the difference between losing one
       // seat and losing the next one too, and during an open that is the whole
       // game.
+      //
+      // The structural test is the one that matters. NOL's real conflict modal
+      // is an nds-e-dialog__overlay whose text neither phrase pattern claims —
+      // that is exactly why blockingOverlayNodes() was written — and until it
+      // was consulted here, the one modal it exists for was the one that paid
+      // the full timeout on every single attempt.
       if (seatTakenDialogVisible() || seatErrorDialogVisible()) return false;
-      const now = selectedSeatCount();
-      if (now >= before + added) return true;
+      if (blockingOverlayAnswered()) return false;
     }
     return false;
   }
@@ -5268,7 +5706,7 @@
       } else {
         // Sidebar count unreadable — wait until we see a positive cart.
         for (let attempt = 0; attempt < SEAT_MAP_SETTLE_TRIES; attempt += 1) {
-          await sleep(SEAT_MAP_SETTLE_MS);
+          await sleep(settleDelayFor(attempt));
           if (selectedSeatCount() >= seats.length) {
             registered = true;
             break;
@@ -5385,9 +5823,21 @@
   // Hand a hold back. The seat map has this as bulkDeselectPreSelectSeats; the
   // autopilot never called it, so a lost race used to cost an allowance slot
   // permanently instead of just an attempt.
+  /**
+   * Hand seats back to the server.
+   *
+   * Returns whether the account is actually clear of them. Callers used to
+   * ignore this and clear seatState.heldSeatIds regardless, which destroyed the
+   * only record that a failed BulkDeselectSeats had left seats held — so no
+   * later sweep retried, and the seats sat against the account's allowance
+   * until the server hold expired. That is the 예매 가능 매수를 초과 failure
+   * arriving on a later, unrelated run.
+   */
   async function releasePreselected(seatInfoIds) {
     const ids = [...new Set((seatInfoIds || []).map(String))].filter(Boolean);
-    if (!ids.length) return false;
+    // Nothing to release is success, not failure. Returning false here made it
+    // impossible for a caller to tell the two apart even if it checked.
+    if (!ids.length) return true;
     const query = `mutation BulkDeselectSeats($command: BulkDeselectSeatsCommand!) {
       bulkDeselectSeats(command: $command)
     }`;
@@ -5396,6 +5846,9 @@
       ids.forEach((id) => seatState.heldSeatIds.delete(id));
       return true;
     } catch (error) {
+      // Was console-only, so a leaked allowance had no trace anywhere.
+      seatState.releaseFailures = (seatState.releaseFailures || 0) + 1;
+      seatState.lastReleaseError = String(error).slice(0, 120);
       log("deselect failed", error);
       return false;
     }
@@ -5656,15 +6109,46 @@
     return masks;
   }
 
+  // The watch's tick. A configured speed may only ever slow it down; 0 or
+  // absent means "use the floor".
+  function catchPollMs(config) {
+    const asked = Number(config?.speed_ms || config?.poll_ms || 0);
+    return Math.max(CATCH_MIN_POLL_MS, asked > 0 ? asked : CATCH_MIN_POLL_MS);
+  }
+
+  // How many requests a quiet tick may spend. With a usable trigger this stays
+  // at one and the burst does the work; without one, there is no burst, so the
+  // steady rate has to be enough to keep the lap short by itself.
+  function steadyRequestsPerTick(requests, pollMs) {
+    if (seatState.watchTrigger?.usable) return CATCH_MAX_REQUESTS_PER_TICK;
+    const ticksForTarget = Math.max(1, Math.floor(CATCH_TARGET_LAP_MS / Math.max(1, pollMs)));
+    const needed = Math.ceil(requests / ticksForTarget);
+    return Math.min(CATCH_UNTRIGGERED_REQUESTS_PER_TICK, Math.max(1, needed));
+  }
+
   async function pollFreedSeats(initData, blockKeys, config, { burst = false } = {}) {
     if (!blockKeys.length) return [];
-    if (!seatState.lastBlocks?.length) {
+    // Empty *or* partial. A picture built by a 좌석 잡기 that stopped early
+    // covers whatever satisfied its quota, and taking that for the venue is
+    // how the watch ends up blind to most of the house with nothing to say.
+    if (!seatState.lastBlocks?.length || seatState.lastBlocksComplete === false) {
       const collected = [];
+      let missed = 0;
       for (const batch of chunk(blockKeys, 2)) {
         if (seatState.stopRequested) break;
-        collected.push(...(await fetchBlockSeats(initData, batch)));
+        try {
+          collected.push(...(await fetchBlockSeats(initData, batch)));
+        } catch (error) {
+          // One failed batch used to abort the whole build, leaving lastBlocks
+          // empty and the tick fruitless; swallowing it would leave the watch
+          // permanently short. Keep what arrived, and come back for the rest.
+          missed += 1;
+          log("block build batch failed", error);
+        }
       }
       seatState.lastBlocks = collected;
+      seatState.lastBlocksComplete = missed === 0;
+      if (missed) seatState.batchFailures = (seatState.batchFailures || 0) + missed;
       seatState.mapCenterX = venueCenterX(collected);
       seatState.mapStage = stagePoint(collected);
       seatState.catchCursor = 0;
@@ -5683,7 +6167,18 @@
     // fast enough to win. The 감시 구역 was applied as a filter *after* fetching,
     // so drawing one narrowed the results but never the work.
     const wanted = new Set((blockKeys || []).map(String));
-    const all = seatState.lastBlocks.map((block) => block.blockKey).filter(Boolean);
+    // Skip blocks with nothing on sale this round. They cannot produce a
+    // cancellation and each one costs a request every sweep — on 26012673 that
+    // was 4 blocks of 11, better than a third of every lap spent on seats
+    // nobody can buy. A block whose seats we have not fetched yet is kept:
+    // unknown is not the same as dead.
+    const all = seatState.lastBlocks
+      .filter((block) => {
+        const seats = block.seats || [];
+        return !seats.length || seats.some(seatSellable);
+      })
+      .map((block) => block.blockKey)
+      .filter(Boolean);
     const keys = wanted.size ? all.filter((key) => wanted.has(String(key))) : all;
     if (!keys.length) return [];
 
@@ -5695,9 +6190,10 @@
     // A burst spends the whole sweep at once. That is affordable precisely
     // because the trigger means we spent almost nothing while the venue was
     // quiet — the budget is an average, and this is where it gets spent.
+    const requests = Math.ceil(keys.length / 2);
     const perTick = burst
-      ? Math.ceil(keys.length / 2)
-      : Math.min(CATCH_MAX_REQUESTS_PER_TICK, Math.ceil(keys.length / 2));
+      ? requests
+      : Math.min(steadyRequestsPerTick(requests, catchPollMs(config)), requests);
     const take = perTick * 2;
     const cursor = keys.length <= take ? 0 : seatState.catchCursor % keys.length;
     const batch = keys.length <= take ? keys : keys.slice(cursor, cursor + take);
@@ -5747,6 +6243,13 @@
       if (!mask[pos] || previous[pos]) continue;
       const seat = block.seats[pos];
       if (!seat?.isExposable || !seat?.seatGrade || !seat?.seatInfoId) continue;
+      // The freed path had no filtering at all, so a seat we were already
+      // holding walked straight back in while both collectors correctly skipped
+      // it. It deliberately does *not* consult the lost-race cooldown: a 0->1
+      // transition is direct evidence the seat is free now, and someone
+      // abandoning a cart inside those 30s is the exact thing this watches for.
+      if (seatUnreachableNow(seat.seatInfoId)) continue;
+      if (seatHeldByUs(seat.seatInfoId)) continue;
       if (seat.seatGroupId && config.allow_group_seats === false) continue;
       const candidate = toCandidate(seat, block.blockKey);
       if (!seatInWatchRect(candidate, rect)) continue;
@@ -5909,11 +6412,24 @@
         traceLen: trace.length,
         clickableNow: seatState.clickableNow || 0,
         statusFailures: seatState.statusFailures || 0,
+        // Requests that were dropped rather than retried. A venue that looks
+        // smaller than it is has to say so.
+        batchFailures: seatState.batchFailures || 0,
+        blocksComplete: seatState.lastBlocksComplete !== false,
         watchRectIgnored: Boolean(seatState.watchRectIgnored),
         // Racing other buyers is normal and should read as normal. Without
         // these a busy open looks identical to a stuck macro.
         takenConflicts: seatState.takenConflicts || 0,
-        cooldownSeats: seatState.takenUntil.size,
+        // Declines that were not a lost race. Incremented since the fix that
+        // made a decline survive its tick, but published only now — the panel
+        // line that reads it would otherwise never have fired, which is the
+        // same computed-but-invisible failure this app keeps repeating.
+        unreachableSkips: seatState.unreachableSkips || 0,
+        // A union, not a sum: a seat can sit in both maps and this is a count
+        // of seats the user reads, not of entries.
+        releaseFailures: seatState.releaseFailures || 0,
+        cooldownSeats: new Set([...seatState.takenUntil.keys(),
+                                ...seatState.unreachableUntil.keys()]).size,
         aimMisses: seatState.aimMisses || 0,
         blockEntered: seatState.blockEntered || "",
         blockEntryMisses: seatState.blockEntryMisses || 0,
@@ -5956,9 +6472,27 @@
 
   // Cheap identity for "which seats are currently free". Only used to notice
   // that the map moved, so the first and last ids plus the count are enough.
+  /**
+   * Identity of the current free-seat pool, for the catchLiveTries brake.
+   *
+   * Length with the two end ids could not see a pool that swapped a seat in the
+   * middle — same length, same ends, different seats. The brake resets only
+   * when this string changes, so a pool that was genuinely moving read as
+   * static and the watch stayed switched off in front of it.
+   *
+   * Order-independent: the same seats ranked differently are the same pool, and
+   * re-running the attempts because the ranking shifted would be noise.
+   */
   function liveSignature(live) {
     if (!live.length) return "0";
-    return `${live.length}:${live[0].seatInfoId}:${live[live.length - 1].seatInfoId}`;
+    let digest = 0;
+    for (const seat of live) {
+      const id = String(seat.seatInfoId);
+      for (let at = 0; at < id.length; at += 1) {
+        digest = (digest + id.charCodeAt(at) * (at + 1)) % 2147483647;
+      }
+    }
+    return `${live.length}:${digest}`;
   }
 
   /**
@@ -5997,28 +6531,57 @@
     return counts;
   }
 
+  // What collectFromBlocks requires before a seat is even a candidate. Kept in
+  // one place because every count that disagreed with it became a number on the
+  // panel that no run could ever act on.
+  function seatSellable(seat) {
+    return Boolean(seat?.isExposable && seat?.seatGrade && seat?.seatInfoId);
+  }
+
   function freeSeatCount() {
     const blocks = seatState.polledBlocks?.size
       ? (seatState.lastBlocks || []).filter((block) =>
           seatState.polledBlocks.has(String(block.blockKey)),
         )
       : seatState.lastBlocks || [];
-    return blocks.reduce(
-      (total, block) => total + (block.mask || []).filter(Boolean).length,
-      0,
-    );
+    // Only seats that are actually on sale. Counting raw mask bits included
+    // whole blocks that are not selling this round — 26012673 has 622 such
+    // seats across 1F/2F D and E — so the panel reported hundreds of "빈 좌석"
+    // that no run could ever take, and then explained the contradiction with a
+    // grade filter that does not exist.
+    return blocks.reduce((total, block) => {
+      const seats = block.seats || [];
+      let free = 0;
+      for (let index = 0; index < seats.length; index += 1) {
+        if (seatSellable(seats[index]) && seatIsFree(block, index)) free += 1;
+      }
+      return total + free;
+    }, 0);
   }
 
   // Why nothing is happening, in words. The old text reported a block cursor
   // that is always 0 on a two-block venue and said nothing about whether any
   // seat was even a candidate.
-  function catchStatusText(live, free, pollMs, liveExhausted) {
+  function catchStatusText(live, free, pollMs, liveExhausted, watchRect = null) {
     const lines = [`취소표 감시 중 · ${pollMs}ms 간격`];
     if (!free) {
       lines.push("빈 좌석 0석 — 취소표가 나오면 즉시 잡습니다");
     } else if (!live.length) {
-      lines.push(`빈 좌석 ${free}석 있으나 <b>내 조건에 맞는 등급이 없음</b>`);
-      lines.push("좌석 조건에서 등급 선택을 늘려 보세요");
+      // This used to read "내 조건에 맞는 등급이 없음" and tell you to widen a
+      // grade selection. There is no grade selection: the panel sends an empty
+      // grade_order and rankGrade drops nothing, so the message named a filter
+      // that had been removed and pointed at a control that does not exist.
+      // The reasons a free seat is not a candidate are these.
+      const cooling = seatState.takenUntil.size;
+      if (watchRect) {
+        lines.push(`빈 좌석 ${free}석 · 모두 <b>감시 구역 밖</b>`);
+        lines.push("[범위 정하기]에서 넓게 다시 그어 보세요");
+      } else if (cooling) {
+        lines.push(`빈 좌석 ${free}석 · 방금 남이 가져간 자리 ${cooling}석`);
+        lines.push("잠시 뒤 다시 시도합니다");
+      } else {
+        lines.push(`빈 좌석 ${free}석 · 아직 잡을 수 있는 자리가 아닙니다`);
+      }
     } else if (liveExhausted) {
       lines.push(`후보 ${live.length}석 · ${CATCH_LIVE_TRIES}회 모두 남이 먼저 가져감`);
       lines.push("좌석이 바뀌면 자동으로 다시 시도합니다");
@@ -6147,9 +6710,8 @@
     // and a 0 or absent value means "use the budget" — the panel used to send
     // 400 unconditionally, which overrode the budget and left the sweep at its
     // old speed however fast the autopilot meant to go.
-    const askedMs = Number(config.speed_ms || config.poll_ms || 0);
     const pollMs = isCatch
-      ? Math.max(CATCH_MIN_POLL_MS, askedMs > 0 ? askedMs : CATCH_MIN_POLL_MS)
+      ? catchPollMs(config)
       : Number(config.speed_ms || config.poll_ms || 100);
     const quantity = Math.max(1, Number(config.quantity) || 1);
 
@@ -6173,6 +6735,7 @@
     // first reading of each block re-establishes its baseline and reports
     // nothing, and every reading after that diffs normally.
     seatState.runBaseline = new Set();
+    resetSeatCountScope();
     seatState.catchCursor = 0;
     seatState.catchLiveTries = 0;
     seatState.catchLiveSignature = "";
@@ -6206,8 +6769,10 @@
         await sleep(700);
       }
       const stranded = [...seatState.heldSeatIds];
-      if (stranded.length) await releasePreselected(stranded);
-      seatState.heldSeatIds.clear();
+      if (stranded.length && !(await releasePreselected(stranded))) {
+        seatState.lastError =
+          `좌석 ${stranded.length}석을 반납하지 못했습니다 — 예매 창에서 [전체삭제]를 눌러 주세요.`;
+      }
     }
     updateOverlay(
       probe
@@ -6392,9 +6957,7 @@
           ? blocksInWatchRect(seatState.lastBlocks || [], rect) || statusBlockKeys
           : statusBlockKeys;
         const openNow = currentOpenBlock();
-        const target = (seatState.discoveredBlocks || []).find(
-          (block) => watchedKeys.includes(String(block.blockKey)),
-        );
+        const target = blockToStandIn(watchedKeys, openNow);
         if (target && openNow !== String(target.blockKey)) {
           updateOverlay(
             `감시할 구역 ${target.selfDefineBlock || target.blockKey} 여는 중…`,
@@ -6556,7 +7119,10 @@
           candidates = live;
         } else {
           seatState.attempts += 1;
-          updateOverlay(catchStatusText(live, freeSeatCount(), pollMs, liveExhausted), "info");
+          updateOverlay(
+            catchStatusText(live, freeSeatCount(), pollMs, liveExhausted, watchRect),
+            "info",
+          );
           await sleep(pollMs);
           continue;
         }
@@ -6772,9 +7338,16 @@
           continue;
         }
         if (blocked.length) {
-          // Someone else holds these. Drop them for good and take the next
-          // ones; the bitmap said they were free a moment ago, so the map is
-          // simply behind the server.
+          // Someone else holds these, or the map would not hand them over.
+          //
+          // The cooldown is the load-bearing half. In 취켓팅 `candidates` is
+          // rebuilt from freed/live at the top of every pass, so the filter
+          // below is discarded before anything reads it — on its own it left
+          // the same seat being re-attempted every tick, forever, at roughly
+          // 1.5s a go, until eight of them tripped the catchLiveTries brake and
+          // the watch went silent in front of a map full of free seats.
+          // seatState.takenUntil is the only thing here that outlives a tick.
+          blocked.forEach(markSeatUnreachable);
           const taken = new Set(blocked);
           candidates = candidates.filter(
             (seat) =>
@@ -6842,6 +7415,13 @@
           continue;
         }
         if (advanced?.userContinues || advanced?.reserved) {
+          // The seat is ours and the rest is the user's to finish. This flag was
+          // declared, read twice, and never once assigned true — so the guard it
+          // exists for could not fire, and pressing 감시 시작 while genuinely
+          // holding seats silently re-ran advanceAfterSeatLock instead of saying
+          // "you already have seats, go and pay". The stale-lock path above
+          // clears it again when the page turns out to be holding nothing.
+          seatState.awaitingPayment = true;
           seatState.running = false;
           return;
         }
@@ -7075,7 +7655,12 @@
     const seat = loadSeatConfig();
 
     if ((isNolProductPage() || isGoodsPage()) && arm?.enabled && !arm.fired) {
-      runArmScheduler(arm);
+      // Not awaited on purpose — bootRoute must return. But a rejection here
+      // used to be an unhandled promise rejection and nothing more.
+      void runArmScheduler(arm).catch((error) => {
+        armState.lastError = `예약 시작 실패: ${String(error).slice(0, 90)}`;
+        log("runArmScheduler rejected", error);
+      });
       return;
     }
 
@@ -7106,7 +7691,11 @@
       void ensureSeatCatalog();
       const autoRun = seat.enabled && shouldAutoSeatsAfterEntry();
       if (autoRun) {
-        runSeatAutopilot(seat, { catchMode: false });
+        void runSeatAutopilot(seat, { catchMode: false }).catch((error) => {
+          seatState.lastError = `좌석 잡기 실패: ${String(error).slice(0, 90)}`;
+          seatState.running = false;
+          log("runSeatAutopilot rejected", error);
+        });
       }
     }
   }
@@ -7134,22 +7723,43 @@
         seatErrorDialogVisible,
         unknownBlockingDialogText,
         markSeatTaken,
+        markSeatUnreachable,
+        seatHeldByUs,
+        UNREACHABLE_COOLDOWN_MS,
+        liveSignature,
+        blockingOverlayAnswered,
+        pageRegisteredSelection,
+        settleDelayFor,
+        settleBudgetMs,
+        SEAT_MAP_SETTLE_MS,
+        SEAT_MAP_SETTLE_TRIES,
+        collectFromBlocks,
+        collectDomCandidates,
+        selectedSeatCount,
+        resetSeatCountScope,
         readGatewayBlock,
         noteGatewayBlock,
         gatewayBlockRemainingMs,
         BLOCK_FALLBACK_MS,
         WAITING_ENDPOINT,
+        acquireWaitingUrl,
         seatInCooldown,
+        seatUnreachableNow,
         sweepTakenCooldowns,
         state: seatState,
+        armState,
         TAKEN_COOLDOWN_MS,
         calibrateVenueToScreen,
         blockClickPoint,
         blockAbsoluteExtent,
         overlayFit,
         recoverFailedConfirm,
+        isVisible,
+        isVisibleDialog,
         dismissAnyBlockingOverlay,
         describeBlockingOverlay,
+        waitForCaptchaClear,
+        captchaPresent,
         currentOpenBlock,
         blockKeyForSeatId,
         currentPlaySeqFromDom,
@@ -7157,6 +7767,10 @@
         adoptBlocksKey,
         stagePoint,
         ENTRY_LEAD_MS,
+        maybeReenter,
+        resetReentryState,
+        REENTRY_SPACING_MS,
+        REENTRY_LIMIT,
         armEntryStartUnix,
         waitingIntervalAt,
         WAITING_POLL_SHAPE,
@@ -7284,6 +7898,13 @@
         resolveSeatType,
         decodeStatusMask,
         parseSeatStatus,
+        // Exposed for the alignment tests: "no information" must read as "do
+        // not try", never as "free".
+        seatIsFree,
+        seatSellable,
+        blockToStandIn,
+        steadyRequestsPerTick,
+        catchPollMs,
         readUnselectable,
         readGatewayBlock,
         BLOCK_FALLBACK_MS,
@@ -7372,6 +7993,9 @@
     if (isSeatPage() && seatState.running) dismissSeatErrorDialog();
     if (isSeatPage() && !seatState.discoveredBlocks?.length) void ensureSeatCatalog();
     if (isNolProductPage()) void ensureProductCatalog();
-    maybeReenter();
+    void maybeReenter().catch((error) => {
+      armState.lastError = `재진입 실패: ${String(error).slice(0, 90)}`;
+      log("maybeReenter rejected", error);
+    });
   }, 400);
 })();

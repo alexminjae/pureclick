@@ -21,21 +21,21 @@ if str(MAC_DIR) not in sys.path:
 from browser_bridge import BrowserBridge  # noqa: E402
 from core.arm import ArmPayload  # noqa: E402
 from core.clock import KST, PureClickError, ServerClock, parse_target_time  # noqa: E402
-from pureclick_mac_core import ensure_mac_ready  # noqa: E402
+import app_platform  # noqa: E402
+import app_update  # noqa: E402
 from core.seat import (  # noqa: E402
     SeatPreferences,
     parse_goods_code,
-    map_move_lines,
     bridge_line,
-    running_hint,
+    live_state,
     waiting_log_lines,
-    seat_order_lines,
     serialize_preferences,
 )
 from core.showinfo import seat_table_lines, fetch_round_remains, fetch_show_catalog  # noqa: E402
 from core.watch_trigger import TriggerState, next_trigger_state  # noqa: E402
 from core.zone_map import (  # noqa: E402
     block_keys_in_watch_rect,
+    live_block_keys,
     is_click,
     parse_box,
     parse_watch_rect,
@@ -71,12 +71,28 @@ ACCENT = "#FF4D2E"    # the action, and the live pulse
 GREEN = "#3DDC97"     # only ever "seat taken"
 AMBER = "#E8B84B"
 ACCENT_2 = ACCENT
+# A seat outside the drawn range: present, but not being watched.
+SEAT_IDLE = "#5A6B62"
 
-# Apple SD Gothic Neo is the macOS Korean face and renders 한글 far better than
-# any Latin-first default; SF Mono gives the clock and countdown real numerals.
-UI_FONT = "Apple SD Gothic Neo"
-# SF Mono is not exposed to Tk; Menlo is the same lineage and is.
-MONO_FONT = "Menlo"
+# `core.seat.live_state` decides what the live band says and must not know this
+# palette, so the tone names it returns are turned into colour here and nowhere
+# else.
+TONES = {"green": GREEN, "accent": ACCENT, "amber": AMBER, "faint": FAINT}
+
+# The Korean face, and a monospace for the clock and countdown.
+#
+# Tk does not raise on an unknown family — it silently falls back to its own
+# default. Naming a macOS-only face therefore collapsed the entire typographic
+# system on Windows, including the 34pt countdown, whose digits then jitter
+# sideways on every tick because the fallback is proportional.
+if sys.platform == "win32":
+    UI_FONT = "Malgun Gothic"
+    MONO_FONT = "Consolas"
+else:
+    # Apple SD Gothic Neo renders 한글 far better than any Latin-first default;
+    # SF Mono is not exposed to Tk, and Menlo is the same lineage and is.
+    UI_FONT = "Apple SD Gothic Neo"
+    MONO_FONT = "Menlo"
 DANGER = "#ef4444"
 
 
@@ -112,8 +128,16 @@ class PureClickMacApp(tk.Tk):
     START_URL = "https://nol.yanolja.com/ticket"
 
     def __init__(self) -> None:
+        # Before super(), deliberately: this decides how Tk reads the display,
+        # and once the root exists the process DPI mode can no longer change.
+        app_platform.prepare_display()
         super().__init__()
-        ensure_mac_ready()
+        # Was ensure_mac_ready(), which raised on any non-Darwin system — the
+        # first thing that stopped this app existing on Windows. app_platform
+        # checks whatever this platform actually needs, and on Windows that
+        # means naming the WebView2 runtime with a download link rather than
+        # letting pywebview fail later with nothing actionable.
+        app_platform.ensure_ready()
         self.title("NOL 스나이퍼 · 조작판")
         # The two windows are one app, so they are tiled rather than stacked.
         # Both used to open centred at their natural size and the 예매 창, being
@@ -169,6 +193,10 @@ class PureClickMacApp(tk.Tk):
         self.zone_summary = tk.StringVar(value="감시 구역: 전체")
         self.clock_info = tk.StringVar(value="서버 시각 동기화 중…")
         self.bridge = tk.StringVar(value="예매 창 연결 대기 중…")
+        # Folded into the bridge line rather than given a widget of its own.
+        # Every "computed but invisible" bug in this app started as a variable
+        # bound to nothing, and this one only ever has a sentence to say.
+        self._update_note = ""
         self.guidance = tk.StringVar(
             value="지금 할 일 — 다른 창(NOL 예매)에서 공연을 클릭하세요. 조작판이 자동으로 채워집니다."
         )
@@ -176,6 +204,16 @@ class PureClickMacApp(tk.Tk):
         self.btn_catch = None
         self.status = tk.StringVar(value="준비")
         self.reason = tk.StringVar(value="")
+        # A button press, and what the 예매 창 looked like when it was made, so
+        # a command nothing was there to receive can be told from one that was.
+        self._asked: tuple[str, float, tuple] | None = None
+        # Until when the band is holding a message about something the user just
+        # did. Without it those live for exactly one 500ms poll — see _flash.
+        self._flash_until = 0.0
+        # The dot's colour, kept because `_load_seat_config` can set a state
+        # before any widget exists — a config file that will not parse reported
+        # itself in words while the dot stayed grey, saying nothing was wrong.
+        self._state_colour = FAINT
         # Which part of the map to aim for, so this instance is not racing every
         # other macro for the same front-row seat.
         self.seat_strategy = tk.StringVar(value="center")
@@ -189,6 +227,7 @@ class PureClickMacApp(tk.Tk):
         self.auto_start_on = tk.BooleanVar(value=False)
         self.reentry_on = tk.BooleanVar(value=True)
         self.auto_assign_on = tk.BooleanVar(value=False)
+        self._resyncing = False
         # The watch's pace is the autopilot's to decide: it holds a request
         # budget (requests per second) that keeps the gateway quiet, and a
         # number typed here can only make it slower. This was 400 and floored
@@ -226,6 +265,9 @@ class PureClickMacApp(tk.Tk):
         self.after(400, self._poll_show)
         self.after(100, self._tick_server_time)
         self.after(250, self._sync_now_bg)
+        # Off the main thread and after the UI exists: a manifest fetch must
+        # never be between the user and a window.
+        self.after(1200, self._check_updates_bg)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _plan_layout(self) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
@@ -237,8 +279,17 @@ class PureClickMacApp(tk.Tk):
         """
         screen_w = self.winfo_screenwidth()
         screen_h = self.winfo_screenheight()
-        top = 28  # under the menu bar
-        height = max(640, screen_h - top - 40)
+        # 28 is the macOS menu bar and 40 the Dock. Windows has neither, so
+        # those constants left a gap at the top and put the window bottom under
+        # the taskbar — whose height Tk cannot report, hence the more
+        # conservative reserve there.
+        if sys.platform == "win32":
+            top = 0
+            bottom_reserve = 56
+        else:
+            top = 28
+            bottom_reserve = 40
+        height = max(640, screen_h - top - bottom_reserve)
 
         panel_w = max(460, min(600, int(screen_w * 0.32)))
         browser_w = max(760, screen_w - panel_w)
@@ -257,6 +308,17 @@ class PureClickMacApp(tk.Tk):
             pass
 
         body = (UI_FONT, 12)
+        # A Combobox popup is a plain Tk Listbox, not a ttk widget, so it ignores
+        # every style set below and renders in system colours — black on white
+        # against this palette. Only `option_add` reaches it.
+        for option, value in (
+            ("*TCombobox*Listbox.background", PANEL_2),
+            ("*TCombobox*Listbox.foreground", FG),
+            ("*TCombobox*Listbox.selectBackground", ACCENT),
+            ("*TCombobox*Listbox.selectForeground", BG),
+            ("*TCombobox*Listbox.font", body),
+        ):
+            self.option_add(option, value)
         style.configure(".", background=BG, foreground=FG, fieldbackground=PANEL_2, font=body)
         style.configure("TFrame", background=BG)
         style.configure("TLabel", background=BG, foreground=FG, font=body)
@@ -341,8 +403,16 @@ class PureClickMacApp(tk.Tk):
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(holder, width=e.width))
 
         # Scoped to the pointer, so the 오픈 예정 목록 window keeps its own wheel.
+        #
+        # Tk reports one notch as ±1 on macOS and ±120 on Windows, so the same
+        # arithmetic scrolls 120 units per notch there. This panel is taller
+        # than the screen by design — that is why it scrolls at all — so on
+        # Windows it was one notch from unusable.
+        notch = 120 if sys.platform == "win32" else 1
+
         def wheel(event: tk.Event) -> None:
-            canvas.yview_scroll(-1 * int(event.delta), "units")
+            steps = int(event.delta / notch) or (1 if event.delta > 0 else -1)
+            canvas.yview_scroll(-steps, "units")
 
         canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", wheel))
         canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
@@ -381,8 +451,13 @@ class PureClickMacApp(tk.Tk):
         live dot and nothing else. Colour used for emphasis everywhere is what
         made this read as an instrument panel rather than a tool.
         """
-        root = self._scrollable_root()
         wrap = self.panel_geometry[2] - 76
+        # Pinned before anything else is packed. tk's packer hands the bottom
+        # strip to the first claimant and the remainder to the later
+        # expand=True widget, so building the band first is what keeps it out
+        # of the scroll region.
+        self._build_live_band(wrap)
+        root = self._scrollable_root()
 
         # --- Masthead ---------------------------------------------------------
         head = ttk.Frame(root)
@@ -419,16 +494,20 @@ class PureClickMacApp(tk.Tk):
                    command=self.fetch_show).grid(row=0, column=1, padx=(8, 0))
 
         # --- What to do next --------------------------------------------------
-        tip_edge = tk.Frame(root, bg=BORDER)
-        tip_edge.pack(fill="x", pady=(16, 0))
-        tip = tk.Frame(tip_edge, bg=PANEL_2)
+        self.tip_edge = tk.Frame(root, bg=BORDER)
+        self.tip_edge.pack(fill="x", pady=(16, 0))
+        tip = tk.Frame(self.tip_edge, bg=PANEL_2)
         tip.pack(fill="both", expand=True, padx=1, pady=1)
         tk.Label(tip, textvariable=self.guidance, bg=PANEL_2, fg=FG, anchor="w",
                  font=(UI_FONT, 12), wraplength=wrap - 24,
                  justify="left").pack(fill="x", padx=14, pady=12)
 
         # --- How it chooses ---------------------------------------------------
+        # Kept because the tip box above is packed and unpacked as the macro
+        # starts and stops, and `before=` is how it returns to its own place
+        # rather than to the bottom of the column.
         aim = self._card(root, "좌석 고르는 순서")
+        self.aim_card = aim.master.master
         pick = ttk.Frame(aim, style="Card.TFrame")
         pick.pack(fill="x")
         pick.columnconfigure(0, weight=1)
@@ -442,12 +521,11 @@ class PureClickMacApp(tk.Tk):
         ttk.Label(pick, text="매수", style="CardFaint.TLabel").grid(row=0, column=1, padx=(12, 6))
         ttk.Combobox(pick, textvariable=self.quantity, values=["1", "2", "3", "4"],
                      state="readonly", width=3).grid(row=0, column=2)
-        # Why it chose what it chose. Empty until the first attempt ranks
-        # anything, so it costs nothing on screen before then.
-        self.order_text = tk.Text(aim, height=1, bg=PANEL_2, fg=MUTED, insertbackground=FG,
-                                  highlightthickness=0, borderwidth=0, wrap="none",
-                                  font=(MONO_FONT, 10), spacing1=1)
-        self.order_text.configure(state="disabled")
+        # The per-attempt ranking used to be drawn here — stage distances, the
+        # top five candidates, and what each kind of map move cost. It changed
+        # on every poll and resized the card with it, which shoved the whole
+        # column up and down twice a second. It is a debugging read, not a
+        # racing one, and it lives in the published status instead.
 
         # --- Open 대기 ---------------------------------------------------------
         openq = self._card(root, "오픈 대기", self.open_note)
@@ -521,34 +599,57 @@ class PureClickMacApp(tk.Tk):
             fill="x", pady=(4, 0)
         )
 
-        # --- Live --------------------------------------------------------------
-        live_edge = tk.Frame(root, bg=BORDER)
-        live_edge.pack(fill="x", pady=(20, 0))
+        self._update_guidance(None)
+
+    def _build_live_band(self, wrap: int) -> None:
+        """What is happening, pinned where it cannot be scrolled away.
+
+        This is the thing you watch while a race runs, and it spent this whole
+        design as the last widget *inside* the scrolling body — which on a
+        third-width window with the cards open put it below the fold exactly
+        when it mattered. `_scrollable_root` was added because "the status area
+        ended up permanently off the bottom"; it made the column reachable, not
+        the status visible. Being outside the scroll is the actual fix.
+        """
+        holder = tk.Frame(self, bg=BG)
+        holder.pack(side="bottom", fill="x", padx=16, pady=(0, 16))
+
+        live_edge = tk.Frame(holder, bg=BORDER)
+        live_edge.pack(fill="x")
         live = tk.Frame(live_edge, bg=PANEL_2)
         live.pack(fill="both", expand=True, padx=1, pady=1)
-        self.status_dot = tk.Label(live, text="●", bg=PANEL_2, fg=FAINT, font=(UI_FONT, 11))
+        self.status_dot = tk.Label(live, text="●", bg=PANEL_2, fg=self._state_colour,
+                                   font=(UI_FONT, 11))
         self.status_dot.pack(anchor="w", padx=16, pady=(14, 0))
+        # Every line reserves its worst case, so the band never changes size.
+        # It used to: the headline and the reason both changed on the same
+        # 500ms tick, and a reason that grew from one wrapped line to two moved
+        # the whole band. A little reserved whitespace is the price of an
+        # instrument that holds still while you read it.
         tk.Label(live, textvariable=self.status, bg=PANEL_2, fg=FG, anchor="w",
-                 font=(UI_FONT, 13, "bold"), wraplength=wrap - 20,
+                 font=(UI_FONT, 13, "bold"), wraplength=wrap - 20, height=2,
                  justify="left").pack(fill="x", padx=16)
         tk.Label(live, textvariable=self.reason, bg=PANEL_2, fg=MUTED, anchor="w",
-                 font=(UI_FONT, 11), wraplength=wrap - 20,
-                 justify="left").pack(fill="x", padx=16, pady=(4, 14))
-        ttk.Button(root, text="전부 정지", style="Ghost.TButton", command=self.stop_all).pack(
-            fill="x", pady=(10, 30)
-        )
+                 font=(UI_FONT, 11), wraplength=wrap - 20, height=3,
+                 justify="left").pack(fill="x", padx=16, pady=(2, 14))
+        # No number line. It held 시도/구역/빈자리/스윕, every one of which moves
+        # on the 500ms repaint, and a panel whose numbers churn continuously
+        # cannot be read while a race is on. They are still published in the
+        # status for debugging; they are not something to watch.
 
-        self._update_guidance(None)
+        ttk.Button(holder, text="전부 정지", style="Ghost.TButton",
+                   command=self.stop_all).pack(fill="x", pady=(10, 0))
 
 
 
     def stop_all(self) -> None:
         try:
             self._stop_trigger_worker()
+            self._remember_press("전부 정지")
             self.browser.send_command("stop_all", clear_arm=True)
-            self.status.set("정지 요청됨")
+            self._flash(FAINT, "정지 요청됨", "예매 창에 정지를 전달했습니다.")
         except Exception as exc:
-            self.status.set(f"정지 실패: {exc}")
+            self._flash(AMBER, "정지하지 못했습니다", str(exc))
 
     def _seat_preferences(self) -> SeatPreferences:
         # Empty grade order is valid: it means "take the best seat in any grade".
@@ -631,6 +732,51 @@ class PureClickMacApp(tk.Tk):
 
     def _sync_now_bg(self) -> None:
         self._start_worker(self._sync_worker)
+
+    def _check_updates_bg(self) -> None:
+        """Ask once, on a worker, whether there is a newer build or automation.
+
+        A downloaded exe is a snapshot, but the automation inside it does not
+        have to be: it tracks someone else's markup and changes far more often
+        than the Python does. Nothing here installs anything — a newer exe is
+        reported with a link, and a newer autopilot is only cached after its
+        SHA-256 matched the manifest. Every failure ends up in this note rather
+        than being swallowed, because an unverified script must never look like
+        a verified one.
+        """
+        if not app_update.manifest_url():
+            return
+        threading.Thread(target=self._update_worker, daemon=True).start()
+
+    def _update_worker(self) -> None:
+        try:
+            status = app_update.check(
+                app_update.manifest_url(),
+                current_version=app_update.app_version(),
+                cache_path=self._autopilot_cache_path(),
+            )
+            note = status.note
+        except Exception as exc:  # noqa: BLE001 - a check must never take the app down
+            note = f"업데이트 확인 중 오류: {str(exc)[:60]}"
+        self._ui(self._set_update_note, note)
+
+    @staticmethod
+    def _autopilot_cache_path():
+        import browser_host
+
+        return browser_host.autopilot_cache_path()
+
+    def _set_update_note(self, note: str) -> None:
+        self._update_note = note.strip()
+
+    def _resync_worker(self) -> None:
+        """Re-measure after a sleep, and let the next tick try again if it fails."""
+        try:
+            self._sync_now()
+        except Exception as exc:  # noqa: BLE001 - a failed re-sync must not be silent
+            self._ui(self._note, f"서버 시각을 다시 맞추지 못했습니다: {exc}", error=True)
+        finally:
+            self._resyncing = False
 
 
     ENGINE_LABELS = {
@@ -900,10 +1046,9 @@ class PureClickMacApp(tk.Tk):
         """
         try:
             self.browser.push(clear_arm=True)
-            self.status.set("대기 취소됨")
-            self._note("오픈 대기를 해제했습니다")
+            self._flash(FAINT, "대기 취소됨", "오픈 대기를 해제했습니다.")
         except Exception as exc:  # noqa: BLE001 - surfaced in the panel
-            self.status.set(f"오류: {exc}")
+            self._flash(AMBER, "대기를 해제하지 못했습니다", str(exc))
 
     def _zone_window_size(self) -> str:
         """Shape the window to the venue so the map is big enough to aim in.
@@ -986,12 +1131,31 @@ class PureClickMacApp(tk.Tk):
             window.destroy()
 
     def _zone_hint_text(self) -> str:
+        """How many seats are actually in play, and how many are only scenery.
+
+        A range is a boundary, not a snapshot: the seats inside it that are
+        taken right now are the whole point of 취켓팅. So this counts seats in
+        blocks that are on sale this round, and names — separately — the blocks
+        that are not being sold at all, where nothing can ever come free.
+        """
         if not self._zone_sketch:
             return "좌석맵에 들어가면 지도가 채워집니다."
+        # Counted from what is on screen, not from the sketch: they differ by
+        # the far side blocks house_frame keeps out of the drawing, and a hint
+        # naming more dark seats than the map shows reads as a miscount.
+        live_keys = live_block_keys(self._zone_sketch)
+        live_count = sum(1 for row in self._zone_sketch if row.get("k") in live_keys)
+        hidden = len({row.get("k") for row in self._zone_sketch}) - len(live_keys)
+        # Named, not drawn. Without this a venue whose map is narrower than the
+        # 예매 창's looks like a picker that has lost part of the room.
+        tail = f" · 미판매 {hidden}구역은 지도에 없습니다" if hidden else ""
         if self._watch_rect is None:
-            return f"{len(self._zone_sketch)}석 · 범위를 지정하지 않으면 전체를 감시합니다."
-        inside = seats_in_watch_rect(self._zone_sketch, self._rect_tuple())
-        return f"{len(self._zone_sketch)}석 중 {len(inside)}석 감시 중"
+            return f"{live_count}석{tail} · 범위를 지정하지 않으면 전체를 감시합니다."
+        inside = [
+            row for row in seats_in_watch_rect(self._zone_sketch, self._rect_tuple())
+            if row.get("k") in live_block_keys(self._zone_sketch)
+        ]
+        return f"{live_count}석 중 {len(inside)}석 감시 중{tail}"
 
     def _rect_tuple(self) -> tuple[float, float, float, float] | None:
         rect = self._watch_rect
@@ -1022,9 +1186,22 @@ class PureClickMacApp(tk.Tk):
             self._zone_view = None
             return
 
+        # Only blocks that are selling this round.
+        #
+        # Drawing the rest was an attempt to make this map look like the 예매 창
+        # beside it, and it failed twice: as dimmed seats it read as a snapshot
+        # of availability, and as dimmed blocks it read as a bug — "seat areas
+        # are falsely getting picked up". They are neither. On 26007442 they are
+        # two six-seat side strips and an eighty-seat block fifty units clear of
+        # the house, none of it on sale, none of it in the visible map. You
+        # cannot aim at a block that cannot sell, so a range picker that shows
+        # them is offering a choice that does nothing. The count is named in the
+        # hint instead.
+        live = live_block_keys(self._zone_sketch)
+        drawable = [row for row in self._zone_sketch if row.get("k") in live]
         view = project_venue(
             [{"block_key": row["key"], **row} for row in self._block_rows],
-            self._zone_sketch,
+            drawable,
             width,
             height,
             # Draw the whole venue: this is what the area is dragged over, and a
@@ -1041,10 +1218,18 @@ class PureClickMacApp(tk.Tk):
 
         rect = self._rect_tuple()
         for seat in view.seats:
+            # The accent means exactly one thing: this seat will be watched.
+            # No box drawn is not "nothing chosen" — it is "the whole house",
+            # which is what the watch actually does, so the whole house is
+            # accent. Draw a box and the accent narrows to it.
             inside = rect is None or (
                 rect[0] <= seat.venue_x <= rect[2] and rect[1] <= seat.venue_y <= rect[3]
             )
-            colour = ACCENT if inside else "#3b4a42"
+            # Two states, because there are two: watched, or not. Everything
+            # drawn here is on sale, so availability never enters into it —
+            # the seats inside a range that are taken right now are precisely
+            # what 취켓팅 is waiting for.
+            colour = ACCENT if inside else SEAT_IDLE
             canvas.create_oval(
                 seat.x - radius, seat.y - radius, seat.x + radius, seat.y + radius,
                 fill=colour, outline="",
@@ -1106,7 +1291,11 @@ class PureClickMacApp(tk.Tk):
             self.zone_summary.set("감시 구역: 전체")
             return
         if self._zone_sketch:
-            inside = seats_in_watch_rect(self._zone_sketch, self._rect_tuple())
+            live = live_block_keys(self._zone_sketch)
+            inside = [
+                row for row in seats_in_watch_rect(self._zone_sketch, self._rect_tuple())
+                if row.get("k") in live
+            ]
             if not inside:
                 # 0석 means the box caught nothing and will be ignored at run
                 # time; saying "지정됨" for that reads as if it were working.
@@ -1288,14 +1477,17 @@ class PureClickMacApp(tk.Tk):
 
     def start_catch(self) -> None:
         try:
+            self._remember_press("감시 시작")
             self._push_seat_config(command="run_catch", clear_arm=True)
-            self.status.set("취켓팅 감시 중…")
-            self._note("seatStatus 변화 감시")
+            # Short on purpose: this says the press was sent, and the 예매 창's
+            # own status — which is the answer — is one poll behind it.
+            self._flash(ACCENT, "감시 시작 요청됨",
+                        "예매 창이 좌석맵을 지켜보기 시작합니다.", seconds=2.0)
             self._trigger_state = None
             self._trigger_on = True
             self._start_trigger_worker()
         except Exception as exc:
-            self.status.set(f"오류: {exc}")
+            self._flash(AMBER, "감시를 시작하지 못했습니다", str(exc))
 
     def _start_trigger_worker(self) -> None:
         """Watch the whole-venue remaining count for the page, which cannot.
@@ -1470,29 +1662,36 @@ class PureClickMacApp(tk.Tk):
             self._ui(self.status.set, f"동기화 실패: {exc}")
 
     def _sync_now(self):
-        return self.clock.sync_tick(
-            self.SYNC_URL,
-            sample_count=self.SYNC_SAMPLES,
-            min_samples=2,
-            max_wait_seconds=8.0,
-            poll_seconds=0.005,
-        )
+        # poll_seconds=0.005 asks for a 5ms spacing, and Windows' default timer
+        # granularity is ~15.6ms — three times that, which widens the very
+        # second-boundary bracket sync_tick exists to tighten and can stop it
+        # ever meeting its own accuracy gate. timing_precision asks for a 1ms
+        # timer for the duration and is a no-op on macOS. Wrapped here rather
+        # than inside core/clock.py so core stays free of platform imports.
+        with app_platform.timing_precision():
+            return self.clock.sync_tick(
+                self.SYNC_URL,
+                sample_count=self.SYNC_SAMPLES,
+                min_samples=2,
+                max_wait_seconds=8.0,
+                poll_seconds=0.005,
+            )
 
     def _poll_show(self) -> None:
         try:
-            self.bridge.set(
-                bridge_line(
-                    self.browser.read_bridge_health(),
-                    self.browser.read_page_context(),
-                    (self.browser.read_autopilot_status() or {}).get("seat") or {},
-                )
-            )
-            context = self.browser.read_page_context()
+            snapshot = self.browser.read_snapshot()
+            health = self.browser.read_bridge_health()
+            context = snapshot["context"] or None
+            status = snapshot["status"]
+            seat = status.get("seat") or {}
+
+            line = bridge_line(health, context, seat)
+            self.bridge.set(f"{line} · {self._update_note}" if self._update_note else line)
             if context:
                 self._follow_browser_show(context)
-            self._update_guidance(context)
+            self._update_guidance(context, seat)
 
-            catalog = self.browser.read_show_catalog()
+            catalog = snapshot["catalog"] or None
             if catalog:
                 prev = self._catalog or {}
                 new_blocks = catalog.get("blocks") or []
@@ -1523,7 +1722,7 @@ class PureClickMacApp(tk.Tk):
                     or round_changed
                 ):
                     self._apply_catalog(catalog)
-            self._apply_autopilot_status()
+            self._apply_autopilot_status(status, health)
         except Exception as exc:  # noqa: BLE001 - keep the poll alive
             self._note(f"브라우저 동기화 오류: {exc}", error=True)
         self.after(500, self._poll_show)
@@ -1541,7 +1740,15 @@ class PureClickMacApp(tk.Tk):
         # A refused arm never fires, so gating on `fired` alone meant the one
         # case you most need to see — "it did not even try, and here is why" —
         # showed nothing at all. A block refuses before firing.
-        if not arm.get("fired") and not str(arm.get("lastError") or "").strip():
+        # Re-entry counts too. fireEntry called from maybeReenter never sets
+        # `fired`, so a re-entry loop — the thing most worth seeing, because it
+        # spends requests against a lockout-capable endpoint — rendered nothing
+        # at all unless it happened to also raise an error.
+        if (
+            not arm.get("fired")
+            and not str(arm.get("lastError") or "").strip()
+            and not (arm.get("reentryTries") or 0)
+        ):
             return
 
         lateness = arm.get("latenessMs")
@@ -1598,6 +1805,12 @@ class PureClickMacApp(tk.Tk):
         if goods or seq:
             lines.append(f"상품 {goods or '?'} · 회차 {seq or '?'}")
 
+        # Published since the feature existed and drawn nowhere, which is how a
+        # 400ms re-entry loop stayed invisible.
+        reentries = arm.get("reentryTries") or 0
+        if reentries:
+            lines.append(f"재진입 {reentries}회 — 진입이 되돌려질 때마다 다시 시도합니다")
+
         host = str(arm.get("queueHost") or "").strip()
         if host:
             lines.append(f"대기열 호스트 {host} · 다음 진입부터 미리 연결")
@@ -1609,22 +1822,28 @@ class PureClickMacApp(tk.Tk):
 
         self.test_result.set("\n".join(lines))
 
-    def _apply_autopilot_status(self) -> None:
-        """Mirror what the 예매 창 is doing, with the numbers that explain it.
+    def _apply_autopilot_status(self, status: dict | None = None,
+                                health: dict | None = None) -> None:
+        """Mirror what the 예매 창 is doing — every tick, whatever it says.
 
-        The status line used to be the message cut at its first ' · ', which
-        threw away the part that said *why* — leaving '취소표 감시 중' on screen
-        whether it was watching an empty map, ignoring seats that did not match
-        the chosen grades, or losing every race.
+        A renderer and nothing more: `live_state` decides, this puts it on
+        screen. It used to decide here as well, and it opened with
+
+            if not message: return
+
+        `seatState.message` is "" on every fresh injection of the autopilot and
+        is only ever written by `updateOverlay`, so a page that had gone quiet —
+        a reload after a cancelled seat, a stopped run, a window that closed —
+        published a truthful "I am idle" and the panel *discarded it* and went
+        on repainting its last frame. That is the 좌석 잡음 that never clears,
+        and it is the opposite of watching the 예매 창.
         """
-        status = self.browser.read_autopilot_status() or {}
+        if status is None:
+            status = self.browser.read_autopilot_status() or {}
+        if health is None:
+            health = self.browser.read_bridge_health()
         self._render_entry_result(status.get("arm") or {})
         seat = status.get("seat") or {}
-        message = str(seat.get("message") or "").strip()
-        if not message:
-            return
-
-        attempts = seat.get("attempts") or 0
 
         # Once a seat session exists the bitmap is the truthful count, so the
         # show table switches from the API's `remain` to what is actually free.
@@ -1640,48 +1859,54 @@ class PureClickMacApp(tk.Tk):
                 free_by_grade=by_grade,
             )
 
-        self._render_seat_order(seat)
 
-        # The dot carries the state so the text does not have to spell it out
-        # with symbols — one glance tells you whether anything is happening.
-        if seat.get("locked"):
-            self._set_state(GREEN, f"좌석 잡음 · {seat.get('lastSeat') or ''}".strip(" ·"),
-                            "예매 창에서 결제만 진행하세요. 결제 버튼은 누르지 않습니다.")
-        elif seat.get("running"):
-            head = message.split(" · ")[0]
-            self._set_state(ACCENT, f"{head} · 시도 {attempts}회" if attempts else head,
-                            running_hint(seat, message))
-        elif seat.get("haltedByUser"):
-            self._set_state(FAINT, f"멈춤 · 시도 {attempts}회", "다시 하려면 위 버튼을 누르세요.")
-        elif seat.get("lastError"):
-            self._set_state(AMBER, "중단됨", str(seat.get("lastError")))
-        else:
-            self._set_state(FAINT, f"대기 중 · 시도 {attempts}회" if attempts else "대기 중", "")
-
-    def _render_seat_order(self, seat: dict) -> None:
-        """Show the ranking, and take the space back when there is none."""
-        box = getattr(self, "order_text", None)
-        if box is None or not box.winfo_exists():
+        tone, headline, why = live_state(seat, health, asked=self._pending_press(seat))
+        # A flash is a message about something the user just did, and the band
+        # is repainted twice a second — so it has to be held or it is not shown
+        # at all. A caught seat is the one thing nothing may sit on top of.
+        colour = TONES.get(tone, FAINT)
+        if colour != GREEN and time.monotonic() < self._flash_until:
             return
-        # The ordering, and underneath it what reaching those seats cost. Both
-        # answer the same question — why did it take that seat, and why then.
-        lines = seat_order_lines(seat)
-        moves = map_move_lines(seat)
-        if moves:
-            lines = [*lines, *([""] if lines else []), *moves]
-        if not lines:
-            box.pack_forget()
-            return
-        box.configure(state="normal", height=len(lines))
-        box.delete("1.0", tk.END)
-        box.insert("1.0", "\n".join(lines))
-        box.configure(state="disabled")
-        if not box.winfo_manager():
-            box.pack(fill="x", pady=(10, 0))
+        self._set_state(colour, headline, why)
 
-        self._render_seat_order(seat)
+    @staticmethod
+    def _press_signature(seat: dict) -> tuple:
+        """What moves when the 예매 창 acts on anything at all.
 
-        # The dot carries the state so the text does not have to spell it out
+        Any one of these changing is proof the page is alive and received the
+        command; none of them moving means nothing was there to receive it.
+        """
+        return (
+            bool(seat.get("running")),
+            int(seat.get("traceLen") or 0),
+            str(seat.get("lastExit") or ""),
+            str(seat.get("lastError") or ""),
+            str(seat.get("message") or ""),
+        )
+
+    def _remember_press(self, label: str) -> None:
+        seat = (self.browser.read_autopilot_status() or {}).get("seat") or {}
+        self._asked = (label, time.monotonic(), self._press_signature(seat))
+
+    def _pending_press(self, seat: dict) -> tuple[str, float] | None:
+        """A press the 예매 창 has shown no sign of receiving.
+
+        `browser_host.apply_state` runs every command as
+        `window.PureClick && PureClick.runCatch()` and then drops it from the
+        state file whether or not there was anything there to run it. So a
+        press against a page the autopilot has not been injected into is
+        swallowed in silence — the button depresses, the panel says what it
+        hoped would happen, and nothing anywhere records that it did not.
+        """
+        if self._asked is None:
+            return None
+        label, at, signature = self._asked
+        if self._press_signature(seat) != signature:
+            self._asked = None
+            return None
+        return label, time.monotonic() - at
+
+    def _note(self, text: str, *, error: bool = False) -> None:
         """A one-off message the user needs to see.
 
         These all used to go to `log_text` — a StringVar bound to no widget. Two
@@ -1690,14 +1915,32 @@ class PureClickMacApp(tk.Tk):
         reported itself somewhere nobody could read. They land on the live line
         now, and errors take the dot amber with them.
         """
+        # The dot carries the state so the text does not have to spell it out.
+        # Errors are flashed — they are about something that just went wrong and
+        # the next poll is 500ms away. Progress chatter is not: it is worth less
+        # than a live watch's own status and must never sit on top of it.
         if error:
-            self._set_state(AMBER, "문제가 발생했습니다", text)
+            self._flash(AMBER, "문제가 발생했습니다", text)
         else:
             self.reason.set(text)
+
+    def _flash(self, colour: str, headline: str, why: str, seconds: float = 6.0) -> None:
+        """A message about something that has just happened, held long enough
+        to read.
+
+        The band is repainted from the 예매 창 every 500ms, so anything written
+        straight to it — 정지 요청됨, a lookup that failed, a config file that
+        would not parse — used to survive exactly one tick, which is the same
+        as never being shown. `_apply_autopilot_status` steps around a live
+        flash; a caught seat still goes through it.
+        """
+        self._set_state(colour, headline, why)
+        self._flash_until = time.monotonic() + seconds
 
     def _set_state(self, colour: str, headline: str, why: str) -> None:
         self.status.set(headline)
         self.reason.set(why)
+        self._state_colour = colour
         dot = getattr(self, "status_dot", None)
         if dot is not None and dot.winfo_exists():
             dot.configure(fg=colour)
@@ -1784,13 +2027,25 @@ class PureClickMacApp(tk.Tk):
             self._set_open_time(str(context["ticket_open"]))
         self._refresh_show_where()
 
-    def _update_guidance(self, context: dict | None) -> None:
+    def _update_guidance(self, context: dict | None, seat: dict | None = None) -> None:
         """Say what to do next, and only enable the buttons that can work.
 
         Which step you are on is decided by the page the browser is actually
         showing, so the panel cannot disagree with the window next to it.
+
+        The division with the live band is that this is the only thing on
+        screen addressed to *you* — the next thing to press — while the band
+        reports what the macro is doing. That held right up until the macro
+        started doing something: this read `page` and nothing else, so the
+        moment you reached a seat map it said "[감시 시작]을 누르면…" and went
+        on saying it while the watch ran, while a seat was held, forever. Two
+        boxes then described the same moment and one of them was telling you to
+        press a button you had already pressed. A step you have taken is not
+        guidance, so once the macro is working this gets out of the way.
         """
         page = (context or {}).get("page") or ""
+        seat = seat or {}
+        macro_working = bool(seat.get("running") or seat.get("locked"))
         loaded = self._show_info_data
         on_seat_map = page == "seat"
         goods_on_page = self._browser_goods_code(context)
@@ -1814,6 +2069,7 @@ class PureClickMacApp(tk.Tk):
             step, hint = 2, "판매 전입니다. 예매 창에서 로그인해 두고 [대기 시작]을 누르세요."
 
         self.guidance.set(f"지금 할 일 — {hint}" if step else f"안내 — {hint}")
+        self._show_guidance(not macro_working)
 
         self._set_enabled(self.btn_arm, step == 2)
         # The rehearsal arms the real scheduler, so it belongs on the same pages
@@ -1830,6 +2086,17 @@ class PureClickMacApp(tk.Tk):
         else:
             self.open_note.set("아직 안 열린 공연 — 열리는 순간 대기열을 먼저 잡습니다.")
 
+
+    def _show_guidance(self, visible: bool) -> None:
+        """Take the whole tip box away, not just its text — an empty bordered
+        panel is louder than no panel."""
+        box = getattr(self, "tip_edge", None)
+        if box is None or not box.winfo_exists():
+            return
+        if visible and not box.winfo_manager():
+            box.pack(fill="x", pady=(16, 0), before=self.aim_card)
+        elif not visible and box.winfo_manager():
+            box.pack_forget()
 
     def _open_time(self) -> datetime | None:
         """When this show goes on sale, or None if we do not know."""
@@ -1990,6 +2257,16 @@ class PureClickMacApp(tk.Tk):
             self.after(100, self._tick_server_time)
 
     def _render_server_time(self) -> None:
+        # A clock held across a sleep is not a clock. perf_counter is
+        # mach_absolute_time() and stops while the Mac sleeps, so a panel left
+        # open overnight kept counting down to an open that had already passed —
+        # while the note beside it, which reads datetime.now(), correctly said
+        # 판매 중. Re-sync once rather than rendering either of them as truth.
+        if self.clock.anchor_is_stale() and not self._resyncing:
+            self._resyncing = True
+            self.clock_info.set("기기가 절전에서 깨어났습니다 — 서버 시각 다시 맞추는 중…")
+            self._start_worker(self._resync_worker)
+
         result = self.clock.sync_result
         if result is None:
             self.server_time.set("--:--:--")

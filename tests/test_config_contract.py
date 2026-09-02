@@ -11,6 +11,7 @@ Nothing else links the two layers, so this test is the link.
 
 from __future__ import annotations
 
+import ast
 import re
 import unittest
 from pathlib import Path
@@ -72,3 +73,70 @@ class ConfigContractTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+# The functions that render the seat *status*. Others in core/seat.py also take
+# a parameter called `seat` but are handed one seat object, not the payload.
+STATUS_CONSUMERS: frozenset[str] = frozenset(
+    {"running_hint", "seat_order_lines", "map_move_lines"}
+)
+
+SEAT_MODULE = Path(__file__).resolve().parent.parent / "core" / "seat.py"
+
+
+def published_status_keys() -> set[str]:
+    """Top-level keys of the `seat:` object in seatStatusSummary()."""
+    source = AUTOPILOT.read_text(encoding="utf-8")
+    start = source.index("function seatStatusSummary()")
+    literal = source[source.index("seat: {", start) : source.index(
+        "      arm: { ...armState },", start
+    )]
+    return set(re.findall(r"^\s{8}([A-Za-z_][A-Za-z0-9_]*):", literal, re.M))
+
+
+def panel_status_reads() -> dict[str, str]:
+    """`seat.get("X")` in each status-rendering function, mapped to its function."""
+    tree = ast.parse(SEAT_MODULE.read_text(encoding="utf-8"))
+    found: dict[str, str] = {}
+    for fn in tree.body:
+        if not isinstance(fn, ast.FunctionDef) or fn.name not in STATUS_CONSUMERS:
+            continue
+        for node in ast.walk(fn):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "seat"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+            ):
+                found.setdefault(node.args[0].value, fn.name)
+    return found
+
+
+class StatusContractTests(unittest.TestCase):
+    """The panel must not render a field the page never sends.
+
+    This is the app's most repeated bug: a value computed in one layer and
+    consumed in the other with nothing linking them, so the line simply never
+    appears and nobody finds out. `nudges` sat in running_hint being read from a
+    payload that has never carried it; `unreachableSkips` was incremented for a
+    whole fix before anyone noticed it was not published. Both are the same
+    mistake, and this is the link that catches it.
+    """
+
+    def test_every_status_field_the_panel_renders_is_published(self) -> None:
+        published = published_status_keys()
+        self.assertGreater(len(published), 20, "the status literal failed to parse")
+        missing = sorted(
+            f"{key} (read in {where})"
+            for key, where in panel_status_reads().items()
+            if key not in published
+        )
+        self.assertEqual(
+            missing,
+            [],
+            "the panel reads status fields the page never sends, so those lines "
+            "can never appear:\n  " + "\n  ".join(missing),
+        )

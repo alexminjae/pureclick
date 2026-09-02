@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from core.clock import (
+    SyncResult,
     KST,
     ServerClock,
     TimeSample,
@@ -106,6 +107,69 @@ class PureClickCoreTests(unittest.TestCase):
             datetime.fromtimestamp(result.anchor_server_unix, UTC).second,
             {1, 2},
         )
+
+
+class SleepDriftTests(unittest.TestCase):
+    """A clock held across a sleep is not a clock.
+
+    Observed live: a panel left running from 20:45 across 23 hours of machine
+    sleep had a clock 19 hours behind, so the 오픈 대기 countdown was still
+    counting down to an open that had already happened — while the note beside
+    it, which reads datetime.now(), correctly said 판매 중. Same panel, two
+    clocks. perf_counter is mach_absolute_time() on macOS and does not advance
+    while the machine sleeps, which is what separates them.
+    """
+
+    def _slept(self, hours: float) -> ServerClock:
+        clock = ServerClock()
+        now = time.time()
+        # A sync whose wall anchor is `hours` old but whose monotonic anchor has
+        # barely moved: exactly what a sleep leaves behind.
+        clock._sync_result = SyncResult(
+            offset_seconds=0.0,
+            best_rtt_seconds=0.01,
+            samples=(),
+            anchor_perf=time.perf_counter(),
+            anchor_server_unix=now - hours * 3600,
+            anchor_wall_unix=now - hours * 3600,
+        )
+        return clock
+
+    def test_a_sleep_is_detected(self) -> None:
+        clock = self._slept(19)
+        self.assertAlmostEqual(clock.sync_result.anchor_drift_seconds / 3600, 19, places=1)
+        self.assertTrue(clock.anchor_is_stale())
+
+    def test_a_stale_anchor_is_not_used_for_the_time(self) -> None:
+        clock = self._slept(19)
+        # Without the staleness check this reads 19 hours in the past, which is
+        # what put a live countdown on a show that had already opened.
+        self.assertLess(abs(clock.server_time_unix() - time.time()), 2.0)
+
+    def test_a_stale_anchor_is_not_used_for_a_deadline(self) -> None:
+        clock = self._slept(19)
+        target = time.time() + 30.0
+        deadline = clock.deadline_for_server_time(target)
+        # The arm fires against this. A stale anchor made it hours late.
+        self.assertLess(abs(deadline - (time.perf_counter() + 30.0)), 2.0)
+
+    def test_a_fresh_anchor_is_still_trusted(self) -> None:
+        clock = ServerClock()
+        now = time.time()
+        clock._sync_result = SyncResult(
+            offset_seconds=0.25, best_rtt_seconds=0.01, samples=(),
+            anchor_perf=time.perf_counter(), anchor_server_unix=now + 0.25,
+            anchor_wall_unix=now,
+        )
+        self.assertFalse(clock.anchor_is_stale())
+        # The monotonic path is the precise one and must stay in use.
+        self.assertLess(abs(clock.server_time_unix() - (now + 0.25)), 0.5)
+
+    def test_age_is_measured_in_real_time(self) -> None:
+        clock = self._slept(19)
+        # perf_counter-based age reported a 19-hour-old sync as seconds old —
+        # on the reading whose whole job is to say "too old to trust".
+        self.assertGreater(clock.sync_result.age_seconds, 18 * 3600)
 
 
 if __name__ == "__main__":

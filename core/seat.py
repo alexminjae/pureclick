@@ -640,130 +640,59 @@ CAPTCHA_LABELS = {
 # measures 29ms for two blocks — so this alone understates every sweep.
 CATCH_TICK_MS = 100
 
-def running_hint(seat: dict[str, Any], message: str) -> str:
-    """The one line worth reading while it runs."""
-    # A gateway block makes every other number meaningless.
-    blocked = int(seat.get("blockedForMs") or 0)
-    if blocked > 0:
-        # Which call earned it. Until now nothing recorded that, so after the
-        # fact there was no way to tell whether the queue or the seat path had
-        # been throttled — and those need different answers.
-        where = str(seat.get("blockedEndpoint") or "").strip()
-        cause = f" ({where})" if where else ""
-        return (
-            f"접속 차단 중 — {blocked // 1000}초 남음{cause}. "
-            "차단 중에는 좌석을 잡을 수 없고, 계속 시도하면 차단이 길어집니다."
-        )
+def watch_note(seat: dict[str, Any]) -> str:
+    """The one line under the headline: what needs your attention, or nothing.
 
-    # A captcha blocks everything else, so it outranks the rest.
-    captcha = seat.get("captcha") or {}
-    label = CAPTCHA_LABELS.get(str(captcha.get("state") or ""))
+    This replaced `running_hint`, which had twenty-one branches and put a
+    counter in most of them — 시도 47회, 경합 22회, 한 바퀴 5852ms, 빈자리 발견 후
+    380ms. Every one of those moves while the watch runs, and the band is
+    repainted twice a second, so the panel churned continuously and the user
+    could not read it: "it's updating rapidly now so it's just going crazy".
+
+    A status line is for *state*, and state does not change five times a
+    second. So: no numbers, and a sentence only when there is something to do
+    about it. The measurements still exist in the published status for
+    debugging; they are simply not something to watch while racing.
+
+    Ranked, because when several are true at once only the top one is worth
+    acting on.
+    """
+    seat = seat or {}
+
+    # Nothing can be caught while blocked, and trying extends it.
+    if int(seat.get("blockedForMs") or 0) > 0:
+        return "접속이 차단되었습니다 — 풀리면 자동으로 다시 시도합니다."
+
+    # A captcha stops everything else until a human answers it.
+    label = CAPTCHA_LABELS.get(str((seat.get("captcha") or {}).get("state") or ""))
     if label:
-        detail = str(captcha.get("detail") or "")
-        return f"{label} · {detail}" if detail else label
+        return label
 
-    # Losing seats to other buyers is the normal texture of a busy open, and
-    # it must not read like a stuck macro — it is the macro working. Ranked
-    # above the error-dialog line because during an open it is the common
-    # case and the more informative one.
-    conflicts = seat.get("takenConflicts") or 0
-    if conflicts:
-        cooling = seat.get("cooldownSeats") or 0
-        tail = f" · 대기 중인 자리 {cooling}석" if cooling else ""
-        return f"다른 사람이 먼저 잡은 자리 {conflicts}회 — 바로 다음 자리로 넘어갑니다{tail}"
-
-    # A dialog was covering the map and has been cleared. Worth saying: the
-    # run looked frozen for a long time before anything cleared these.
-    overlays = seat.get("overlaysDismissed") or 0
     unknown = str(seat.get("unknownDialog") or "").strip()
-    if overlays and unknown:
-        return f"안내창 {overlays}회 닫고 계속합니다 — {unknown[:52]}"
     if unknown:
-        return f"처음 보는 안내창이 떴습니다: {unknown[:70]}"
+        return "예매 창에 처음 보는 안내창이 떴습니다 — 확인해 주세요."
 
-    opened = str(seat.get("blockEntered") or "").strip()
-    misses = seat.get("blockEntryMisses") or 0
-    if misses:
-        return f"구역을 여는 데 {misses}번 실패했습니다 — 예매 창에서 구역을 직접 열어 주세요."
-    if opened:
-        return f"구역 {opened} 을(를) 열고 그 안에서 자리를 찾는 중입니다."
+    # The venue may be bigger than what is being swept.
+    if int(seat.get("batchFailures") or 0):
+        return "일부 구역을 못 보고 있습니다 — [감시 중지] 후 다시 시작해 주세요."
 
-    misses = seat.get("aimMisses") or 0
-    if misses:
-        return f"화면에 그려지지 않아 건너뛴 자리 {misses}석 — 맵을 확대하면 줄어듭니다."
+    if seat.get("watchRectIgnored"):
+        return "감시 구역에 좌석이 없어 전체를 보고 있습니다 — [범위 정하기]에서 다시 그어 주세요."
 
-    dialogs = seat.get("seatErrorDialogs") or 0
-    if dialogs:
-        return f"좌석맵 오류창 {dialogs}회 자동으로 닫았습니다."
+    if int(seat.get("blockEntryMisses") or 0):
+        return "구역을 여는 데 실패하고 있습니다 — 예매 창에서 구역을 직접 열어 주세요."
 
-    skipped = seat.get("skippedByMap") or 0
-    rejects = seat.get("consecutiveRejects") or 0
-    if rejects >= 3:
-        return (
-            f"연속 {rejects}회 거절 — 좌석맵이 보여주는 빈자리를 서버가 거부하고 있습니다. "
-            "계속되면 자동으로 멈춥니다."
-        )
-    if skipped:
-        return f"좌석맵이 선택 불가로 표시한 {skipped}석은 건너뛰었습니다."
-    # A drawn area holding no seats is silently replaced with the whole
-    # venue — seen as "감시 구역: 지정됨 · 0석" while the watch swept
-    # everything. An area that does nothing has to say so.
+    if int(seat.get("consecutiveRejects") or 0) >= 3:
+        return "좌석맵이 보여주는 빈자리를 서버가 거부하고 있습니다."
+
+    # The trigger's own words when it cannot see the venue's remaining count.
     note = str(seat.get("triggerNote") or "").strip()
     if seat.get("running") and note:
         return note
 
-    if seat.get("watchRectIgnored"):
-        return "감시 구역에 좌석이 없습니다 · 전체를 감시하는 중 — [범위 정하기]에서 다시 그어 주세요"
-
-    # The only latency that decides whether a seat is yours: from the
-    # moment it opened to the moment we clicked it.
-    caught = seat.get("catchLatencyMs") or 0
-    if caught:
-        via_freed = {"page": " · 예매 창 통신으로 먼저 발견", "poll": ""}.get(
-            str(seat.get("lastFreedVia") or ""), ""
-        )
-        won = {"api": "API 선점", "click": "맵 클릭"}.get(str(seat.get("wonVia") or ""), "")
-        verdict = "빠릅니다" if caught <= 400 else "느립니다 — 범위를 좁혀 보세요"
-        tail = f" · {won}" if won else ""
-        return f"빈자리 발견 후 {caught}ms 만에 잡음{tail}{via_freed} · {verdict}"
-
-    # The gap this whole design turns on: how long the 예매 창 takes to agree
-    # that a seat the server already freed is actually free. If this is
-    # small the page keeps up on its own; if it is large, that wait is the
-    # race we were losing.
-    agreed = seat.get("domAgreedMs") or 0
-    if agreed and seat.get("running"):
-        worst = seat.get("domAgreedWorstMs") or agreed
-        nudges = seat.get("nudges") or 0
-        note = f"예매 창이 빈자리를 인식하는 데 {agreed}ms (최대 {worst}ms)"
-        if nudges:
-            note += f" · 맵 새로고침 {nudges}회"
-        return note
-
-    # How long one full sweep of what you are watching takes. Losing a race
-    # is usually this number rather than click speed: the watch used to poll
-    # two blocks per tick across the whole venue, so a 43-block stadium took
-    # nearly nine seconds to come back round to any one block.
-    watched = seat.get("watchedBlocks") or 0
-    ticks = seat.get("sweepTicks") or 0
-    if seat.get("running") and watched and ticks:
-        # The measured tick, not the configured sleep. A tick is the sleep
-        # *plus* the request, and seatStatus costs ~58ms — so reporting
-        # ticks x 200ms understated every sweep by about a third, in the
-        # one number you read when deciding whether to narrow the range.
-        tick = seat.get("observedTickMs") or CATCH_TICK_MS
-        sweep = ticks * tick
-        note = f"감시 {watched}구역 · 한 바퀴 {sweep}ms"
-        # A sweep this long is the race, not a detail. Watching the whole
-        # venue means a seat freeing just behind the cursor waits a full
-        # lap before we even look at it.
-        if sweep >= 1000:
-            note += f" · 범위를 정하면 {tick}ms로 줄어듭니다"
-        return note
-
-    # Everything after the first ' · ' is the explanation the toast carries.
-    parts = message.split(" · ", 1)
-    return parts[1] if len(parts) > 1 else ""
+    if seat.get("running"):
+        return "빈자리가 나오면 바로 잡습니다."
+    return ""
 
 
 def waiting_log_lines(arm: dict[str, Any], limit: int = 12) -> list[str]:
@@ -833,6 +762,61 @@ EXIT_REASONS = {
 # Past this, the browser is not being read and nothing below it can be trusted.
 BRIDGE_STALE_SECONDS = 3.0
 
+# How long a pressed button may go unanswered before the panel says so.
+# `browser_host.apply_state` fires every command as `window.PureClick && …` and
+# then drops it from the state file whether or not anything was there to run it,
+# so a press against a page with no autopilot on it vanished without a trace.
+ACK_SECONDS = 3.0
+
+# A trailing "(47)" on an overlay head — the catch loop's attempt counter.
+_COUNTER_TAIL = re.compile(r"\s*\(\d+\)\s*$")
+
+# The live band's four tones, as names. `core` must not know the panel's
+# palette — the panel maps these onto its own colours.
+TONE_GREEN = "green"
+TONE_ACCENT = "accent"
+TONE_AMBER = "amber"
+TONE_FAINT = "faint"
+
+
+def bridge_status(health: dict[str, Any], now: float | None = None) -> tuple[str, str]:
+    """Whether the 예매 창 is being read *right now*, and what to say if not.
+
+    Split out of `bridge_line` so the masthead line and the live band decide it
+    the same way. They used to disagree, and only one of them was right: the
+    masthead knew the bridge was dead while the status band went on repainting
+    whatever it had last been handed, in full colour, under a green dot.
+
+    Returns (state, detail), where state is one of:
+
+      waiting  nothing heard from the host yet — it is still starting up
+      lost     the read loop has stopped; `seen_at` is no longer moving
+      failing  the loop is alive but cannot read the page — a navigation, an
+               origin the autopilot has not been injected into yet, a window
+               closing mid-read. `seen_at` keeps moving, so age alone calls
+               this healthy; it is not.
+      live     the page is being read
+    """
+    import time as _time
+
+    at = _time.time() if now is None else now
+    seen_at = float(health.get("seen_at") or 0)
+    if not seen_at:
+        return "waiting", "예매 창 연결 대기 중…"
+
+    age = max(0.0, at - seen_at)
+    if age > BRIDGE_STALE_SECONDS:
+        return "lost", (
+            f"예매 창 응답 없음 {age:.0f}초 — 창이 닫혔거나 페이지를 읽지 못하고 있습니다"
+        )
+
+    failures = int(health.get("failures") or 0)
+    if failures:
+        why = str(health.get("last_error") or "").strip()
+        return "failing", f"예매 창 읽기 실패 {failures}회{f' · {why}' if why else ''}"
+
+    return "live", f"예매 창 연결됨 · {age:.1f}초 전"
+
 
 def bridge_line(health: dict[str, Any], context: dict[str, Any] | None = None,
                 seat: dict[str, Any] | None = None, now: float | None = None) -> str:
@@ -845,28 +829,186 @@ def bridge_line(health: dict[str, Any], context: dict[str, Any] | None = None,
     timestamped what it published, so a panel reading twenty-minute-old state
     was indistinguishable from a working one.
     """
-    import time as _time
-
-    at = _time.time() if now is None else now
-    seen_at = float(health.get("seen_at") or 0)
-    if not seen_at:
-        return "예매 창 연결 대기 중…"
-
-    age = max(0.0, at - seen_at)
-    if age > BRIDGE_STALE_SECONDS:
-        return (
-            f"예매 창 응답 없음 {age:.0f}초 — 창이 닫혔거나 페이지를 읽지 못하고 있습니다"
-        )
-
-    failures = int(health.get("failures") or 0)
-    if failures:
-        why = str(health.get("last_error") or "").strip()
-        return f"예매 창 읽기 실패 {failures}회{f' · {why}' if why else ''}"
+    state, detail = bridge_status(health, now)
+    if state != "live":
+        return detail
 
     where = _describe_page(context or {})
     exit_note = EXIT_REASONS.get(str((seat or {}).get("lastExit") or ""), "").strip()
-    line = f"예매 창 연결됨 · {age:.1f}초 전 · {where}"
-    return f"{line} · {exit_note}" if exit_note else line
+    line = f"{detail} · {where}"
+    if exit_note:
+        line = f"{line} · {exit_note}"
+
+    # The platform self-check outranks the rest of this line.
+    #
+    # Document-start injection is the one hook whose failure is invisible from
+    # the screen: the fallback still loads the autopilot on `loaded`, so the
+    # panel fills in and everything looks right while the popup shim is missing
+    # and the first few hundred milliseconds on the seat map are gone — the one
+    # race the macro exists to win. On a machine neither of us has tested, this
+    # is the difference between "it doesn't work" and a specific answer.
+    hooks = platform_note(health)
+    return f"{line} · {hooks}" if hooks else line
+
+
+def platform_note(health: dict[str, Any] | None) -> str:
+    """What the platform hooks did, when any of them did not work."""
+    health = health or {}
+    trouble: list[str] = []
+
+    if str(health.get("document_start") or "") == "failed":
+        why = str(health.get("document_start_error") or "").strip()
+        trouble.append("사전 주입 실패 — 좌석 선점이 느려집니다" + (f" ({why[:60]})" if why else ""))
+
+    source = str(health.get("autopilot_source") or "")
+    if source.startswith("bundled ("):
+        trouble.append(source[len("bundled ("):].rstrip(")"))
+
+    return " · ".join(trouble)
+
+
+def live_state(
+    seat: dict[str, Any] | None,
+    health: dict[str, Any] | None = None,
+    *,
+    asked: tuple[str, float] | None = None,
+    now: float | None = None,
+) -> tuple[str, str, str]:
+    """What the live band should say: (tone, headline, why).
+
+    This is the panel's one claim about what the 예매 창 is doing, and it was
+    wrong in three separate ways — every one of which showed up as the same
+    symptom: catch a seat, cancel it, press 감시 시작, and the band stays green
+    on 좌석 잡음 forever.
+
+    1. The renderer opened with `if not message: return`. `seatState.message` is
+       "" on every fresh injection of the autopilot and is only ever written by
+       `updateOverlay`, so a reloaded seat page published a perfectly truthful
+       "I am idle" and the panel *discarded it* and repainted its last frame.
+       There is no early return here. Silence is a state, and it is drawn.
+
+    2. `locked` was tested first, so a press that the page received and
+       *refused* — the alreadyHolding branch sets lastError and returns without
+       ever setting running — rendered as the green it was refusing to disturb.
+       The refusal now outranks the flag, because the refusal explains the flag.
+
+    3. Nothing consulted the bridge's age, so a closed window rendered minutes
+       of stale truth in full colour. Nothing below rung 1 is a claim about the
+       present unless the browser is actually being read.
+
+    `asked` is (button label, seconds since the press) — see ACK_SECONDS.
+    """
+    seat = seat or {}
+    attempts = int(seat.get("attempts") or 0)
+    message = str(seat.get("message") or "").strip()
+    tries = f" · 시도 {attempts}회" if attempts else ""
+
+    # 1. Can the browser be seen at all? Everything below is a claim about a
+    #    page we may no longer be reading — including a green. A seat "held" by
+    #    a window that has closed is not held.
+    state, detail = bridge_status(health or {}, now)
+    if state != "live":
+        if state == "waiting":
+            return TONE_FAINT, detail, "예매 창이 아직 시작되지 않았습니다."
+        return TONE_AMBER, detail, "아래 숫자는 마지막으로 받은 기록입니다 — 지금 상태가 아닙니다."
+
+    # 2. A press the page never answered.
+    if asked:
+        label, pending = asked
+        if pending > ACK_SECONDS:
+            return (
+                TONE_AMBER,
+                f"[{label}]에 예매 창이 반응하지 않았습니다",
+                "예매 창이 좌석맵에 있는지 확인하고 다시 눌러 주세요.",
+            )
+
+    # 3. The press arrived and was refused. Above `locked` deliberately: the
+    #    refusal *is* about the locked flag, and drawing the flag instead of the
+    #    refusal told you the opposite of what had just happened to your press.
+    if str(seat.get("lastExit") or "") == "alreadyHolding":
+        return (
+            TONE_AMBER,
+            "감시를 시작하지 않았습니다",
+            str(seat.get("lastError") or EXIT_REASONS["alreadyHolding"]),
+        )
+
+    if seat.get("locked"):
+        raw_held = seat.get("pageSelected")
+        held = int(raw_held) if isinstance(raw_held, (int, float)) else -1
+        # 4. The page's own cart is empty, so whatever was caught is gone —
+        #    cancelled in the 예매 창, or released by the site. This is the
+        #    abandon → 취켓팅 moment, and calling it 좌석 잡음 is the stuck green.
+        if held == 0:
+            return (
+                TONE_FAINT,
+                "잡았던 좌석을 놓았습니다",
+                "[감시 시작]을 누르면 취켓팅을 이어갑니다.",
+            )
+        # 5. Holding, or unable to tell. `selectedSeatCount()` answers -1 far
+        #    more often than 0 on a seat page, so the panel says what it knows
+        #    and names the way out rather than performing a certainty it does
+        #    not have — a user-initiated run clears a stale lock by itself.
+        why = "예매 창에서 결제만 진행하세요. 결제 버튼은 누르지 않습니다."
+        if held < 0:
+            why += (
+                " 좌석을 취소했다면 [감시 시작]을 다시 누르세요 — "
+                "잡은 기록을 지우고 이어서 감시합니다."
+            )
+        return TONE_GREEN, f"좌석 잡음 · {seat.get('lastSeat') or ''}".strip(" ·"), why
+
+    # 6. Running. The head used to be sliced out of `message`, and an empty one
+    #    took the whole band down with it (defect 1).
+    if seat.get("running"):
+        head = message.split(" · ")[0] if message else "감시 중"
+        # Strip the page's own attempt count, and do not add ours. The catch
+        # loop polls at 100ms while the panel repaints at 500ms, so a running
+        # headline read "좌석맵 대기 (47) · 시도 47회" — the same number twice,
+        # both jumping by five every frame. A headline names a state; numbers
+        # that move belong in watch_vitals, which is monospace and so does not
+        # reflow the line every time a digit changes width. The static rungs
+        # below keep their count: nothing is incrementing there.
+        return TONE_ACCENT, _COUNTER_TAIL.sub("", head), watch_note(seat)
+
+    if seat.get("haltedByUser"):
+        return TONE_FAINT, f"멈춤{tries}", "다시 하려면 위 버튼을 누르세요."
+
+    if seat.get("lastError"):
+        return TONE_AMBER, "중단됨", str(seat["lastError"])
+
+    return TONE_FAINT, f"대기 중{tries}", ""
+
+
+def watch_vitals(seat: dict[str, Any] | None) -> str:
+    """The watch's pulse, in one line.
+
+    Every number here is published on every tick and none of it was ever drawn,
+    so "is it actually watching?" could only be answered by waiting for the
+    headline to change — which is precisely what it does not do while the watch
+    is sweeping a venue where nothing has happened yet.
+    """
+    seat = seat or {}
+    parts: list[str] = []
+
+    attempts = int(seat.get("attempts") or 0)
+    if attempts:
+        parts.append(f"시도 {attempts}회")
+    blocks = int(seat.get("watchedBlocks") or 0)
+    if blocks:
+        parts.append(f"구역 {blocks}")
+    free = seat.get("freeSeats")
+    if isinstance(free, int) and free >= 0:
+        parts.append(f"빈자리 {free}")
+    ticks = int(seat.get("sweepTicks") or 0)
+    if ticks:
+        parts.append(f"스윕 {ticks}회")
+    conflicts = int(seat.get("takenConflicts") or 0)
+    if conflicts:
+        parts.append(f"경합 {conflicts}회")
+    cooling = int(seat.get("cooldownSeats") or 0)
+    if cooling:
+        parts.append(f"식힘 {cooling}석")
+
+    return " · ".join(parts)
 
 
 def _describe_page(context: dict[str, Any]) -> str:
