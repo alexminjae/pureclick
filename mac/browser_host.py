@@ -31,11 +31,16 @@ PLATFORM_STATE: dict[str, Any] = {
     "autopilot_source": "bundled",
 }
 
-STATE_PATH = (
-    Path(sys.argv[1])
-    if len(sys.argv) > 1
-    else Path(__file__).with_name(".pureclick_browser_state.json")
-)
+# A frozen build's __file__ resolves inside sys._MEIPASS, wiped on every
+# launch. The panel always passes STATE_PATH explicitly (argv[1]) — see
+# BrowserBridge, which already relocates it when frozen — so this fallback
+# only matters for a standalone/manual invocation, but it should still not
+# quietly point somewhere that gets erased.
+_DATA_DIR = app_platform.user_data_dir() if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+
+STATE_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else _DATA_DIR / ".pureclick_browser_state.json"
+
+
 def _bundled_script_path() -> Path:
     """Where the autopilot lives, from a checkout or inside a frozen bundle.
 
@@ -49,7 +54,10 @@ def _bundled_script_path() -> Path:
 
 
 SCRIPT_PATH = _bundled_script_path()
-COOKIE_PATH = Path(__file__).with_name(".pureclick_cookies.json")
+# Not argv-threaded like STATE_PATH: both processes are the same exe re-invoked
+# with a flag, sys.frozen and sys.platform agree between them, so computing
+# this independently on each side lands on the identical path.
+COOKIE_PATH = _DATA_DIR / ".pureclick_cookies.json"
 START_URL = "https://nol.yanolja.com/ticket"
 
 
@@ -84,13 +92,11 @@ def autopilot_cache_path() -> Path:
     """Where a verified autopilot update is kept, outside the bundle.
 
     A frozen build unpacks read-only to a temp directory, so an update cannot be
-    written next to the bundled copy.
+    written next to the bundled copy. Used unconditionally, source checkout
+    included — unlike STATE_PATH/COOKIE_PATH this was never repo-relative, so
+    there is no dev-mode behaviour to preserve by keeping it local.
     """
-    if sys.platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
-    else:
-        base = Path.home() / "Library" / "Application Support"
-    return base / "PureClick" / "pureclick_autopilot.js"
+    return app_platform.user_data_dir() / "pureclick_autopilot.js"
 
 
 def load_script() -> str:

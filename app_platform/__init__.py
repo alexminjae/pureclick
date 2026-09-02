@@ -15,7 +15,9 @@ faked — which is the only way any of it gets tested before it ships.
 
 from __future__ import annotations
 
+import os
 import platform
+from pathlib import Path
 
 if platform.system() == "Windows":
     from app_platform import windows as backend
@@ -23,6 +25,30 @@ else:
     from app_platform import darwin as backend
 
 NAME = backend.NAME
+
+
+def user_data_dir() -> Path:
+    """Where files meant to outlive one run of the app live.
+
+    Plain OS convention, not a native call, so it needs no backend split. Used
+    unconditionally by the update cache (app_update.py), and by the panel and
+    browser bridge only in a frozen build — a source checkout keeps its simpler,
+    existing behaviour of writing next to the running script.
+
+    That "only when frozen" qualifier is load-bearing. A frozen build's
+    `__file__` resolves inside `sys._MEIPASS`, the directory PyInstaller
+    extracts to fresh and deletes on every single launch — so the Naver
+    session, saved seat preferences and the bridge state would all silently
+    reset every time the app started, which defeats the entire point of
+    porting cookie persistence to Windows in the first place.
+    """
+    if platform.system() == "Windows":
+        base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+    else:
+        base = Path.home() / "Library" / "Application Support"
+    path = base / "PureClick"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 prepare_display = backend.prepare_display
 ensure_ready = backend.ensure_ready
@@ -36,6 +62,7 @@ timing_precision = backend.timing_precision
 
 __all__ = [
     "NAME",
+    "user_data_dir",
     "prepare_display",
     "ensure_ready",
     "lock_exclusive",

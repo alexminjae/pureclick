@@ -44,6 +44,12 @@ from core.zone_map import (  # noqa: E402
     seats_in_watch_rect,
 )
 
+# MAC_DIR stays the real script directory — sys.path depends on it. Saved
+# preferences need somewhere that survives a frozen build's launch, where
+# MAC_DIR resolves inside sys._MEIPASS and is wiped every time the app starts;
+# a source checkout keeps writing next to the script, as before.
+DATA_DIR = app_platform.user_data_dir() if getattr(sys, "frozen", False) else MAC_DIR
+
 # One instrument, not a cockpit.
 #
 # The old palette ran five competing hues — green ground, green accent, blue
@@ -689,7 +695,7 @@ class PureClickMacApp(tk.Tk):
         clear_arm: bool = False,
     ) -> None:
         preferences = self._seat_preferences()
-        config_path = MAC_DIR / "pureclick_seat_config.json"
+        config_path = DATA_DIR / "pureclick_seat_config.json"
         config_path.write_text(serialize_preferences(preferences), encoding="utf-8")
         self.browser.push(
             seat=preferences.to_mapping(),
@@ -699,7 +705,7 @@ class PureClickMacApp(tk.Tk):
         )
 
     def _load_seat_config(self) -> None:
-        path = MAC_DIR / "pureclick_seat_config.json"
+        path = DATA_DIR / "pureclick_seat_config.json"
         if not path.exists():
             return
         try:

@@ -278,6 +278,61 @@ class SeamContractTests(unittest.TestCase):
                                        + "\n  ".join(offenders))
 
 
+class PersistentDataTests(unittest.TestCase):
+    """Persistent files must not live inside a frozen build's extraction dir.
+
+    A PyInstaller one-file exe's `__file__` resolves inside `sys._MEIPASS`,
+    which is deleted and recreated on every launch. The Naver session, saved
+    seat preferences and the bridge state were all originally computed relative
+    to `__file__` — correct for a source checkout, and silently wrong for the
+    shipped exe: the whole point of porting cookie persistence to Windows would
+    have been erased on the very next launch, with nothing to say so.
+
+    `sys.frozen` is simulated by setting it directly (PyInstaller's own
+    bootloader sets it the same way) and reversed in `tearDown`, since it is
+    read by module-level code executed at import time.
+    """
+
+    def setUp(self) -> None:
+        for name in ("browser_bridge", "browser_host", "pureclick"):
+            sys.modules.pop(name, None)
+
+    tearDown = setUp
+
+    def test_a_source_checkout_keeps_writing_next_to_the_script(self) -> None:
+        if hasattr(sys, "frozen"):
+            del sys.frozen
+        import browser_bridge
+
+        bridge = browser_bridge.BrowserBridge(Path("/repo/mac"))
+        self.assertEqual(bridge.state_path, Path("/repo/mac/.pureclick_browser_state.json"))
+        self.assertEqual(bridge.health_path, Path("/repo/mac/.pureclick_bridge_health.json"))
+
+    def test_a_frozen_build_moves_persistent_files_out_of_the_extraction_dir(self) -> None:
+        sys.frozen = True
+        try:
+            import browser_bridge
+
+            bridge = browser_bridge.BrowserBridge(Path("/tmp/_MEIxxxxxx/mac"))
+            self.assertNotIn("_MEI", str(bridge.state_path),
+                              "state_path must not resolve inside the wiped extraction dir")
+            self.assertNotIn("_MEI", str(bridge.health_path))
+            # host_script is unaffected — it is only read in the non-frozen
+            # spawn branch, and must keep pointing at the real bundle layout.
+            self.assertEqual(bridge.host_script, Path("/tmp/_MEIxxxxxx/mac/browser_host.py"))
+        finally:
+            del sys.frozen
+
+    def test_the_cookie_path_moves_too(self) -> None:
+        sys.frozen = True
+        try:
+            import browser_host
+
+            self.assertNotIn("_MEI", str(browser_host.COOKIE_PATH))
+        finally:
+            del sys.frozen
+
+
 class PlatformNoteTests(unittest.TestCase):
     """The self-check has to reach the screen, or it is not a self-check.
 

@@ -123,8 +123,13 @@ def merge_if_changed(path: Path, key: str, value: Any) -> bool:
 class BrowserBridge:
     def __init__(self, mac_dir: Path) -> None:
         self.mac_dir = mac_dir
-        self.state_path = mac_dir / ".pureclick_browser_state.json"
-        self.health_path = mac_dir / ".pureclick_bridge_health.json"
+        # A frozen build's mac_dir resolves inside sys._MEIPASS and is wiped on
+        # every launch; the bridge state (and, through it, the health file) has
+        # to survive a restart there. host_script keeps pointing at mac_dir —
+        # it is only read in the non-frozen spawn branch below.
+        data_dir = app_platform.user_data_dir() if getattr(sys, "frozen", False) else mac_dir
+        self.state_path = data_dir / ".pureclick_browser_state.json"
+        self.health_path = data_dir / ".pureclick_bridge_health.json"
         self.host_script = mac_dir / "browser_host.py"
         self.process: subprocess.Popen[str] | None = None
 

@@ -20,8 +20,14 @@ import os as _os
 
 datas = [
     ("browser/pureclick_autopilot.js", "browser"),
-    ("mac/pureclick_seat_config.json", "mac"),
 ]
+# mac/pureclick_seat_config.json is NOT bundled: it is per-user runtime state —
+# saved 매수/전략/디스코드 웹훅 preferences, written by the running app, correctly
+# gitignored, absent on a fresh checkout. Bundling it would have shipped
+# whoever built the exe's own saved settings to every user, and the CI runner
+# does not even have one — PyInstaller failed outright with "Unable to find
+# ...pureclick_seat_config.json" when this tried to. The app already handles a
+# missing file on first run (mac/pureclick.py's _load_seat_config).
 # Written by the workflow immediately before this runs. Absent in a local build,
 # and app_update treats that as "no update source", which is correct there.
 for _stamp in ("VERSION", "UPDATE_URL"):
