@@ -493,6 +493,85 @@ class SeamContractTests(unittest.TestCase):
                                        + "\n  ".join(offenders))
 
 
+class IntraProcessLockTests(unittest.TestCase):
+    """Reproduced directly on the Windows CI runner, not theorised.
+
+    browser_host.py runs watch_state and poll_context as two background
+    threads that both take locked_state on the same file. flock on macOS
+    queues a second thread of the same process behind the first one, same as
+    it would a second process. msvcrt.locking on Windows does not: it raises
+    OSError: [Errno 36] Resource deadlock avoided the instant it sees this
+    process already holding an overlapping lock, rather than waiting — which
+    is exactly what tests/test_platform_seam.py's own atomicity test hit here,
+    with three reader threads and a writer loop all going through
+    locked_state. Uncaught in a background thread of a console=False build,
+    that is a thread dying silently on its first contended acquire.
+
+    macOS's own flock cannot reproduce the failure, so app_platform.lock_exclusive
+    is faked here to behave the way msvcrt actually does: it raises unless
+    the caller is the one thread already "holding" the lock.
+    """
+
+    def setUp(self) -> None:
+        import browser_bridge
+
+        self._browser_bridge = browser_bridge
+        self._lock_exclusive = browser_bridge.app_platform.lock_exclusive
+        self._unlock = browser_bridge.app_platform.unlock
+        self._bookkeeping = threading.Lock()
+        self._held_by: list[int] = []
+
+        def fake_lock_exclusive(_handle) -> None:
+            current = threading.get_ident()
+            with self._bookkeeping:
+                if self._held_by and self._held_by[0] != current:
+                    raise OSError(36, "Resource deadlock avoided")
+                self._held_by[:] = [current]
+            # Held deliberately, so a second thread calling in while this one
+            # has not reached unlock() yet — exactly what happens with no
+            # in-process lock in front of this — is certain to observe the
+            # conflict, rather than the test depending on two threads' open()
+            # calls happening to land close enough together to race.
+            time.sleep(0.01)
+
+        def fake_unlock(_handle) -> None:
+            with self._bookkeeping:
+                self._held_by.clear()
+
+        browser_bridge.app_platform.lock_exclusive = fake_lock_exclusive
+        browser_bridge.app_platform.unlock = fake_unlock
+
+    def tearDown(self) -> None:
+        self._browser_bridge.app_platform.lock_exclusive = self._lock_exclusive
+        self._browser_bridge.app_platform.unlock = self._unlock
+
+    def test_two_threads_of_one_process_do_not_hit_the_msvcrt_deadlock_error(self) -> None:
+        import tempfile
+
+        browser_bridge = self._browser_bridge
+        errors: list[Exception] = []
+        iterations = 5
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.json"
+
+            def worker() -> None:
+                try:
+                    for _ in range(iterations):
+                        with browser_bridge.locked_state(path):
+                            pass
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=worker) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+
+            self.assertEqual(errors, [], "no thread may see the platform lock call raise")
+
+
 class PersistentDataTests(unittest.TestCase):
     """Persistent files must not live inside a frozen build's extraction dir.
 

@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -17,23 +18,39 @@ if str(_ROOT) not in sys.path:
 
 import app_platform  # noqa: E402
 
+# `browser_host.py` runs watch_state and poll_context as two background
+# threads that both take this lock. `flock` on macOS queues a second thread of
+# the same process behind the first one, same as it would a second process —
+# `msvcrt.locking` on Windows does not: it raises
+# `OSError: [Errno 36] Resource deadlock avoided` the instant it sees this
+# process already holding an overlapping lock, rather than waiting. Measured
+# directly on the Windows CI runner. Uncaught in a background thread with no
+# console to show it, that is a thread dying silently on its very first
+# contended acquire — consistent with the 예매 창 process going quiet forever
+# the moment its own two polling threads first overlapped. The threading.Lock
+# below serialises this process's own threads before either platform's file
+# lock is ever asked to arbitrate between processes, which is the one thing it
+# does not need to be relied on for.
+_intra_process_lock = threading.Lock()
+
 
 @contextmanager
 def locked_state(path: Path) -> Iterator[None]:
     """Serialise access to the state file across the panel and browser processes.
 
-    The lock itself is platform-specific — `flock` on macOS, `msvcrt.locking` on
-    Windows — and lives behind app_platform. `import fcntl` used to sit at module
-    scope here, which meant both processes died on import on Windows before a
-    line of the app ran.
+    The file lock itself is platform-specific — `flock` on macOS, `msvcrt.locking`
+    on Windows — and lives behind app_platform. `import fcntl` used to sit at
+    module scope here, which meant both processes died on import on Windows
+    before a line of the app ran.
     """
-    lock_path = path.with_name(path.name + ".lock")
-    with open(lock_path, "a+") as fh:
-        app_platform.lock_exclusive(fh)
-        try:
-            yield
-        finally:
-            app_platform.unlock(fh)
+    with _intra_process_lock:
+        lock_path = path.with_name(path.name + ".lock")
+        with open(lock_path, "a+") as fh:
+            app_platform.lock_exclusive(fh)
+            try:
+                yield
+            finally:
+                app_platform.unlock(fh)
 
 
 def load_state(path: Path) -> dict[str, Any]:
