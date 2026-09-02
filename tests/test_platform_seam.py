@@ -20,6 +20,7 @@ import ast
 import json
 import sys
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -51,8 +52,12 @@ class _Generic:
         return lambda fn: fn
 
 
+class _FakeTaskScheduler:
+    Default = object()
+
+
 def _fake_clr():
-    return _Generic, _Generic, object, str, _Generic
+    return _Generic, _Generic, object, str, _Generic, _FakeTaskScheduler
 
 
 class _FakeCore:
@@ -112,13 +117,22 @@ class WindowsInjectionTests(unittest.TestCase):
         self.core = _FakeCore()
         self.browser = _FakeBrowser(self.core)
         self._clr, self._browser = windows._clr, windows._browser
+        self._message_loop_running = windows._message_loop_running
+        self._pump_messages = windows._pump_messages
         windows._clr = _fake_clr
         windows._browser = lambda _window: self.browser
+        # These tests exercise the background-thread path — the common case,
+        # and the one every test here was originally written against. The
+        # UI-thread pumping path has its own tests below.
+        windows._message_loop_running = lambda: False
+        windows._pump_messages = lambda: None
         windows._script_ids.clear()
         self.window = type("W", (), {"uid": "master"})()
 
     def tearDown(self) -> None:
         windows._clr, windows._browser = self._clr, self._browser
+        windows._message_loop_running = self._message_loop_running
+        windows._pump_messages = self._pump_messages
         windows._script_ids.clear()
 
     def test_the_previous_script_is_removed_before_the_new_one(self) -> None:
@@ -173,12 +187,18 @@ class WindowsCookieTests(unittest.TestCase):
         self.core = _FakeCore()
         self.browser = _FakeBrowser(self.core)
         self._clr, self._browser = windows._clr, windows._browser
+        self._message_loop_running = windows._message_loop_running
+        self._pump_messages = windows._pump_messages
         windows._clr = _fake_clr
         windows._browser = lambda _window: self.browser
+        windows._message_loop_running = lambda: False
+        windows._pump_messages = lambda: None
         self.window = type("W", (), {"uid": "master"})()
 
     def tearDown(self) -> None:
         windows._clr, windows._browser = self._clr, self._browser
+        windows._message_loop_running = self._message_loop_running
+        windows._pump_messages = self._pump_messages
 
     def test_a_jar_survives_a_round_trip(self) -> None:
         """This is the difference between logging in once and logging in daily."""
@@ -200,6 +220,103 @@ class WindowsCookieTests(unittest.TestCase):
 
     def test_a_nameless_row_is_skipped_not_stored(self) -> None:
         self.assertEqual(windows.restore_cookies(self.window, [{"Value": "x"}]), 0)
+
+
+class SameThreadCallTests(unittest.TestCase):
+    """Reported live: the panel fine, the whole 예매창 gone 응답 없음.
+
+    pywebview fires Shown/loaded synchronously on the UI thread, and
+    install_document_start_script is called directly from both. The original
+    _await_on_ui always did Invoke(...) then blocked on a Semaphore waiting for
+    a syncContext continuation — safe from a background thread, a real deadlock
+    called from the UI thread itself: Invoke runs the delegate inline there, so
+    the block that follows blocks the one thread the continuation needs in
+    order to ever run, and nothing pumps Windows messages while it sits there.
+
+    A test that merely doesn't hang could pass by accident if the fake
+    completes the task before the wait loop is ever entered — exactly what
+    _FakeTask.ContinueWith above does, firing synchronously. So the fakes here
+    are deliberately different: the task's completion is withheld until
+    _pump_messages has actually been called some number of times, simulating a
+    native completion delivered through the message loop. A test that never
+    proves pumping happened is not testing the fix.
+    """
+
+    def setUp(self) -> None:
+        self._clr = windows._clr
+        self._message_loop_running = windows._message_loop_running
+        self._pump_messages = windows._pump_messages
+        windows._clr = _fake_clr
+
+    def tearDown(self) -> None:
+        windows._clr = self._clr
+        windows._message_loop_running = self._message_loop_running
+        windows._pump_messages = self._pump_messages
+
+    def test_a_same_thread_call_pumps_messages_rather_than_blocking_them(self) -> None:
+        windows._message_loop_running = lambda: True
+        pumps = {"n": 0}
+        pending: dict[str, object] = {}
+
+        class _DeferredTask:
+            Result = "script-id"
+
+            def ContinueWith(self, action, _scheduler):
+                pending["fire"] = lambda: action(self)
+                return self
+
+        def fake_pump() -> None:
+            pumps["n"] += 1
+            # The native completion "arrives" only once the loop has actually
+            # been pumped a few times — proving the wait needed the pumping,
+            # not that it happened to succeed on the first check.
+            if pumps["n"] >= 3 and "fire" in pending:
+                pending.pop("fire")()
+
+        windows._pump_messages = fake_pump
+
+        result = windows._await_on_ui(browser=None, start_task=lambda: _DeferredTask(), timeout=2.0)
+
+        self.assertEqual(result, "script-id")
+        self.assertGreaterEqual(pumps["n"], 3, "must actually pump repeatedly, not poll once and give up")
+
+    def test_a_same_thread_call_that_never_completes_times_out_rather_than_hanging(self) -> None:
+        """The old bug's own timeout eventually fired too — 10s of 응답 없음 is
+        still 응답 없음. Bounded failure is necessary here, not sufficient."""
+        windows._message_loop_running = lambda: True
+        windows._pump_messages = lambda: None  # the pending continuation never fires
+
+        class _StuckTask:
+            def ContinueWith(self, action, _scheduler):
+                return self
+
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            windows._await_on_ui(browser=None, start_task=lambda: _StuckTask(), timeout=0.05)
+        self.assertLess(time.monotonic() - started, 2.0, "must give up promptly, not hang for the full old timeout")
+
+    def test_install_document_start_script_uses_the_same_thread_path_when_on_it(self) -> None:
+        """End to end through the function pywebview's Shown/loaded events call
+        directly — the exact call path that hung live."""
+        windows._message_loop_running = lambda: True
+        pumps = {"n": 0}
+
+        def fake_pump() -> None:
+            pumps["n"] += 1
+
+        windows._pump_messages = fake_pump
+        core = _FakeCore()
+        browser = _FakeBrowser(core)
+        original_browser = windows._browser
+        windows._browser = lambda _window: browser
+        windows._script_ids.clear()
+        try:
+            window = type("W", (), {"uid": "master"})()
+            windows.install_document_start_script(window, "// v1")
+            self.assertEqual(core.added, ["id-1"])
+        finally:
+            windows._browser = original_browser
+            windows._script_ids.clear()
 
 
 class Webview2RuntimeDetectionTests(unittest.TestCase):

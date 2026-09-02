@@ -4,7 +4,7 @@ Imports cleanly on macOS. Every native call is behind a small function so the
 logic above it can be tested on a Mac with those calls faked — which is the only
 way any of this is exercised before it reaches a Windows machine.
 
-Two things here differ from macOS in ways that bite if missed:
+Three things here differ from macOS in ways that bite if missed:
 
   * WebView2 has no `removeAllUserScripts()`. `AddScriptToExecuteOnDocumentCreated`
     hands back an id, and the previous script has to be removed by that id or
@@ -13,7 +13,17 @@ Two things here differ from macOS in ways that bite if missed:
   * Calls must be marshalled to the thread that created the control. The
     `Invoke(Func[Object](...)) + ContinueWith(..., syncContextTaskScheduler)`
     pattern below is lifted from pywebview's own `evaluate_js`, because this is
-    the one place a proven pattern in this exact stack beats inventing one.
+    the one place a proven pattern in this exact stack beats inventing one —
+    but only for a caller on a *different* thread from the control's. Called
+    from the control's own thread it deadlocks: `Invoke` runs the delegate
+    inline there, so the wait that follows blocks the one thread the
+    `syncContextTaskScheduler` continuation needs in order to ever run, and
+    nothing pumps windows messages while that wait sits there — which is
+    `pywebview`'s `Shown`/`loaded` events firing synchronously, so every path
+    that reacts to them and calls in here was reported live as the whole app
+    going 응답 없음 (Not Responding). `_await_on_ui` and `_browser` below check
+    `_message_loop_running()` and take a pumping path instead of blocking when
+    they are already on that thread.
 """
 
 from __future__ import annotations
@@ -40,15 +50,52 @@ _script_ids: dict[Any, str] = {}
 def _clr() -> Any:
     """The CLR types the marshalling needs. Isolated so tests can fake it."""
     from System import Action, Func, Object, String  # type: ignore[import-not-found]
-    from System.Threading.Tasks import Task  # type: ignore[import-not-found]
+    from System.Threading.Tasks import Task, TaskScheduler  # type: ignore[import-not-found]
 
-    return Action, Func, Object, String, Task
+    return Action, Func, Object, String, Task, TaskScheduler
+
+
+def _message_loop_running() -> bool:
+    """True when called from the thread pumping WinForms' own message loop.
+
+    `Application.MessageLoop` needs no Control reference, so it works even
+    before one exists — which matters, because `_browser`'s wait below can run
+    before `winforms.BrowserView.instances` has anything in it yet. This is the
+    one question both `_browser` and `_await_on_ui` need answered: may this
+    thread block, or does blocking it starve the very message loop the thing
+    it's waiting for is delivered through. Isolated so tests can fake it.
+    """
+    import System.Windows.Forms as WinForms  # type: ignore[import-not-found]
+
+    return bool(WinForms.Application.MessageLoop)
+
+
+def _pump_messages() -> None:
+    """Process one round of the Windows message queue without blocking.
+
+    Only ever called when `_message_loop_running()` is True — DoEvents from any
+    other thread is unsafe. Isolated so tests can fake it.
+    """
+    import System.Windows.Forms as WinForms  # type: ignore[import-not-found]
+
+    WinForms.Application.DoEvents()
 
 
 def _browser(window: Any) -> Any:
-    """pywebview's EdgeChrome wrapper for this window, once it exists."""
+    """pywebview's EdgeChrome wrapper for this window, once it exists.
+
+    CoreWebView2 is null until EnsureCoreWebView2Async completes, and that
+    completion is delivered through the UI thread's message loop. A plain
+    time.sleep() loop called from that same thread — which pywebview's own
+    Shown/loaded events fire on synchronously — blocks the one thing the wait
+    is waiting for: measured live as the panel staying fine while the whole
+    예매창 went 응답 없음 for the full length of this wait. Pump instead of
+    sleeping outright when this is that thread; a background thread caller
+    still just sleeps, since the UI thread's loop runs independently of it.
+    """
     from webview.platforms import winforms  # type: ignore[import-not-found]
 
+    pumping = _message_loop_running()
     for _ in range(_WEBVIEW_WAIT_TRIES):
         form = winforms.BrowserView.instances.get(window.uid)
         browser = getattr(form, "browser", None) if form is not None else None
@@ -57,21 +104,55 @@ def _browser(window: Any) -> Any:
         # macOS side waits out for `.webview`.
         if control is not None and getattr(control, "CoreWebView2", None) is not None:
             return browser
+        if pumping:
+            _pump_messages()
         time.sleep(_WEBVIEW_WAIT_SECONDS)
     return None
 
 
 def _await_on_ui(browser: Any, start_task: Any, timeout: float = _CALL_TIMEOUT_SECONDS) -> Any:
-    """Run `start_task()` on the UI thread and wait for its Task to finish."""
-    Action, Func, Object, _String, Task = _clr()
+    """Run `start_task()`'s async WebView2 call and wait for it to finish.
+
+    Two paths, chosen by whether this is already the thread running WinForms'
+    message loop:
+
+    - A background thread (the common case — apply_state runs off the
+      watch_state poller): marshal in with Invoke and block this thread while
+      waiting; the UI thread's own loop, undisturbed, delivers the
+      syncContext continuation normally. Lifted from pywebview's own
+      evaluate_js, which this same shape works for precisely because it is
+      always called that way.
+    - The UI thread itself (install_document_start_script from Shown/loaded,
+      which pywebview fires synchronously on that thread, no marshaling
+      involved before we are ever called): Invoke would just run the delegate
+      inline here, and then blocking this thread on `done.acquire()` would be
+      blocking the one thread the syncContext continuation needs in order to
+      ever run — a real, bounded (this function's own timeout) but entirely
+      real hang, reported live as the whole app going 응답 없음 for its
+      length. So the continuation runs off-thread instead
+      (TaskScheduler.Default) and this thread pumps messages while it waits
+      rather than blocking them, covering the case where the antecedent
+      task's own completion also needs that pump to be delivered.
+    """
+    Action, Func, Object, _String, Task, TaskScheduler = _clr()
     done = Semaphore(0)
     box: dict[str, Any] = {}
 
+    def _record(task: Any) -> None:
+        box["result"] = task.Result
+        done.release()
+
+    if _message_loop_running():
+        start_task().ContinueWith(Action[Task[Object]](_record), TaskScheduler.Default)
+        deadline = time.monotonic() + timeout
+        while not done.acquire(timeout=0.01):
+            _pump_messages()
+            if time.monotonic() > deadline:
+                raise TimeoutError("WebView2 call did not complete")
+        return box.get("result")
+
     def _on_ui() -> Any:
-        return start_task().ContinueWith(
-            Action[Task[Object]](lambda task: (box.__setitem__("result", task.Result), done.release())),
-            browser.syncContextTaskScheduler,
-        )
+        return start_task().ContinueWith(Action[Task[Object]](_record), browser.syncContextTaskScheduler)
 
     browser.webview.Invoke(Func[Object](_on_ui))
     if not done.acquire(timeout=timeout):
