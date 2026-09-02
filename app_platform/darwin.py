@@ -24,6 +24,14 @@ def prepare_display() -> None:
     return None
 
 
+def disable_gpu_rendering() -> None:
+    """Nothing to do: this fixes a WebView2-specific GPU compositing failure.
+
+    WKWebView on macOS has no equivalent bug this stands in for.
+    """
+    return None
+
+
 def ensure_ready() -> None:
     """Raise with something actionable if this machine cannot run the app."""
     if platform.system() != "Darwin":

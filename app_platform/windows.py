@@ -29,6 +29,7 @@ Three things here differ from macOS in ways that bite if missed:
 from __future__ import annotations
 
 import contextlib
+import os
 import platform
 import time
 from threading import Semaphore
@@ -229,6 +230,30 @@ def _webview2_runtime_version() -> str:
         if version and str(version) != "0.0.0.0":
             return str(version)
     return ""
+
+
+def disable_gpu_rendering() -> None:
+    """Force WebView2 to render in software, before any window exists.
+
+    Reported live: the panel healthy, the process not crashing, nothing
+    hanging (the timeouts added for that would have caught it and written
+    crash.log — they did not), and the 예매 창 rendering as pure blank anyway.
+    That is the textbook signature of a Chromium GPU compositing failure
+    underneath a UI that otherwise works correctly — well documented on VMs
+    and remote sessions, and just as real on physical hardware with an
+    outdated or buggy Intel graphics driver, which is exactly what a laptop's
+    integrated GPU is.
+
+    pywebview exposes no setting for this — CoreWebView2CreationProperties is
+    built entirely inside its own edgechromium.py, with no hook for a caller to
+    add browser arguments. WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS is Microsoft's
+    own documented way around exactly that: the WebView2 loader reads it
+    directly from the process environment when it creates its environment, so
+    it works regardless of what the hosting library does or does not expose.
+    It has to be set before that environment is created — before
+    webview.create_window() — setting it after has no effect.
+    """
+    os.environ.setdefault("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--disable-gpu")
 
 
 def ensure_ready() -> None:

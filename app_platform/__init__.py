@@ -51,6 +51,7 @@ def user_data_dir() -> Path:
     return path
 
 prepare_display = backend.prepare_display
+disable_gpu_rendering = backend.disable_gpu_rendering
 ensure_ready = backend.ensure_ready
 lock_exclusive = backend.lock_exclusive
 unlock = backend.unlock
@@ -64,6 +65,7 @@ __all__ = [
     "NAME",
     "user_data_dir",
     "prepare_display",
+    "disable_gpu_rendering",
     "ensure_ready",
     "lock_exclusive",
     "unlock",

@@ -440,6 +440,11 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
 def main() -> None:
     stop_event = threading.Event()
 
+    # Must run before create_window — that is when the WebView2 environment
+    # itself gets created, and the flag this sets has no effect afterward. A
+    # no-op on macOS; see app_platform.disable_gpu_rendering.
+    app_platform.disable_gpu_rendering()
+
     # A target=_blank click would otherwise hand the booking flow to Safari,
     # where none of this exists. Everything stays in this one window.
     webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = False

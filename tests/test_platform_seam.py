@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import sys
 import threading
 import time
@@ -319,6 +320,53 @@ class SameThreadCallTests(unittest.TestCase):
             windows._script_ids.clear()
 
 
+class DisableGpuRenderingTests(unittest.TestCase):
+    """Reported live: panel healthy, no crash, no hang — the timeouts and the
+    thread-crash hook added for exactly those would have caught either — and
+    the 예매 창 still rendering as pure blank. That is the textbook signature
+    of a Chromium GPU compositing failure underneath a UI that otherwise works,
+    common on VMs and just as real on physical hardware with a buggy Intel
+    graphics driver.
+    """
+
+    def setUp(self) -> None:
+        self._env_before = dict(os.environ)
+        os.environ.pop("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", None)
+
+    def tearDown(self) -> None:
+        os.environ.clear()
+        os.environ.update(self._env_before)
+
+    def test_sets_the_flag_webview2_reads(self) -> None:
+        windows.disable_gpu_rendering()
+        self.assertEqual(os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"), "--disable-gpu")
+
+    def test_never_overwrites_a_value_something_else_already_set(self) -> None:
+        """A launcher or a future feature may set richer flags of its own —
+        this must add the workaround, never clobber an existing decision."""
+        os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = "--some-other-flag"
+        windows.disable_gpu_rendering()
+        self.assertEqual(os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"], "--some-other-flag")
+
+    def test_darwin_is_a_safe_no_op(self) -> None:
+        darwin.disable_gpu_rendering()  # must not raise, must not touch the environment
+        self.assertNotIn("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", os.environ)
+
+    def test_runs_before_create_window_not_after(self) -> None:
+        """WebView2 reads this when its environment is created — inside
+        create_window. Setting it any later in main() has no effect at all."""
+        source = (ROOT / "mac" / "browser_host.py").read_text(encoding="utf-8")
+        main_start = source.index("def main() -> None:")
+        next_def = source.find("\ndef ", main_start + 1)
+        body = source[main_start:] if next_def == -1 else source[main_start:next_def]
+        self.assertIn("disable_gpu_rendering()", body,
+                     "must actually be called from main(), not just exist")
+        at_call = body.index("disable_gpu_rendering()")
+        at_create = body.index("webview.create_window(")
+        self.assertLess(at_call, at_create,
+                        "must run before create_window — setting it after is silently useless")
+
+
 class Webview2RuntimeDetectionTests(unittest.TestCase):
     """Reported live: a healthy-looking 조작판 next to a blank 예매창.
 
@@ -421,7 +469,8 @@ class SeamContractTests(unittest.TestCase):
     def test_both_backends_expose_the_same_interface(self) -> None:
         for name in ("ensure_ready", "lock_exclusive", "unlock",
                      "install_document_start_script", "cookie_store",
-                     "dump_cookies", "restore_cookies", "timing_precision"):
+                     "dump_cookies", "restore_cookies", "timing_precision",
+                     "prepare_display", "disable_gpu_rendering"):
             self.assertTrue(hasattr(darwin, name), f"darwin is missing {name}")
             self.assertTrue(hasattr(windows, name), f"windows is missing {name}")
             self.assertTrue(hasattr(app_platform, name), f"the seam is missing {name}")
