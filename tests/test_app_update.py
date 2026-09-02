@@ -9,6 +9,7 @@ failure mode, and an unverified script must never look like a verified one.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -124,3 +125,39 @@ class UpdateTests(unittest.TestCase):
         self.cache.write_text("// known good\n", encoding="utf-8")
         self._check(manifest(), body="// tampered\n")
         self.assertEqual(self.cache.read_text(encoding="utf-8"), "// known good\n")
+
+
+class VersionTagTests(unittest.TestCase):
+    """The panel's window title, and the whole point of showing it at all.
+
+    Six point releases went out in one troubleshooting session as
+    identically-named zip files, sent back and forth by hand. "Still broken"
+    and "still running the version from before the fix" render identically
+    from outside the app — this is what removes that ambiguity, so it has to
+    actually reach the screen, not just exist as a string somewhere.
+    """
+
+    def setUp(self) -> None:
+        self._env_before = dict(os.environ)
+
+    def tearDown(self) -> None:
+        os.environ.clear()
+        os.environ.update(self._env_before)
+
+    def test_an_unstamped_checkout_reads_as_dev_not_as_a_confusing_zero(self) -> None:
+        os.environ.pop("PURECLICK_VERSION", None)
+        self.assertEqual(app_update.version_tag(), "(dev)")
+
+    def test_a_tagged_release_shows_its_number(self) -> None:
+        os.environ["PURECLICK_VERSION"] = "0.1.6"
+        self.assertEqual(app_update.version_tag(), "(v0.1.6)")
+
+    def test_a_branch_build_still_shows_something_specific(self) -> None:
+        os.environ["PURECLICK_VERSION"] = "0.0.0+abc1234"
+        self.assertEqual(app_update.version_tag(), "(v0.0.0+abc1234)")
+
+    def test_the_panel_actually_puts_this_in_its_title(self) -> None:
+        """A helper nobody calls is exactly as useful as not having one."""
+        source = (ROOT / "mac" / "pureclick.py").read_text(encoding="utf-8")
+        self.assertIn("app_update.version_tag()", source,
+                      "version_tag must reach the window title, not just exist")

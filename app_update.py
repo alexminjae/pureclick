@@ -75,6 +75,19 @@ def app_version() -> str:
     return _stamped("VERSION", "0.0.0")
 
 
+def version_tag() -> str:
+    """`(v1.2.3)`, ready to put on screen.
+
+    A build with no VERSION file — a source checkout — is `app_version() ==
+    "0.0.0"` exactly; anything else, tagged release or a bare-branch build
+    stamped `0.0.0+<sha>`, is shown as-is. The point is not the format so much
+    as that this is visible at all: "still broken" and "still on the version
+    from before the fix" are indistinguishable from the outside without it.
+    """
+    version = app_version()
+    return "(dev)" if version == "0.0.0" else f"(v{version})"
+
+
 MANIFEST_TIMEOUT = 6.0
 DOWNLOAD_TIMEOUT = 20.0
 MAX_AUTOPILOT_BYTES = 8 * 1024 * 1024

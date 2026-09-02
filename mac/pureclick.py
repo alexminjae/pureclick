@@ -144,7 +144,13 @@ class PureClickMacApp(tk.Tk):
         # means naming the WebView2 runtime with a download link rather than
         # letting pywebview fail later with nothing actionable.
         app_platform.ensure_ready()
-        self.title("NOL 스나이퍼 · 조작판")
+        # On screen, not just in a manifest check nobody sees: the Windows
+        # build went through six point releases in one troubleshooting
+        # session, sent back and forth as identically-named zip files, and
+        # there was no way to look at the running app and tell which one it
+        # actually was — "still blank" and "still on the old build" look
+        # identical from the outside. version_tag() below is exactly this.
+        self.title(f"NOL 스나이퍼 · 조작판 {app_update.version_tag()}")
         # The two windows are one app, so they are tiled rather than stacked.
         # Both used to open centred at their natural size and the 예매 창, being
         # the wider of the two, covered all but a narrow strip of this one.
