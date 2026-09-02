@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -57,7 +58,33 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
     payload = json.dumps(state, ensure_ascii=False, indent=2)
     temp = path.with_name(path.name + ".tmp")
     temp.write_text(payload, encoding="utf-8")
-    os.replace(temp, path)
+    _replace_atomic(temp, path)
+
+
+def _replace_atomic(temp: Path, path: Path) -> None:
+    """`os.replace`, retried against Windows' transient sharing violation.
+
+    Measured on the Windows CI runner: this raised `PermissionError: [WinError
+    5] Access is denied` under exactly the concurrent read/write load the atomic
+    replace exists to survive. `os.replace` is `MoveFileExW` on Windows, which
+    refuses to replace a file another handle currently has open without
+    `FILE_SHARE_DELETE` — and that is the sharing mode plain `open()`/
+    `read_text()` uses. Two processes read this file several times a second, so
+    a reader can be mid-open at the instant a writer replaces it. The failure is
+    transient — the reader's handle closes within microseconds — so a short
+    backoff resolves it. POSIX rename has no such restriction and never takes
+    this path; the loop is a no-op there on the first attempt.
+    """
+    delay = 0.001
+    for attempt in range(8):
+        try:
+            os.replace(temp, path)
+            return
+        except PermissionError:
+            if attempt == 7:
+                raise
+            time.sleep(delay)
+            delay *= 2
 
 
 def patch_state(

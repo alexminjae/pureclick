@@ -250,6 +250,33 @@ class SeamContractTests(unittest.TestCase):
         self.assertEqual(offenders, [], "platform-only imports belong in app_platform:\n  "
                                        + "\n  ".join(offenders))
 
+    # The regression that broke the Windows CI run on its first try:
+    # `browser_host.py` is full of 한글 and em dashes, and `.read_text()` with no
+    # `encoding=` decodes as cp1252 on Windows — a real Python default, not a
+    # test artifact — so it raised `UnicodeDecodeError` on the exact file a test
+    # needed to read. Every other `.read_text()`/`.write_text()` in the app
+    # already names `encoding="utf-8"`; this keeps it that way.
+    def test_no_read_or_write_text_omits_an_encoding(self) -> None:
+        scan_dirs = [ROOT / "mac", ROOT / "core", ROOT / "tests", ROOT / "app_platform",
+                    ROOT / "tools"]
+        paths = sorted(p for d in scan_dirs if d.is_dir() for p in d.glob("*.py"))
+        paths += sorted((ROOT).glob("*.py"))
+        offenders: list[str] = []
+        for path in paths:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if not (isinstance(node.func, ast.Attribute)
+                        and node.func.attr in ("read_text", "write_text")):
+                    continue
+                if any(kw.arg == "encoding" for kw in node.keywords):
+                    continue
+                offenders.append(f"{path.relative_to(ROOT)}:{node.lineno} .{node.func.attr}()")
+        self.assertEqual(offenders, [], "every text read/write needs encoding=\"utf-8\" — "
+                                       "Windows' default is cp1252, not UTF-8:\n  "
+                                       + "\n  ".join(offenders))
+
 
 class PlatformNoteTests(unittest.TestCase):
     """The self-check has to reach the screen, or it is not a self-check.
@@ -347,4 +374,70 @@ class AtomicStateTests(unittest.TestCase):
                     t.join(timeout=5)
 
             self.assertEqual(torn, [], "os.replace must make the swap atomic")
-            self.assertTrue(json.loads(path.read_text())["show_catalog"]["blocks"])
+            self.assertTrue(
+                json.loads(path.read_text(encoding="utf-8"))["show_catalog"]["blocks"]
+            )
+
+    def test_a_transient_windows_sharing_violation_is_retried(self) -> None:
+        """Measured on the Windows CI runner, not hypothetical.
+
+        os.replace is MoveFileExW there, which refuses to replace a file another
+        handle currently has open without FILE_SHARE_DELETE — the sharing mode
+        plain open()/read_text() uses. A reader can be mid-open at the exact
+        instant a writer replaces the state file, and PermissionError is exactly
+        what that produced. It resolves within microseconds once the reader's
+        handle closes, so a short backoff is correct; giving up on the first
+        failure is not.
+        """
+        import tempfile
+
+        import browser_bridge
+
+        calls = {"n": 0}
+        original_replace = browser_bridge.os.replace
+
+        def flaky_replace(src, dst):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise PermissionError(5, "Access is denied")
+            return original_replace(src, dst)
+
+        original_sleep = browser_bridge.time.sleep
+        browser_bridge.time.sleep = lambda _seconds: None  # the retry itself, not tested here
+        browser_bridge.os.replace = flaky_replace
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                temp = Path(tmp) / "state.json.tmp"
+                path = Path(tmp) / "state.json"
+                temp.write_text("{}", encoding="utf-8")
+                browser_bridge._replace_atomic(temp, path)
+                self.assertEqual(
+                    calls["n"], 3, "must retry past a transient failure, not raise on the first"
+                )
+                self.assertTrue(path.exists(), "the replace must still land once it succeeds")
+        finally:
+            browser_bridge.os.replace = original_replace
+            browser_bridge.time.sleep = original_sleep
+
+    def test_a_persistent_failure_still_raises(self) -> None:
+        """The retry must not swallow a real, permanent failure forever."""
+        import tempfile
+
+        import browser_bridge
+
+        original_replace = browser_bridge.os.replace
+        original_sleep = browser_bridge.time.sleep
+        browser_bridge.time.sleep = lambda _seconds: None
+        browser_bridge.os.replace = lambda src, dst: (_ for _ in ()).throw(
+            PermissionError(5, "Access is denied")
+        )
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                temp = Path(tmp) / "state.json.tmp"
+                path = Path(tmp) / "state.json"
+                temp.write_text("{}", encoding="utf-8")
+                with self.assertRaises(PermissionError):
+                    browser_bridge._replace_atomic(temp, path)
+        finally:
+            browser_bridge.os.replace = original_replace
+            browser_bridge.time.sleep = original_sleep

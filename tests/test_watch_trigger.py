@@ -134,7 +134,9 @@ class TriggerBridgeTest(unittest.TestCase):
         # watch it is supposed to be helping.
         from pathlib import Path
 
-        host = (Path(__file__).resolve().parent.parent / "mac" / "browser_host.py").read_text()
+        host = (Path(__file__).resolve().parent.parent / "mac" / "browser_host.py").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("setWatchTrigger", host)
         at_trigger = host.index("watch_trigger")
         at_command = host.index('command = state.get("command")')
