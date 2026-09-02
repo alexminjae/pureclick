@@ -3,7 +3,13 @@ __pycache__/
 .venv/
 build/
 dist/
+# *.spec generally means "PyInstaller's auto-generated boilerplate" — but
+# pureclick.spec is hand-written and does real work (bundles the WebView2
+# interop assemblies pyinstaller cannot find on its own). It stayed untracked
+# under the old blanket *.spec pattern until the Windows build failed with
+# "Spec file not found" because it had never actually been pushed.
 *.spec
+!pureclick.spec
 .DS_Store
 .pytest_cache/
 pureclick_fire_log.csv
