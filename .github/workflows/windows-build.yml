@@ -26,7 +26,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r mac/requirements.txt
-          pip install pyinstaller
+          pip install pyinstaller pytest
 
       # A build that ships a failing test suite is worse than no build: the whole
       # point of the exe is that whoever runs it cannot debug it.
