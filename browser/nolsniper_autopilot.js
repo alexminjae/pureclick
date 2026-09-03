@@ -364,6 +364,11 @@
     pageFreed: [],
     // What travelling to a seat actually costs, by kind of move.
     mapMoves: {},
+    // detect -> click -> cart -> 선택 완료, in ms, for the last few catches.
+    // Survives a run: two 취켓팅 sittings on the same show are the comparison
+    // that matters, and clearing it per run would throw that away.
+    catchTiming: null,
+    catchTimings: [],
     // The panel's whole-venue "did anything free?" verdict.
     watchTrigger: null,
     triggerActedAt: 0,
@@ -1395,6 +1400,7 @@
       return false;
     }
     hit.click();
+    noteCatchStage("confirm");
     traceCall("clickConfirmSelect", null, { ok: true, reason: "once" });
     return true;
   }
@@ -1444,6 +1450,7 @@
       seatState.confirmStarted = false;
       seatState.locked = false;
       seatState.lastExit = "advanceWithNoSeat";
+      finishCatchTiming("noSoftHold");
       updateOverlay("가선점 미확인 — [선택 완료]를 누르지 않습니다", "warn");
       return { awaitingPayment: false, noSeat: true };
     }
@@ -1462,16 +1469,20 @@
     if (!clickConfirmSelect()) {
       seatState.confirmStarted = false;
       seatState.lastExit = "awaitingManualConfirm";
+      finishCatchTiming("noConfirmButton");
       updateOverlay("선택 완료를 직접 눌러 주세요", "warn");
       return { awaitingPayment: false, awaitingManualConfirm: true };
     }
 
     const outcome = await waitForPageSelectOutcome({ since, timeoutMs: 5000 });
+    noteCatchStage("outcome");
     traceCall("confirmSelectOutcome", null, outcome);
     if (outcome.ok === false) {
       seatState.confirmStarted = false;
+      finishCatchTiming(`rejected:${outcome.via}`);
       return recoverFailedConfirm(seatState.lastSeat || "", outcome.via);
     }
+    finishCatchTiming(outcome.ok ? "reserved" : "unconfirmed");
 
     seatState.lastExit = "reservedUserContinues";
     updateOverlay(
@@ -2666,18 +2677,48 @@
   // as false and the switch never fired. That is the ordinary case: sit in one
   // 구역, watch a seat free in another, never reach it. Every rendered seat
   // already carries props.blockKey, so the answer is in the DOM.
-  function blockKeyForSeatId(seatInfoId) {
-    // The rendered seat does not always carry its block: measured on a live
-    // venue, all 273 drawn seats came back with blockKey undefined, which
-    // silently disabled every "which 구역 am I in" test. seatMeta knows, and we
-    // already hold it per block, so look the seat up there.
-    const wanted = String(seatInfoId);
-    for (const block of seatState.lastBlocks || []) {
-      for (const seat of block.seats || []) {
-        if (String(seat.seatInfoId) === wanted) return String(block.blockKey);
-      }
+  /**
+   * seatInfoId -> blockKey, built once per venue instead of scanned per seat.
+   *
+   * The rendered seat does not always carry its block: measured on a live
+   * venue, all 273 drawn seats came back with blockKey undefined, which
+   * silently disabled every "which 구역 am I in" test. seatMeta knows, and we
+   * already hold it per block, so look the seat up there.
+   *
+   * It used to look it up with a nested loop over every seat in the house, and
+   * every caller asks per *drawn* seat. On a 21,600-seat venue with the 구역
+   * open that is 1,800 x 21,600 string comparisons for one answer —
+   * currentOpenBlock() measured at 913ms, on the travel decision the watch
+   * makes after a seat frees. The index costs one pass over the same data and
+   * turns each lookup into a hash hit.
+   *
+   * Rebuilt whenever the seat data changes. lastBlocks is replaced wholesale by
+   * pollFreedSeats and grows a block at a time as batches land, so identity
+   * alone is not enough to notice — the seat total is checked too. Masks are
+   * mutated in place and do not affect this map.
+   */
+  const seatBlockIndex = { byId: new Map(), from: null, seats: -1 };
+
+  function seatBlockLookup() {
+    const blocks = seatState.lastBlocks || [];
+    let seats = 0;
+    for (const block of blocks) seats += (block.seats || []).length;
+    if (seatBlockIndex.from === blocks && seatBlockIndex.seats === seats) {
+      return seatBlockIndex.byId;
     }
-    return null;
+    const byId = new Map();
+    for (const block of blocks) {
+      const key = String(block.blockKey);
+      for (const seat of block.seats || []) byId.set(String(seat.seatInfoId), key);
+    }
+    seatBlockIndex.byId = byId;
+    seatBlockIndex.from = blocks;
+    seatBlockIndex.seats = seats;
+    return byId;
+  }
+
+  function blockKeyForSeatId(seatInfoId) {
+    return seatBlockLookup().get(String(seatInfoId)) || null;
   }
 
   function currentOpenBlock(readSeat = seatFromFiber) {
@@ -3418,6 +3459,85 @@
     return result;
   }
 
+  // ---- What a catch actually costs, segment by segment ---------------------
+  //
+  // 취켓팅 is lost in the gap between a seat becoming free and the hold landing
+  // on the page, and until now the only figure for that gap was one number
+  // (catchLatencyMs) covering detect->click alone. The rest — the site's own
+  // preselect round trip, the quiet gap we hold before 선택 완료, the confirm
+  // itself — was invisible, so every attempt to make it faster was a guess.
+  //
+  // Four stamps, all relative to the instant the availability bitmap flipped
+  // 0->1 for the seat we went for:
+  //
+  //   click    a real pointer press left our hands
+  //   cart     선택 좌석 rose — the soft hold is on the page, not just on a server
+  //   confirm  선택 완료 was pressed
+  //   outcome  the page answered it
+  //
+  // Kept as a short history rather than a single reading: one catch on a quiet
+  // show says nothing about an open, and a median over a sitting is what tells
+  // a real regression from a slow server.
+  const CATCH_TIMING_KEEP = 12;
+
+  function startCatchTiming(detectedAtPerf) {
+    seatState.catchTiming = {
+      detect: detectedAtPerf,
+      at: new Date().toISOString().slice(11, 23),
+      stages: {},
+    };
+  }
+
+  function noteCatchStage(stage, atPerf = performance.now()) {
+    const timing = seatState.catchTiming;
+    // First stamp wins. A retry within the same catch is a different seat's
+    // story, and overwriting would quietly turn a slow segment into a fast one.
+    if (!timing || timing.stages[stage] != null) return;
+    timing.stages[stage] = Math.round(atPerf - timing.detect);
+  }
+
+  function finishCatchTiming(outcome) {
+    const timing = seatState.catchTiming;
+    if (!timing) return;
+    seatState.catchTiming = null;
+    const stages = timing.stages;
+    // Nothing was clicked: no segment to report, and keeping it would poison
+    // the medians with attempts that never reached the map.
+    if (stages.click == null) return;
+    const record = {
+      at: timing.at,
+      outcome,
+      detectToClick: stages.click,
+      clickToCart: stages.cart != null ? stages.cart - stages.click : null,
+      cartToConfirm: stages.confirm != null && stages.cart != null ? stages.confirm - stages.cart : null,
+      confirmToOutcome:
+        stages.outcome != null && stages.confirm != null ? stages.outcome - stages.confirm : null,
+      totalMs: stages.outcome ?? stages.confirm ?? stages.cart ?? stages.click,
+    };
+    seatState.catchTimings.push(record);
+    while (seatState.catchTimings.length > CATCH_TIMING_KEEP) seatState.catchTimings.shift();
+    traceCall("catchTiming", null, record);
+  }
+
+  // Median per segment over the sitting, which is what a tuning decision needs.
+  function catchTimingSummary() {
+    const rows = seatState.catchTimings || [];
+    if (!rows.length) return null;
+    const median = (field) => {
+      const values = rows.map((row) => row[field]).filter((value) => value != null).sort((a, b) => a - b);
+      return values.length ? values[Math.floor(values.length / 2)] : null;
+    };
+    return {
+      samples: rows.length,
+      detectToClick: median("detectToClick"),
+      clickToCart: median("clickToCart"),
+      cartToConfirm: median("cartToConfirm"),
+      confirmToOutcome: median("confirmToOutcome"),
+      totalMs: median("totalMs"),
+      last: rows[rows.length - 1],
+    };
+  }
+
   // Which seat to travel to, when none is drawn yet. See the note at the call
   // site: reachability beats distance, because the travel costs more than the
   // difference between two seats usually does.
@@ -3514,9 +3634,33 @@
     return index;
   }
 
+  /**
+   * The circle for one seat.
+   *
+   * Answered from the observer-maintained index when there is one. The scan
+   * below is a linear walk of every mounted circle with a fiber read apiece,
+   * and it sits on the two paths that decide the race: the click itself, and
+   * checkDomAgreement, which asks once per watched seat on every tick and again
+   * inside the mutation callback. Measured on an 1,800-circle 구역 that is
+   * ~0.55ms per lookup against ~0.01ms from the index.
+   *
+   * The index is only consulted when the observer is actually attached and the
+   * caller reads seats the same way the index was built. Without an observer
+   * liveSeatIndex() rebuilds by scanning everything, which is strictly more
+   * work than a find that can stop early — so that case keeps the scan.
+   *
+   * An entry is verified before it is trusted: the map unmounts circles as the
+   * viewport moves, and a detached node swallows events silently.
+   */
   function seatNodeFor(seatInfoId, readSeat = seatFromFiber) {
     if (!seatInfoId) return null;
     const wanted = String(seatInfoId);
+    if (readSeat === seatFromFiber && seatIndex.observer && seatIndex.root) {
+      const indexed = seatIndex.byId.get(wanted);
+      if (indexed && indexed.isConnected !== false) return indexed;
+      // A miss is not proof of absence — a circle can predate the observer —
+      // so fall through to the scan rather than reporting the seat unreachable.
+    }
     for (const node of collectSeatCircles()) {
       const seat = readSeat(node);
       if (String(seat?.seatInfoId) === wanted) return node;
@@ -3556,7 +3700,7 @@
     });
   }
 
-  function clickSeatOnMap(seatInfoId) {
+  function clickSeatOnMap(seatInfoId, { countBefore = null } = {}) {
     const node = seatNodeFor(seatInfoId);
     if (!node) {
       traceClickAttempt(seatInfoId, null, "no-node");
@@ -3577,9 +3721,12 @@
       traceClickAttempt(seatInfoId, node, "node-disabled");
       return false;
     }
-    const before = selectedSeatCount();
+    // The cart is read by the caller, before the click, and handed in. Reading
+    // it here meant a body.innerText — a full-document layout over a venue's
+    // worth of circles — between deciding to click and clicking, for a number
+    // that goes nowhere but the trace.
     firePointerSelect(node);
-    traceClickAttempt(seatInfoId, node, "dispatched", { before });
+    traceClickAttempt(seatInfoId, node, "dispatched", { before: countBefore });
     return true;
   }
 
@@ -5787,10 +5934,12 @@
       // 선택 완료 and the site answers 좌석 선택 도중 오류가 발생했습니다. A real
       // pointer on a rendered circle is the only path that updates React state.
       const countBefore = selectedSeatCount();
+      const clickedAtPerf = performance.now();
       let clicked = 0;
       for (const seat of seats) {
-        if (clickSeatOnMap(seat.seatInfoId)) clicked += 1;
+        if (clickSeatOnMap(seat.seatInfoId, { countBefore })) clicked += 1;
       }
+      noteCatchStage("click", clickedAtPerf);
 
       if (clicked !== seats.length) {
         traceCall(
@@ -5820,6 +5969,7 @@
       }
 
       if (registered) {
+        noteCatchStage("cart");
         seatState.wonVia = "click";
         seats.forEach((seat) => seatState.heldSeatIds.add(String(seat.seatInfoId)));
         traceCall(
@@ -6152,9 +6302,14 @@
 
   function checkDomAgreement() {
     if (!domAgreeWatch.size) return;
+    // One index for the whole sweep. Per-seat lookups each rebuilt their own
+    // view of the map when no observer was attached, so watching five seats
+    // meant five full walks of the venue per tick — pure instrumentation cost
+    // on the loop whose latency is the thing being instrumented.
+    const rendered = liveSeatIndex();
     for (const [id, sawAt] of domAgreeWatch) {
-      const node = seatNodeFor(id);
-      if (!node) continue;
+      const node = rendered.get(String(id));
+      if (!node || node.isConnected === false) continue;
       if (seatNodeDisabled(node)) {
         // Still drawn as taken. Give up on measuring after a while so a seat
         // that never flips does not sit in the map for the whole run.
@@ -6358,6 +6513,11 @@
       if (seat.seatGroupId && config.allow_group_seats === false) continue;
       const candidate = toCandidate(seat, block.blockKey);
       if (!seatInWatchRect(candidate, rect)) continue;
+      // When this seat actually opened, as opposed to when the loop got round
+      // to looking at it. The page's own traffic is folded in through here too,
+      // from a network callback that can land a whole tick before the loop
+      // wakes — timing that gap from the loop would hide it entirely.
+      candidate.freedAtPerf = performance.now();
       noteBitmapSawFree(candidate.seatInfoId);
       freed.push(candidate);
     }
@@ -7216,8 +7376,15 @@
 
         if (freed.length) {
           // From "a seat opened" to "we clicked it" — the only latency that
-          // decides whether the seat is ours.
-          seatState.freedAtPerf = performance.now();
+          // decides whether the seat is ours. Taken from the seat itself, so
+          // the clock starts when the bitmap flipped rather than when this loop
+          // came round to reading it.
+          const detectedAt = freed.reduce(
+            (earliest, seat) => Math.min(earliest, seat.freedAtPerf ?? Infinity),
+            Infinity,
+          );
+          seatState.freedAtPerf = Number.isFinite(detectedAt) ? detectedAt : performance.now();
+          startCatchTiming(seatState.freedAtPerf);
           candidates = rankCandidates(freed, gradeOrder, blockKeys, pickerOptions(config, { isCatch: true }));
           seatState.catchLiveTries = 0;
         } else if (live.length && !liveExhausted) {
@@ -7420,6 +7587,7 @@
       try {
         const result = await selectSeats(initData, group, { autoAssign: viaAutoAssign });
         const blocked = result?.unselectableSeatInfoIds || [];
+        if (blocked.length) finishCatchTiming(result?.reason || "declined");
         if (blocked.length && result?.reason === "taken") {
           // Someone else got there first. That is not a failed attempt by this
           // macro and must not spend one: during a busy open conflicts are the

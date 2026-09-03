@@ -32,8 +32,9 @@ const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), 
 
 const BLOCKS = 12;
 const SEATS_PER_BLOCK = 1800;
-const DRAWN = 2200; // circles mounted for the open 구역
-const PRESELECT_RTT_MS = 220; // the site's own soft-hold round trip
+const DRAWN = SEATS_PER_BLOCK; // the whole open 구역 mounted, which is what 전체보기 achieves
+const PRESELECT_RTT_MS = 220;
+const DISAGREEING = [120, 500, 900, 1300, 1700]; // the site's own soft-hold round trip
 
 const noop = () => {};
 
@@ -57,9 +58,13 @@ function circleNode(seat, { disabled = false } = {}) {
   // Two fibers up, as the real map nests the circle inside its seat component.
   const inner = { memoizedProps: {}, return: null };
   const outer = {
-    memoizedProps: { seat, blockKey: undefined, isDisabled: disabled, isSelected: false },
+    memoizedProps: { seat, blockKey: undefined, isSelected: false },
     return: null,
   };
+  Object.defineProperty(outer.memoizedProps, "isDisabled", {
+    enumerable: true,
+    get: () => disabled || node.__benchDisabled === true,
+  });
   inner.return = outer;
   node[`__reactFiber$${(fiberSeq += 1).toString(36)}`] = inner;
   return node;
@@ -286,21 +291,29 @@ const candidates = [race.toCandidate ? race.toCandidate(drawnSeats[900], openBlo
 const pick = freedCandidate || candidates[0];
 bench("click · clickableAmong(1 candidate)", 50, () => race.clickableAmong([pick]));
 
-// 4. find the circle and press it
-if (race.clickSeatOnMap) {
-  bench("click · clickSeatOnMap (find node + dispatch)", 50, () => race.clickSeatOnMap(pick.seatInfoId));
-} else {
-  results.push({ name: "click · clickSeatOnMap — NOT EXPORTED", median: NaN, worst: NaN, runs: 0 });
-}
+// 4. find the circle and press it. Averaged over seats spread through the
+// mounted set, because a linear scan's cost depends on where the seat sits.
+const SPREAD = [50, 450, 900, 1350, DRAWN - 1];
+bench("click · clickSeatOnMap (find node + dispatch)", 20, () => {
+  for (const at of SPREAD) race.clickSeatOnMap(drawnSeats[at].seatInfoId);
+});
 
-// 5. the per-tick instrumentation that runs whether or not anything freed
+// 5. the per-tick instrumentation that runs whether or not anything freed.
+//
+// The seats it watches are ones the bitmap called free while the map still
+// draws them taken — that disagreement is the whole point of the measurement,
+// and it is also what keeps them in the watch list tick after tick.
 race.state.lastBlocks = venue;
-if (race.checkDomAgreement) {
-  race.noteBitmapSawFree?.(drawnSeats[900].seatInfoId);
-  bench("per tick · checkDomAgreement (1 watched seat)", 20, () => race.checkDomAgreement());
-} else {
-  results.push({ name: "per tick · checkDomAgreement — NOT EXPORTED", median: NaN, worst: NaN, runs: 0 });
-}
+for (const at of DISAGREEING) circles[at].__benchDisabled = true;
+bench("per tick · checkDomAgreement (5 seats the map still draws taken)", 20, () => {
+  for (const at of DISAGREEING) race.noteBitmapSawFree(drawnSeats[at].seatInfoId);
+  race.checkDomAgreement();
+});
+for (const at of DISAGREEING) circles[at].__benchDisabled = false;
+
+// 6. the count read every judgement about page state goes through, on the
+// watch's own thread, ten times a second.
+bench("per tick · selectedSeatCount()", 200, () => race.selectedSeatCount());
 
 // 6. the cart wait: how long after the site's own preselect lands we notice.
 async function cartWait() {

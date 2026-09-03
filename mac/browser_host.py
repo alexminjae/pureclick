@@ -347,6 +347,7 @@ def inject_autopilot(window: webview.Window) -> None:
 
 
 def watch_state(window: webview.Window, stop_event: threading.Event) -> None:
+    _stage("watch_state thread alive")
     last_mtime = 0.0
     while not stop_event.is_set():
         try:
@@ -511,6 +512,7 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
     nothing to distinguish that from a working app. Keeping the loop alive is
     right; being silent about it is not.
     """
+    _stage("poll_context thread alive")
     tick = 0
     started_at = time.time()
     saved_jar: list[dict[str, Any]] = []
@@ -520,6 +522,8 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
     last_reload = 0.0
     while not stop_event.is_set():
         tick += 1
+        if tick <= 3:
+            _stage(f"poll_context tick {tick}")
         try:
             # Carry the login forward. Logging in is the one manual step in the
             # whole flow, so it is worth a round trip every ten seconds to make
