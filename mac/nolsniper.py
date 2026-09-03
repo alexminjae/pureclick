@@ -192,6 +192,12 @@ class NolSniperApp(tk.Tk):
         soon = now + timedelta(minutes=1)
         self.test_date = tk.StringVar(value=soon.strftime("%Y-%m-%d"))
         self.test_result = tk.StringVar(value="")
+        # The moment the scheduler is actually aimed at, and whether it is a
+        # rehearsal. None means nothing is armed and the countdown falls back to
+        # 티켓 오픈.
+        self._armed_target_unix: float | None = None
+        self._armed_is_test = False
+        self._arming_test = False
         self.test_hour = tk.StringVar(value=soon.strftime("%H"))
         self.test_minute = tk.StringVar(value=soon.strftime("%M"))
         self.test_second = tk.StringVar(value=soon.strftime("%S"))
@@ -1058,6 +1064,11 @@ class NolSniperApp(tk.Tk):
         """
         try:
             self.browser.push(clear_arm=True)
+            # Nothing is aimed at anything any more, so the countdown goes back
+            # to 티켓 오픈 rather than counting down to a moment that will not
+            # fire.
+            self._armed_target_unix = None
+            self._armed_is_test = False
             self._flash(FAINT, "대기 취소됨", "오픈 대기를 해제했습니다.")
         except Exception as exc:  # noqa: BLE001 - surfaced in the panel
             self._flash(AMBER, "대기를 해제하지 못했습니다", str(exc))
@@ -2207,10 +2218,18 @@ class NolSniperApp(tk.Tk):
         )
 
     def _publish_arm(self, payload: ArmPayload) -> None:
+        # What the countdown should be counting to. The clock beside it used to
+        # read 티켓 오픈 only, so arming a rehearsal a minute out showed nothing
+        # at all — the one minute you most want a clock for. Counting to the
+        # moment that will actually fire is the only reading that cannot
+        # disagree with what the macro does.
+        self._armed_target_unix = float(payload.target_server_unix)
+        self._armed_is_test = bool(payload.dry_run) or self._arming_test
         self._push_seat_config(reload_autopilot=True)
         self.browser.push(arm=payload.to_mapping(), reload_autopilot=True, command="run_entry")
 
     def _arm_worker(self, *, dry_run: bool, target_text: str | None = None, test: bool = False) -> None:
+        self._arming_test = test or dry_run
         try:
             # Read the target first. Syncing takes ~2s, and spending it before
             # discovering the time field is empty is how a bad press looked like
@@ -2325,12 +2344,31 @@ class NolSniperApp(tk.Tk):
         self._tick_countdown()
 
     def _tick_countdown(self) -> None:
-        """Time left until the show opens, on the server's clock.
+        """Time left until the next thing that will actually fire.
 
         Uses the same corrected clock the queue entry fires against, so what the
         panel shows and what the macro acts on cannot disagree. The label hides
         itself rather than filling with words when there is nothing to count.
+
+        An armed moment wins over 티켓 오픈. This counted only to the show's own
+        open, so arming a rehearsal a minute out — the single most common thing
+        anyone does here — showed no clock at all, and the status line's
+        "테스트 예약 · 60.0초" was written once and never moved. You were left
+        watching a number that had stopped, for the one minute you most wanted a
+        clock for.
         """
+        armed = self._armed_target_unix
+        prefix = ""
+        if armed is not None:
+            remaining = float(armed) - self.clock.server_time_unix()
+            if remaining > 0:
+                prefix = "테스트 " if self._armed_is_test else ""
+                self._show_countdown(prefix + self._countdown_text(remaining))
+                return
+            # It has fired, or its moment has passed. Stop claiming it is next.
+            self._armed_target_unix = None
+            self._armed_is_test = False
+
         try:
             target = parse_target_time(
                 f"{self.target_date.get().strip()} {self.target_time.get().strip()}",
@@ -2345,13 +2383,17 @@ class NolSniperApp(tk.Tk):
         if remaining <= 0:
             self._show_countdown(None)
             return
+        self._show_countdown(self._countdown_text(remaining))
+
+    @staticmethod
+    def _countdown_text(remaining: float) -> str:
         # Days matter for a show weeks out: 3033:41:30 is unreadable as a
         # countdown, and the hours field is what people check in the last hour.
         days, rest = divmod(int(remaining), 86400)
         hours, rest = divmod(rest, 3600)
         minutes, seconds = divmod(rest, 60)
         clock = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-        self._show_countdown(f"{days}일 {clock}" if days else clock)
+        return f"{days}일 {clock}" if days else clock
 
     def _show_countdown(self, text: str | None) -> None:
         label = getattr(self, "countdown_label", None)

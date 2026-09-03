@@ -48,12 +48,18 @@ def _load(name: str):
         "KST": KST, "NolSniperError": NolSniperError,
     }
     ns["max"] = max
+    # _tick_countdown reaches for these when nothing is armed.
+    from core.clock import parse_target_time
+
+    ns["parse_target_time"] = parse_target_time
     exec(compile(module, "<panel>", "exec"), ns)  # noqa: S102 - our own source
     return ns[name]
 
 
 render = _load("_render_entry_result")
 bump = _load("_bump_test_time")
+tick = _load("_tick_countdown")
+text = _load("_countdown_text")
 
 
 class FakeVar:
@@ -121,6 +127,77 @@ class TheRehearsalTimeStaysReachable(unittest.TestCase):
         panel = self.Panel("")
         bump(panel)
         self.assertGreater(panel.written, datetime.now(KST).replace(tzinfo=None))
+
+
+class TheCountdownCountsToWhatWillActuallyFire(unittest.TestCase):
+    """A clock that stops is worse than no clock.
+
+    The countdown read 티켓 오픈 only. Arming a rehearsal a minute out — the
+    single most common thing anyone does here — showed no clock at all, and the
+    status line's "테스트 예약 · 60.0초" was written once and never moved. You
+    watched a stopped number for the one minute you most wanted a clock for.
+    """
+
+    class Panel:
+        def __init__(self, now: float, armed=None, is_test=False, open_at=("", "")) -> None:
+            self._now = now
+            self._armed_target_unix = armed
+            self._armed_is_test = is_test
+            self.shown = "unset"
+            self.target_date = FakeVar()
+            self.target_time = FakeVar()
+            self.target_date.set(open_at[0])
+            self.target_time.set(open_at[1])
+
+            panel = self
+
+            class Clock:
+                @staticmethod
+                def server_time_unix() -> float:
+                    return panel._now
+
+            self.clock = Clock()
+
+        _countdown_text = staticmethod(text)
+
+        def _show_countdown(self, value) -> None:
+            self.shown = value
+
+    NOW = 1_800_000_000.0
+
+    def test_an_armed_rehearsal_gets_a_live_clock(self) -> None:
+        panel = self.Panel(self.NOW, armed=self.NOW + 47, is_test=True)
+        tick(panel)
+        self.assertEqual(panel.shown, "테스트 00:00:47")
+
+    def test_a_real_arm_counts_without_the_test_label(self) -> None:
+        panel = self.Panel(self.NOW, armed=self.NOW + 3600, is_test=False)
+        tick(panel)
+        self.assertEqual(panel.shown, "01:00:00")
+
+    def test_the_armed_moment_wins_over_the_show_open(self) -> None:
+        # Rehearsing a minute out while the real open is weeks away must show
+        # the minute, not the weeks.
+        panel = self.Panel(self.NOW, armed=self.NOW + 60, is_test=True,
+                           open_at=("2099-01-01", "20:00:00"))
+        tick(panel)
+        self.assertEqual(panel.shown, "테스트 00:01:00")
+
+    def test_a_fired_arm_stops_claiming_to_be_next(self) -> None:
+        panel = self.Panel(self.NOW, armed=self.NOW - 1, is_test=True)
+        tick(panel)
+        self.assertIsNone(panel.shown, "a moment that has passed counts to nothing")
+        self.assertIsNone(panel._armed_target_unix, "and is forgotten, not re-checked forever")
+
+    def test_nothing_armed_and_no_open_time_hides_the_clock(self) -> None:
+        panel = self.Panel(self.NOW)
+        tick(panel)
+        self.assertIsNone(panel.shown)
+
+    def test_days_are_spelled_out_for_a_show_weeks_away(self) -> None:
+        # 3033:41:30 is unreadable as a countdown.
+        self.assertEqual(text(4 * 86400 + 3661), "4일 01:01:01")
+        self.assertEqual(text(3661), "01:01:01")
 
 
 class EntryTestReadout(unittest.TestCase):
