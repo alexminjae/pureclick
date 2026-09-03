@@ -644,17 +644,36 @@ const tests = {
     // have been standing all along, while anyone already there clicks in a
     // frame. Preparing at 감시 시작 is the difference.
     //
+    // And preparing once is not enough. Losing a race raises a modal, clearing
+    // the cart re-renders the map, entering a block normalises the framing, and
+    // the user can pan away mid-watch — after any of those the position is gone
+    // and every later catch pays the travel again. So it is also re-checked
+    // while the loop is idle, which is the one time the travel is free.
+    //
     // Structural: driving it needs a live map, but the ordering is the claim.
     const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     const loopAt = source.indexOf("while (seatState.attempts < maxAttempts");
-    const prepAt = source.indexOf("if (isCatch && !config.auto_assign) {");
+    const prepAt = source.indexOf("if (isCatch) await parkInWatchedBlock(");
     assert.ok(prepAt > 0, "the watch must prepare its 구역");
     assert.ok(prepAt < loopAt, "and do it before the loop, not on the first freed seat");
 
-    const prep = source.slice(prepAt, loopAt);
-    assert.match(prep, /enterBlockForSeats\(target\)/, "it opens the watched 구역");
-    assert.match(prep, /fitBlockToView\(\)/, "and mounts all of it");
-    assert.match(prep, /currentOpenBlock\(\)/, "and does nothing if already there");
+    const park = source.slice(
+      source.indexOf("async function parkInWatchedBlock("),
+      source.indexOf("function resetReentryState()"),
+    );
+    assert.match(park, /enterBlockForSeats\(target\)/, "it opens the watched 구역");
+    assert.match(park, /fitBlockToView\(\)/, "and mounts all of it");
+    assert.match(park, /currentOpenBlock\(\)/, "and does nothing if already there");
+    assert.match(park, /pointerHeldOnMap/, "and never fights the user for the viewport");
+
+    // The idle re-check lives on the quiet branch of the watch, after the
+    // overlay update and before the sleep — not on any path where a seat is in
+    // play, where the travel would be paid at exactly the wrong moment.
+    const idle = source.slice(loopAt);
+    const idleParkAt = idle.indexOf("await parkInWatchedBlock(config, scoped)");
+    assert.ok(idleParkAt > 0, "the watch must re-park itself while idle");
+    const sleepAt = idle.indexOf("await sleep(pollMs);", idleParkAt);
+    assert.ok(sleepAt > idleParkAt, "and do it in place of waiting, not after acting on a seat");
   },
 
   "the watch polls the 구역 you chose, not the whole venue": async () => {
@@ -3587,6 +3606,235 @@ const tests = {
       takenBefore.forEach((v, k) => state.takenUntil.set(k, v));
       state.unreachableSkips = 0;
     }
+  },
+
+  "the seat->구역 lookup survives the venue changing under it"() {
+    // The lookup is an index now, not a nested scan: currentOpenBlock() asks it
+    // once per drawn seat, and on a 21,600-seat venue with a 구역 open the scan
+    // was 1,800 x 21,600 string comparisons for one answer — measured at 913ms,
+    // on the travel decision the watch makes the instant a seat frees.
+    //
+    // An index is only safe if it notices the data changing. lastBlocks is
+    // replaced wholesale by the watch and grows a block at a time as batches
+    // land, so both shapes of change have to invalidate it.
+    const { race } = sandbox.window.NOLSniper;
+    const before = race.state.lastBlocks;
+    try {
+      race.state.lastBlocks = [
+        { blockKey: "022:001", seats: [{ seatInfoId: "S1" }] },
+      ];
+      assert.equal(race.blockKeyForSeatId("S1"), "022:001");
+      assert.equal(race.blockKeyForSeatId("S2"), null);
+
+      // Same array, one more block: the batch that arrived late.
+      race.state.lastBlocks.push({ blockKey: "022:002", seats: [{ seatInfoId: "S2" }] });
+      assert.equal(race.blockKeyForSeatId("S2"), "022:002",
+                   "a block that lands after the index was built must still be found");
+
+      // A different venue entirely.
+      race.state.lastBlocks = [{ blockKey: "099:009", seats: [{ seatInfoId: "S1" }] }];
+      assert.equal(race.blockKeyForSeatId("S1"), "099:009",
+                   "a replaced venue must not answer out of the old index");
+      assert.equal(race.blockKeyForSeatId("S2"), null,
+                   "and must not keep seats that no longer exist");
+    } finally {
+      race.state.lastBlocks = before;
+    }
+  },
+
+  "the click finds its circle without walking the venue"() {
+    // seatNodeFor sits on the click itself and on checkDomAgreement, which asks
+    // once per watched seat every tick. As a linear walk with a fiber read per
+    // circle that was ~0.55ms a lookup on an 1,800-circle 구역; from the
+    // observer-maintained index it is a hash hit. The index is only trusted
+    // when it is actually being maintained, and never for a detached node.
+    const { race } = sandbox.window.NOLSniper;
+    const scanned = [];
+    const node = (id, connected = true) => ({
+      tagName: "circle",
+      isConnected: connected,
+      style: {},
+      dataset: { seatInfoId: id, seatGrade: "1" },
+      getAttribute: (name) => (name === "r" ? "3" : ""),
+      querySelectorAll: () => [],
+    });
+    const live = node("S1");
+    const stale = node("S2", false);
+    const onMap = node("S2");
+    const originalQsa = sandbox.document.querySelectorAll;
+    const originalObserver = race.seatIndex.observer;
+    const originalRoot = race.seatIndex.root;
+    try {
+      sandbox.document.querySelectorAll = (sel) => {
+        if (!String(sel).includes("circle")) return [];
+        scanned.push(String(sel));
+        return [live, onMap];
+      };
+      race.seatIndex.observer = { disconnect() {} };
+      race.seatIndex.root = { tag: "root" };
+      race.seatIndex.byId.clear();
+      race.seatIndex.byId.set("S1", live);
+      race.seatIndex.byId.set("S2", stale);
+
+      scanned.length = 0;
+      assert.equal(race.seatNodeFor("S1"), live, "an indexed, mounted circle answers straight away");
+      assert.equal(scanned.length, 0, "and costs no walk of the venue");
+
+      // The map unmounts circles as the viewport moves. A detached node
+      // swallows events silently, so the index entry must not be trusted.
+      scanned.length = 0;
+      assert.equal(race.seatNodeFor("S2"), onMap, "a detached entry falls back to the map");
+      assert.ok(scanned.length > 0, "which does mean walking it");
+
+      // A miss is not proof of absence: a circle can predate the observer.
+      scanned.length = 0;
+      race.seatIndex.byId.delete("S1");
+      assert.equal(race.seatNodeFor("S1"), live, "an unindexed circle is still found");
+      assert.ok(scanned.length > 0);
+
+      // React recycles circles as the viewport moves. The observer re-files a
+      // reused node under its new seat, but the entry it was filed under
+      // before still points at it — and firing a real pointer press at that
+      // would select a seat nobody asked for. Worse than a slow click.
+      const recycled = node("S9");
+      race.seatIndex.byId.set("S1", recycled);
+      assert.equal(race.seatNodeFor("S1"), live,
+                   "an index entry that no longer holds that seat must not be clicked");
+    } finally {
+      sandbox.document.querySelectorAll = originalQsa;
+      race.seatIndex.observer = originalObserver;
+      race.seatIndex.root = originalRoot;
+      race.seatIndex.byId.clear();
+    }
+  },
+
+  async "the quiet gap before 선택 완료 is measured from the page's own answer"() {
+    // NOL's seat bundle refuses 선택 완료 while its own preselect is in flight
+    // and answers seat_requestPending, so a quiet gap after that response is
+    // load-bearing. What was not load-bearing was *when the gap started*: it
+    // began when this loop noticed the response, and nothing gets here until
+    // selectSeats has already watched 선택 좌석 rise — which itself happens
+    // after that response. So a page that had been idle for 90ms was held for
+    // a further 250.
+    const { race } = sandbox.window.NOLSniper;
+    const originalNet = sandbox.window.__nolsniperLastSeatNet;
+    const originalQsa = sandbox.document.querySelectorAll;
+    try {
+      // A cart with a seat in it, so the wait has something to confirm.
+      sandbox.document.querySelectorAll = (sel) =>
+        String(sel) === "div,section,aside,p,span"
+          ? [{ isConnected: true, innerText: "선택 좌석 1" }]
+          : [];
+      race.resetSeatCountScope();
+
+      // The page answered 200ms ago. The remaining gap is 50ms, not 250.
+      sandbox.window.__nolsniperLastSeatNet = {
+        preselectAt: Date.now() - 200,
+        preselectOk: true,
+      };
+      const started = Date.now();
+      const held = await race.waitForSoftHoldIdle({
+        since: Date.now() - 5000,
+        quietMs: 250,
+        timeoutMs: 2500,
+      });
+      const waited = Date.now() - started;
+      assert.equal(held, true, "a live soft hold must still be reported as one");
+      assert.ok(waited < 200,
+                `the gap already served must count toward it, waited ${waited}ms`);
+      assert.ok(race.state.lastSoftHoldWaitMs <= 60,
+                `and what is left of it is what gets slept, got ${race.state.lastSoftHoldWaitMs}`);
+
+      // The invariant itself is unchanged: an answer that has only just landed
+      // still buys the full gap.
+      sandbox.window.__nolsniperLastSeatNet = { preselectAt: Date.now(), preselectOk: true };
+      await race.waitForSoftHoldIdle({ since: Date.now() - 5000, quietMs: 120, timeoutMs: 2500 });
+      assert.ok(race.state.lastSoftHoldWaitMs >= 100,
+                `a fresh answer is still waited out, got ${race.state.lastSoftHoldWaitMs}`);
+    } finally {
+      sandbox.window.__nolsniperLastSeatNet = originalNet;
+      sandbox.document.querySelectorAll = originalQsa;
+      race.resetSeatCountScope();
+    }
+  },
+
+  "a catch is timed from the bitmap flip, not from when the loop looked"() {
+    // 취켓팅 is decided in the gap between a seat freeing and the hold landing
+    // on the page, and the only figure for that gap was one number covering
+    // detect->click. The rest — the site's preselect round trip, the quiet gap
+    // before 선택 완료, the confirm itself — was invisible, so every attempt to
+    // shorten it was a guess.
+    //
+    // The clock starts when the bitmap flipped. The page's own seatStatus
+    // traffic is folded in through a network callback that can land a whole
+    // tick before the loop wakes, and timing from the loop would hide exactly
+    // that gap.
+    const { race } = sandbox.window.NOLSniper;
+    const kept = race.state.catchTimings.slice();
+    try {
+      race.state.catchTimings.length = 0;
+      const detected = sandbox.performance.now();
+      race.startCatchTiming(detected);
+      race.noteCatchStage("click", detected + 40);
+      race.noteCatchStage("cart", detected + 320);
+      race.noteCatchStage("confirm", detected + 510);
+      race.noteCatchStage("outcome", detected + 900);
+      race.finishCatchTiming("reserved");
+
+      assert.equal(race.state.catchTimings.length, 1);
+      const row = race.state.catchTimings[0];
+      assert.equal(row.detectToClick, 40);
+      assert.equal(row.clickToCart, 280);
+      assert.equal(row.cartToConfirm, 190);
+      assert.equal(row.confirmToOutcome, 390);
+      assert.equal(row.totalMs, 900);
+      assert.equal(row.outcome, "reserved");
+      assert.match(race.catchTimingLine(), /감지→클릭 40/);
+
+      // A catch that lost the race never reaches 선택 완료. That is a real
+      // reading of a real attempt and must be kept — it is the one that says
+      // "we were fast and still lost", which is a different problem.
+      race.startCatchTiming(detected);
+      race.noteCatchStage("click", detected + 35);
+      race.finishCatchTiming("taken");
+      const lost = race.state.catchTimings[1];
+      assert.equal(lost.detectToClick, 35);
+      assert.equal(lost.clickToCart, null, "a segment that never happened is absent, not zero");
+      assert.equal(lost.outcome, "taken");
+
+      // An attempt that never reached the map has no segment to report, and
+      // keeping it would poison the medians with zeroes.
+      race.startCatchTiming(detected);
+      race.finishCatchTiming("noSoftHold");
+      assert.equal(race.state.catchTimings.length, 2, "an attempt with no click is not a sample");
+
+      const summary = race.catchTimingSummary();
+      assert.equal(summary.samples, 2);
+      assert.equal(summary.clickToCart, 280, "medians skip the segments that never ran");
+    } finally {
+      race.state.catchTimings.length = 0;
+      race.state.catchTimings.push(...kept);
+      race.state.catchTiming = null;
+    }
+  },
+
+  "the settle ramp covers the window a real preselect lands in"() {
+    // The old ramp went from a 16ms frame-check straight to an 80ms poll after
+    // six tries, so a cart that landed 280ms after the click — which is what a
+    // preselect round trip plus a re-render costs — sat unnoticed inside an
+    // 80ms gap. Measured as 65.6ms of pure notice lag on every catch.
+    const { race } = sandbox.window.NOLSniper;
+    let elapsed = 0;
+    let worstGap = 0;
+    for (let attempt = 0; attempt < race.SEAT_MAP_SETTLE_TRIES; attempt += 1) {
+      const step = race.settleDelayFor(attempt);
+      if (elapsed < 900) worstGap = Math.max(worstGap, step);
+      elapsed += step;
+    }
+    assert.ok(worstGap <= 24,
+              `the first ~900ms must be sampled at least every 24ms, got ${worstGap}ms`);
+    assert.ok(elapsed >= 1200 && elapsed <= 1900,
+              `the ~1.5s ceiling must survive the finer ramp, got ${elapsed}ms`);
   },
 
   "the click-confirm ceiling survives the faster first look"() {

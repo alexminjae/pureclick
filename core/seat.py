@@ -954,6 +954,14 @@ def live_state(
                 " 좌석을 취소했다면 [감시 시작]을 다시 누르세요 — "
                 "잡은 기록을 지우고 이어서 감시합니다."
             )
+        # What that catch cost, on the one line that is safe to put numbers on.
+        # The band deliberately carries no counters — 시도/구역/빈자리 all move on
+        # every 500ms repaint and churned it unreadably — but these four do not
+        # move: they are written once when a seat is caught and stand still
+        # afterwards, which is exactly when you want to read them.
+        spent = catch_timing_line(seat)
+        if spent:
+            why += f" ({spent})"
         return TONE_GREEN, f"좌석 잡음 · {seat.get('lastSeat') or ''}".strip(" ·"), why
 
     # 6. Running. The head used to be sliced out of `message`, and an empty one
@@ -976,6 +984,40 @@ def live_state(
         return TONE_AMBER, "중단됨", str(seat["lastError"])
 
     return TONE_FAINT, f"대기 중{tries}", ""
+
+
+def catch_timing_line(seat: dict[str, Any] | None) -> str:
+    """How long the last catch took, segment by segment.
+
+    취켓팅 is decided in the gap between a seat freeing and the hold landing on
+    the page, and the only figure the panel ever had for that gap was silence.
+    Four numbers, in the order they happen:
+
+        감지→클릭      the bitmap flipped 0->1, and we pressed the circle
+        →선택좌석      the page's own soft hold landed in 선택 좌석
+        →선택완료      the quiet gap we hold before pressing 선택 완료
+
+    The middle one is mostly the site's round trip and is not ours to shorten;
+    the first and third are entirely ours, and are what a regression shows up
+    in. Empty when nothing has been caught, so it never renders as dashes.
+    """
+    seat = seat or {}
+    line = str(seat.get("catchTimingLine") or "").strip()
+    if line:
+        return line
+    timing = seat.get("catchTiming")
+    if not isinstance(timing, dict):
+        return ""
+    parts = [
+        (label, timing.get(key))
+        for label, key in (
+            ("감지→클릭", "detectToClick"),
+            ("→선택좌석", "clickToCart"),
+            ("→선택완료", "cartToConfirm"),
+        )
+    ]
+    shown = [f"{label} {int(value)}" for label, value in parts if isinstance(value, (int, float))]
+    return f"{' · '.join(shown)} ms" if shown else ""
 
 
 def watch_vitals(seat: dict[str, Any] | None) -> str:

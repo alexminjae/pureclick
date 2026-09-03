@@ -35,6 +35,7 @@ from core.seat import (  # noqa: E402
     TONE_FAINT,
     TONE_GREEN,
     live_state,
+    catch_timing_line,
     watch_vitals,
 )
 
@@ -224,6 +225,52 @@ class EmptyMessages(unittest.TestCase):
     def test_a_halt_with_no_attempts_does_not_claim_zero_tries(self) -> None:
         _, headline, _ = live_state({"haltedByUser": True}, LIVE, now=NOW)
         self.assertEqual(headline, "멈춤")
+
+
+class WhatTheCatchCost(unittest.TestCase):
+    """The four segments 취켓팅 is decided in, on the one line safe for numbers.
+
+    The band carries no counters on purpose — 시도/구역/빈자리 all move on every
+    500ms repaint and churned it unreadably. These do not move: they are
+    written once when a seat is caught and stand still afterwards.
+    """
+
+    def test_it_reads_the_line_the_page_already_formatted(self) -> None:
+        self.assertEqual(
+            catch_timing_line({"catchTimingLine": "감지→클릭 41 · →선택좌석 284 ms"}),
+            "감지→클릭 41 · →선택좌석 284 ms",
+        )
+
+    def test_it_can_build_the_line_from_the_medians(self) -> None:
+        line = catch_timing_line(
+            {"catchTiming": {"detectToClick": 41, "clickToCart": 284, "cartToConfirm": 190}}
+        )
+        self.assertEqual(line, "감지→클릭 41 · →선택좌석 284 · →선택완료 190 ms")
+
+    def test_a_segment_that_never_happened_is_left_out_not_dashed(self) -> None:
+        # A catch that lost the race at the click never reaches 선택 완료. That
+        # is a real reading of a real attempt, not a broken one.
+        line = catch_timing_line({"catchTiming": {"detectToClick": 38, "clickToCart": None}})
+        self.assertEqual(line, "감지→클릭 38 ms")
+
+    def test_it_costs_nothing_before_a_seat_has_been_caught(self) -> None:
+        self.assertEqual(catch_timing_line({}), "")
+        self.assertEqual(catch_timing_line(None), "")
+        self.assertEqual(catch_timing_line({"catchTiming": None}), "")
+
+    def test_a_held_seat_says_what_it_cost(self) -> None:
+        _, headline, why = live_state(
+            {
+                "locked": True,
+                "pageSelected": 1,
+                "lastSeat": "[R석] 3열 12",
+                "catchTimingLine": "감지→클릭 41 · →선택좌석 284 · →선택완료 190 ms",
+            },
+            LIVE,
+            now=NOW,
+        )
+        self.assertIn("좌석 잡음", headline)
+        self.assertIn("감지→클릭 41", why)
 
 
 class Vitals(unittest.TestCase):

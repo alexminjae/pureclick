@@ -377,6 +377,30 @@ const quiet = confirmRow.median;
 
 // ---- report ---------------------------------------------------------------
 
+// Machine-readable, so the ceilings can be asserted instead of eyeballed. The
+// segments this guards are the ones that were measured at 925ms and 65ms; a
+// regression in them is silent otherwise, because everything still works — it
+// just loses.
+if (process.argv.includes("--json")) {
+  const keyed = {};
+  for (const row of results) {
+    const key = row.name.includes("currentOpenBlock")
+      ? "currentOpenBlockMs"
+      : row.name.includes("clickSeatOnMap")
+        ? "clickSeatOnMapMs"
+        : row.name.includes("checkDomAgreement")
+          ? "checkDomAgreementMs"
+          : row.name.startsWith("cart")
+            ? "cartNoticeLagMs"
+            : row.name.startsWith("confirm")
+              ? "quietGapMs"
+              : null;
+    if (key) keyed[key] = row.median;
+  }
+  console.log(JSON.stringify(keyed));
+  process.exit(0);
+}
+
 const pad = (s, n) => String(s).padEnd(n);
 const num = (v) => (Number.isFinite(v) ? v.toFixed(1).padStart(8) : "       —");
 console.log(`\nvenue: ${BLOCKS} blocks x ${SEATS_PER_BLOCK} seats = ${BLOCKS * SEATS_PER_BLOCK}, ${DRAWN} circles drawn`);

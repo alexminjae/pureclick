@@ -369,6 +369,11 @@
     // that matters, and clearing it per run would throw that away.
     catchTiming: null,
     catchTimings: [],
+    // The 구역 the watch is standing in, and when that was last verified.
+    parkedBlock: "",
+    parkedCheckedAt: 0,
+    parkFailures: 0,
+    reparks: 0,
     // The panel's whole-venue "did anything free?" verdict.
     watchTrigger: null,
     triggerActedAt: 0,
@@ -1497,8 +1502,10 @@
     finishCatchTiming(outcome.ok ? "reserved" : "unconfirmed");
 
     seatState.lastExit = "reservedUserContinues";
+    const spent = catchTimingLine();
     updateOverlay(
-      `예약 요청 ${seatState.lastSeat || ""}<br>환불 안내부터는 직접 · ${AUTOPILOT_BUILD}`,
+      `예약 요청 ${seatState.lastSeat || ""}<br>환불 안내부터는 직접 · ${AUTOPILOT_BUILD}` +
+        (spent ? `<br>${spent}` : ""),
       outcome.ok ? "ok" : "warn",
     );
     return { awaitingPayment: false, reserved: true, userContinues: true };
@@ -2156,6 +2163,96 @@
    */
   const REENTRY_SPACING_MS = 3000;
   const REENTRY_LIMIT = 40;
+
+  // ---- Standing in the watched 구역 ----------------------------------------
+  //
+  // Being in the block with its seats mounted *before* one frees is the whole
+  // difference between clicking in a frame and clicking in a second. Travel is
+  // the largest cost in the loop — measured through noteMapMove: leaving a
+  // block, opening another and fitting it runs to the better part of a second —
+  // and every millisecond of it is paid after detection, when it is the one
+  // thing that cannot be afforded.
+  //
+  // This used to run once, at 감시 시작. But the view does not stay put: losing
+  // a race raises a modal, dismissing it and clearing the cart re-render the
+  // map, enterBlockForSeats normalises the framing with 전체보기 mid-run, and
+  // the user may pan away while the watch is running. From the first such
+  // event onwards every catch paid the travel again — the preparation was real
+  // but it did not last, which is indistinguishable from not having it.
+  //
+  // So the position is re-checked while the watch is idle, which is the one
+  // time it is free: nothing is in play, and the alternative is sleeping. It is
+  // never checked while a seat is being chased, never while the user has the
+  // map under their finger, and never more often than PARK_RECHECK_MS.
+  const PARK_RECHECK_MS = 4000;
+
+  async function parkInWatchedBlock(config, watchKeys, { force = false } = {}) {
+    // auto_assign has no circles to click and asks the server to allocate, so
+    // there is no viewport for it to be standing in.
+    if (config.auto_assign) return null;
+    const now = Date.now();
+    // A venue we cannot open is not going to become openable by being asked
+    // every four seconds, and each attempt costs three click hypotheses at
+    // ~900ms apiece — spent not polling. Back off, but never give up: the
+    // failure is usually a modal or a framing that clears on its own.
+    const failures = seatState.parkFailures || 0;
+    const wait = PARK_RECHECK_MS * Math.min(2 ** failures, 8);
+    if (!force && now - (seatState.parkedCheckedAt || 0) < wait) return null;
+    seatState.parkedCheckedAt = now;
+    // Fighting the user for the viewport is worse than waiting a moment.
+    watchMapPointer();
+    if (pointerHeldOnMap) return { ok: false, via: "user-dragging" };
+    // Nothing on the map moves through a modal backdrop, and clicking blindly
+    // into one is how a "block entry" silently answers the dialog instead.
+    if (blockingOverlayNodes().length) return { ok: false, via: "modal" };
+    try {
+      const rect = normalizeWatchRect(config.watch_rect);
+      const watchedKeys = rect
+        ? blocksInWatchRect(seatState.lastBlocks || [], rect) || watchKeys
+        : watchKeys;
+      const openNow = currentOpenBlock();
+      const target = blockToStandIn(watchedKeys, openNow);
+      if (!target) return { ok: false, via: "no-target" };
+      const key = String(target.blockKey);
+
+      if (openNow === key) {
+        seatState.parkFailures = 0;
+        // Already in the right 구역. Fitting it mounts the rest of its seats,
+        // but 전체보기 is a real map move: doing it every few seconds would
+        // yank the view out from under anyone reading it. Once per arrival.
+        if (seatState.parkedBlock === key && !force) return { ok: true, via: "already" };
+        seatState.parkedBlock = key;
+        await noteMapMove("fitBlock", key, () => fitBlockToView());
+        return { ok: true, via: "fit" };
+      }
+
+      updateOverlay(`감시할 구역 ${target.selfDefineBlock || key} 여는 중…`, "info");
+      // Through noteMapMove, so the panel reports what this actually costs.
+      // These were the one set of map moves not being measured, and they are
+      // the ones you wait on.
+      if (openNow) await noteMapMove("leaveBlock", openNow, () => leaveBlockToVenue());
+      const entered = await noteMapMove("enterBlock", key, () => enterBlockForSeats(target));
+      if (!entered.ok) {
+        // Not parked. Say so, so the next idle tick tries again rather than
+        // believing it is standing somewhere it is not.
+        seatState.parkedBlock = "";
+        seatState.parkFailures = failures + 1;
+        return { ok: false, via: "enter-failed" };
+      }
+      await noteMapMove("fitBlock", key, () => fitBlockToView());
+      seatState.parkedBlock = key;
+      seatState.parkFailures = 0;
+      if (!force) seatState.reparks = (seatState.reparks || 0) + 1;
+      return { ok: true, via: "entered" };
+    } catch (error) {
+      // Standing in the right place is an optimisation; the run still works
+      // without it, and a throw here must not end the watch.
+      seatState.parkedBlock = "";
+      seatState.parkFailures = failures + 1;
+      traceCall("park", null, { error: String(error).slice(0, 160) });
+      return { ok: false, via: "error" };
+    }
+  }
 
   function resetReentryState() {
     armState.reentryInFlight = false;
@@ -3531,6 +3628,25 @@
     traceCall("catchTiming", null, record);
   }
 
+  /**
+   * The last catch, in the four numbers that decide it, for the 예매 창 overlay.
+   *
+   * On the map rather than only in the status file, because this is the figure
+   * you want the moment a catch lands — and because a segment that suddenly
+   * doubles on one show is how a slow server or a lost parking spot announces
+   * itself. Empty until a catch has actually completed a segment, so it never
+   * shows a row of dashes.
+   */
+  function catchTimingLine() {
+    const timing = seatState.catchTimings[seatState.catchTimings.length - 1];
+    if (!timing) return "";
+    const parts = [];
+    if (timing.detectToClick != null) parts.push(`감지→클릭 ${timing.detectToClick}`);
+    if (timing.clickToCart != null) parts.push(`→선택좌석 ${timing.clickToCart}`);
+    if (timing.cartToConfirm != null) parts.push(`→선택완료 ${timing.cartToConfirm}`);
+    return parts.length ? `${parts.join(" · ")} ms` : "";
+  }
+
   // Median per segment over the sitting, which is what a tuning decision needs.
   function catchTimingSummary() {
     const rows = seatState.catchTimings || [];
@@ -3669,7 +3785,20 @@
     const wanted = String(seatInfoId);
     if (readSeat === seatFromFiber && seatIndex.observer && seatIndex.root) {
       const indexed = seatIndex.byId.get(wanted);
-      if (indexed && indexed.isConnected !== false) return indexed;
+      // Verified, not merely looked up. React recycles circles as the viewport
+      // moves: the observer re-files a reused node under its new seat, but the
+      // entry it was filed under before still points at it. Trusting that
+      // entry would fire a real pointer press at whatever seat the circle is
+      // showing *now* — a click on a seat nobody asked for, which is worse
+      // than a slow one. One fiber read is what makes the lookup safe, and it
+      // is still O(1) against a walk of every circle in the 구역.
+      if (
+        indexed &&
+        indexed.isConnected !== false &&
+        String(seatFromFiber(indexed)?.seatInfoId) === wanted
+      ) {
+        return indexed;
+      }
       // A miss is not proof of absence — a circle can predate the observer —
       // so fall through to the scan rather than reporting the seat unreachable.
     }
@@ -5787,12 +5916,12 @@
   //
   // A 24ms middle band covers the window a real preselect actually lands in.
   // The 80ms tail is kept for the pathological case, and the whole budget stays
-  // inside the ~1.5s ceiling the confirm path is built around.
+  // inside the ceiling the confirm path is built around (~1.8s).
   const SEAT_MAP_SETTLE_MS = 16;
   const SEAT_MAP_SETTLE_FAST_TRIES = 8; // ~128ms of frame-rate looking
   const SEAT_MAP_SETTLE_MID_MS = 24;
-  const SEAT_MAP_SETTLE_MID_TRIES = 32; // through ~704ms, where preselects land
-  const SEAT_MAP_SETTLE_TRIES = 44;
+  const SEAT_MAP_SETTLE_MID_TRIES = 44; // through ~992ms, where preselects land
+  const SEAT_MAP_SETTLE_TRIES = 54;
   const SEAT_MAP_SETTLE_SLOW_MS = 80;
 
   // React settles in about a frame, so the first look used to be ~84ms later
@@ -5962,12 +6091,15 @@
       // 선택 완료 and the site answers 좌석 선택 도중 오류가 발생했습니다. A real
       // pointer on a rendered circle is the only path that updates React state.
       const countBefore = selectedSeatCount();
-      const clickedAtPerf = performance.now();
       let clicked = 0;
       for (const seat of seats) {
-        if (clickSeatOnMap(seat.seatInfoId, { countBefore })) clicked += 1;
+        if (!clickSeatOnMap(seat.seatInfoId, { countBefore })) continue;
+        // The first press is the one the clock stops on. Stamping before the
+        // loop would have timed an attempt that found no circle to click at
+        // all as though it had pressed one.
+        if (!clicked) noteCatchStage("click");
+        clicked += 1;
       }
-      noteCatchStage("click", clickedAtPerf);
 
       if (clicked !== seats.length) {
         traceCall(
@@ -6737,6 +6869,14 @@
         lastFreedVia: seatState.lastFreedVia || "",
         watchedBlocks: seatState.catchWatchedBlocks || 0,
         catchLatencyMs: seatState.lastCatchLatencyMs || 0,
+        // detect -> click -> cart -> 선택 완료, the four segments the race is
+        // decided in, as medians over this sitting.
+        catchTiming: catchTimingSummary(),
+        catchTimingLine: catchTimingLine(),
+        softHoldWaitMs: seatState.lastSoftHoldWaitMs ?? null,
+        // Where the watch is standing, and how often it had to go back.
+        parkedBlock: seatState.parkedBlock || "",
+        reparks: seatState.reparks || 0,
         domAgreedMs: seatState.lastDomAgreedMs || 0,
         domAgreedWorstMs: seatState.domAgreedWorstMs || 0,
         domAgreedSamples: seatState.domAgreedSamples || 0,
@@ -7037,6 +7177,12 @@
     seatState.pageStatusFreed = 0;
     seatState.observedTickMs = 0;
     seatState.mapMoves = {};
+    // Where we stand is a fact about the page, not about the run, but a fresh
+    // run must verify it rather than inherit a claim from the last one.
+    seatState.parkedBlock = "";
+    seatState.parkedCheckedAt = 0;
+    seatState.parkFailures = 0;
+    seatState.reparks = 0;
     seatState.triggerActedAt = 0;
     seatState.triggerBursts = 0;
     seatState.domScans = 0;
@@ -7491,6 +7637,10 @@
               );
               if (entered.ok) {
                 await noteMapMove("fitBlock", block.blockKey, () => fitBlockToView());
+                // Chasing a seat moved us; record it, or the next idle check
+                // fits a block it is already standing in.
+                seatState.parkedBlock = String(block.blockKey);
+                seatState.parkedCheckedAt = Date.now();
                 clickable = clickableAmong(candidates);
               }
             }
@@ -8000,6 +8150,10 @@
         pageRegisteredSelection,
         waitForSoftHoldIdle,
         catchTimingSummary,
+        catchTimingLine,
+        startCatchTiming,
+        noteCatchStage,
+        finishCatchTiming,
         settleDelayFor,
         settleBudgetMs,
         SEAT_MAP_SETTLE_MS,
@@ -8061,6 +8215,7 @@
         ensureSeatRendered,
         applyBlockMask,
         clickableAmong,
+        parkInWatchedBlock,
         clickSeatOnMap,
         seatNodeFor,
         checkDomAgreement,
