@@ -1282,7 +1282,19 @@
       if ((net.preselectAt || 0) >= since) {
         if (net.preselectOk === false) return false;
         sawPreselect = true;
-        await sleep(quietMs);
+        // The gap is measured from the page's answer, not from the moment we
+        // noticed it. Nothing gets here until selectSeats has already watched
+        // 선택 좌석 rise, and the cart only rises *after* that answer — so
+        // sleeping a further full quietMs held 선택 완료 back for time that had
+        // already elapsed. Measured against a 220ms preselect that was 250ms
+        // held for a page that had been idle for ~60 of them.
+        //
+        // The invariant is unchanged and is the load-bearing part: 선택 완료 is
+        // never pressed less than quietMs after the preselect response, because
+        // NOL's own bundle refuses it while its in-flight flag is still set and
+        // answers seat_requestPending.
+        seatState.lastSoftHoldWaitMs = Math.max(0, quietMs - (Date.now() - net.preselectAt));
+        await sleep(seatState.lastSoftHoldWaitMs);
         if (!pageHasSelectedSeats()) return false;
         return true;
       }
@@ -5764,9 +5776,23 @@
   // The page has to make its own round trip and re-render before 선택 좌석 fills
   // in. Roughly 1.5s of headroom: falling through now means "the page declined
   // this seat", so being impatient would discard seats that were about to work.
+  // How often to look for 선택 좌석 to rise after a click, and for how long.
+  //
+  // The shape matters more than the ceiling. The site's own preselect round
+  // trip is a few hundred milliseconds, and the old ramp went straight from a
+  // 16ms frame-check to an 80ms poll after six tries — so the cart almost
+  // always landed inside an 80ms gap and sat there unnoticed. Measured against
+  // a simulated 220ms preselect: 44.7ms of pure notice lag, every catch,
+  // between the hold existing and this loop acting on it.
+  //
+  // A 24ms middle band covers the window a real preselect actually lands in.
+  // The 80ms tail is kept for the pathological case, and the whole budget stays
+  // inside the ~1.5s ceiling the confirm path is built around.
   const SEAT_MAP_SETTLE_MS = 16;
-  const SEAT_MAP_SETTLE_TRIES = 24;
-  const SEAT_MAP_SETTLE_FAST_TRIES = 6;
+  const SEAT_MAP_SETTLE_FAST_TRIES = 8; // ~128ms of frame-rate looking
+  const SEAT_MAP_SETTLE_MID_MS = 24;
+  const SEAT_MAP_SETTLE_MID_TRIES = 32; // through ~704ms, where preselects land
+  const SEAT_MAP_SETTLE_TRIES = 44;
   const SEAT_MAP_SETTLE_SLOW_MS = 80;
 
   // React settles in about a frame, so the first look used to be ~84ms later
@@ -5776,7 +5802,9 @@
   // network, not on a render, and polling it hard only costs layouts. The
   // ceiling stays about the same 1.5s.
   function settleDelayFor(attempt) {
-    return attempt < SEAT_MAP_SETTLE_FAST_TRIES ? SEAT_MAP_SETTLE_MS : SEAT_MAP_SETTLE_SLOW_MS;
+    if (attempt < SEAT_MAP_SETTLE_FAST_TRIES) return SEAT_MAP_SETTLE_MS;
+    if (attempt < SEAT_MAP_SETTLE_MID_TRIES) return SEAT_MAP_SETTLE_MID_MS;
+    return SEAT_MAP_SETTLE_SLOW_MS;
   }
 
   function settleBudgetMs() {
@@ -7212,41 +7240,7 @@
     // further poll tick before it can even try — the better part of a second
     // spent arriving somewhere it could have been standing all along. Anyone
     // already in that block clicks in a frame.
-    //
-    // Done once, at the moment 감시 시작 is pressed, which is a deliberate
-    // action rather than the macro moving the map under you while you browse.
-    if (isCatch && !config.auto_assign) {
-      try {
-        const rect = normalizeWatchRect(config.watch_rect);
-        const watchedKeys = rect
-          ? blocksInWatchRect(seatState.lastBlocks || [], rect) || statusBlockKeys
-          : statusBlockKeys;
-        const openNow = currentOpenBlock();
-        const target = blockToStandIn(watchedKeys, openNow);
-        if (target && openNow !== String(target.blockKey)) {
-          updateOverlay(
-            `감시할 구역 ${target.selfDefineBlock || target.blockKey} 여는 중…`,
-            "info",
-          );
-          // Through noteMapMove, so the panel reports what this actually
-          // costs. These were the one set of map moves not being measured, and
-          // they are the ones you wait on.
-          if (openNow) await noteMapMove("leaveBlock", openNow, () => leaveBlockToVenue());
-          const entered = await noteMapMove("enterBlock", target.blockKey, () =>
-            enterBlockForSeats(target),
-          );
-          if (entered.ok) {
-            await noteMapMove("fitBlock", target.blockKey, () => fitBlockToView());
-          }
-        } else if (target) {
-          // Already in the right 구역 — make sure all of it is mounted.
-          await noteMapMove("fitBlock", target.blockKey, () => fitBlockToView());
-        }
-      } catch (error) {
-        // Preparation is an optimisation; the run still works without it.
-        traceCall("prepareWatch", null, { error: String(error).slice(0, 160) });
-      }
-    }
+    if (isCatch) await parkInWatchedBlock(config, statusBlockKeys, { force: true });
 
     while (seatState.attempts < maxAttempts && !seatState.locked && !seatState.stopRequested) {
       if (runWasSuperseded(runGen)) {
@@ -7395,6 +7389,8 @@
             catchStatusText(live, freeSeatCount(), pollMs, liveExhausted, watchRect),
             "info",
           );
+          // Nothing is in play, so this is the one moment the travel is free.
+          await parkInWatchedBlock(config, scoped);
           await sleep(pollMs);
           continue;
         }
@@ -8002,6 +7998,8 @@
         liveSignature,
         blockingOverlayAnswered,
         pageRegisteredSelection,
+        waitForSoftHoldIdle,
+        catchTimingSummary,
         settleDelayFor,
         settleBudgetMs,
         SEAT_MAP_SETTLE_MS,

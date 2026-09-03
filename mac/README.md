@@ -330,9 +330,3 @@ node tests/test_autopilot_picker.mjs      # 79 tests, drives the real autopilot
 
 Every claim above that carries a number has a test or a probe behind it. Where
 one does not, it says so.
-
-## Legal
-
-Korea's 공연법 (amended, effective March 2024) makes macro ticket purchasing an
-offence when combined with resale — up to 1 year imprisonment or a ₩10M fine.
-Automated booking also breaches the site's terms of use.

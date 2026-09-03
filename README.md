@@ -55,12 +55,6 @@ python3 -m pytest tests/ -q
 node tests/test_autopilot_picker.mjs
 ```
 
-## Legal
-
-Korea's 공연법 (amended, effective March 2024) makes macro ticket purchasing an
-offence when combined with resale — up to 1 year imprisonment or a ₩10M fine.
-Automated booking also breaches the site's terms of use.
-
 ## Updates on Windows
 
 A downloaded exe is a snapshot, but the part that goes stale fastest is not the

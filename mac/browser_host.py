@@ -182,6 +182,11 @@ _EVALUATE_JS_TIMEOUT = 8.0
 _POLL_CONTEXT_TIMEOUT = 8.0
 
 
+# Counts the first few _call_with_timeout invocations so the breadcrumbs can
+# show where a call that never returns actually stops, without flooding the log.
+_TRACE_CALLS = 0
+
+
 def _call_with_timeout(fn: Any, *, timeout: float, label: str) -> Any:
     """Run `fn()` and give up after `timeout`s instead of waiting forever.
 
@@ -191,18 +196,32 @@ def _call_with_timeout(fn: Any, *, timeout: float, label: str) -> Any:
     poller that called this can report the timeout and try again next tick,
     instead of silently ceasing to exist.
     """
+    global _TRACE_CALLS
+    trace = _TRACE_CALLS < 4
+    if trace:
+        _TRACE_CALLS += 1
     box: dict[str, Any] = {}
     errors: list[BaseException] = []
 
     def runner() -> None:
+        if trace:
+            _stage(f"{label}: worker thread running, calling into WebView2")
         try:
             box["result"] = fn()
         except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread below
             errors.append(exc)
+        if trace:
+            _stage(f"{label}: worker returned from WebView2")
 
     worker = threading.Thread(target=runner, name=f"evaluate_js:{label}", daemon=True)
+    if trace:
+        _stage(f"{label}: about to start worker")
     worker.start()
+    if trace:
+        _stage(f"{label}: worker started, joining with {timeout:g}s ceiling")
     worker.join(timeout=timeout)
+    if trace:
+        _stage(f"{label}: join returned, alive={worker.is_alive()}")
     if worker.is_alive():
         raise TimeoutError(f"{label}: evaluate_js did not return within {timeout:g}s")
     if errors:

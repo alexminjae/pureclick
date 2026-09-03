@@ -28,13 +28,14 @@ import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
+const source = readFileSync(process.env.NOLSNIPER_AUTOPILOT || resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
 
 const BLOCKS = 12;
 const SEATS_PER_BLOCK = 1800;
 const DRAWN = SEATS_PER_BLOCK; // the whole open 구역 mounted, which is what 전체보기 achieves
-const PRESELECT_RTT_MS = 220;
-const DISAGREEING = [120, 500, 900, 1300, 1700]; // the site's own soft-hold round trip
+const PRESELECT_RTT_MS = 220; // the site's own soft-hold round trip
+const CART_RENDER_MS = 60; // and the re-render of 선택 좌석 that follows it
+const DISAGREEING = [120, 500, 900, 1300, 1700]; // seats the bitmap called free while the map still draws them taken
 
 const noop = () => {};
 
@@ -322,29 +323,57 @@ async function cartWait() {
   race.resetSeatCountScope();
   const before = race.selectedSeatCount();
   const clickedAt = performance.now();
-  setTimeout(() => { cartCount = 1; refreshSidebar(); }, PRESELECT_RTT_MS);
+  setTimeout(() => { cartCount = 1; refreshSidebar(); }, PRESELECT_RTT_MS + CART_RENDER_MS);
   const ok = await race.pageRegisteredSelection(before, 1);
   const noticedAt = performance.now();
-  return { ok, total: noticedAt - clickedAt, overhead: noticedAt - clickedAt - PRESELECT_RTT_MS };
+  return { ok, total: noticedAt - clickedAt, overhead: noticedAt - clickedAt - PRESELECT_RTT_MS - CART_RENDER_MS };
 }
 
-// 7. the quiet gap held before 선택 완료.
-function quietGapMs() {
-  return race.SOFT_HOLD_QUIET_MS ?? 250;
+// 7. click -> 선택 완료, the whole way: the site answers preselect, the cart
+// rises, we hold the quiet gap NOL's own in-flight guard needs, we press.
+async function clickToConfirm() {
+  cartCount = 0;
+  confirmPressedAt = 0;
+  refreshSidebar();
+  race.resetSeatCountScope();
+  sandbox.window.__nolsniperLastSeatNet = {};
+  const before = race.selectedSeatCount();
+  const clickedAt = performance.now();
+  const since = Date.now();
+  setTimeout(() => {
+    // The page's own soft hold lands: its GraphQL answer, then its re-render.
+    sandbox.window.__nolsniperLastSeatNet.preselectAt = Date.now();
+    sandbox.window.__nolsniperLastSeatNet.preselectOk = true;
+    setTimeout(() => { cartCount = 1; refreshSidebar(); }, CART_RENDER_MS);
+  }, PRESELECT_RTT_MS);
+  const registered = await race.pageRegisteredSelection(before, 1);
+  const cartAt = performance.now();
+  await race.waitForSoftHoldIdle({ since: since - 5000, quietMs: 250, timeoutMs: 2500 });
+  const confirmAt = performance.now();
+  return {
+    registered,
+    cartOverhead: cartAt - clickedAt - PRESELECT_RTT_MS - CART_RENDER_MS,
+    cartToConfirm: confirmAt - cartAt,
+    clickToConfirm: confirmAt - clickedAt,
+  };
 }
 
 const runs = [];
-for (let at = 0; at < 5; at += 1) runs.push(await cartWait());
-const overheads = runs.map((r) => r.overhead).sort((a, b) => a - b);
+for (let at = 0; at < 5; at += 1) runs.push(await clickToConfirm());
+const med = (field) => {
+  const values = runs.map((r) => r[field]).sort((a, b) => a - b);
+  return { median: values[Math.floor(values.length / 2)], worst: values[values.length - 1] };
+};
+if (!runs.every((r) => r.registered)) throw new Error("bench: the cart never registered the click");
+const cartRow = med("cartOverhead");
 results.push({
-  name: `cart · pageRegisteredSelection overhead past a ${PRESELECT_RTT_MS}ms preselect`,
-  median: overheads[Math.floor(overheads.length / 2)],
-  worst: overheads[overheads.length - 1],
+  name: `cart · notice lag past a ${PRESELECT_RTT_MS}+${CART_RENDER_MS}ms preselect+render`,
+  ...cartRow,
   runs: runs.length,
 });
-
-const quiet = quietGapMs();
-results.push({ name: "confirm · quiet gap held before 선택 완료", median: quiet, worst: quiet, runs: 1 });
+const confirmRow = med("cartToConfirm");
+results.push({ name: "confirm · quiet gap held before 선택 완료", ...confirmRow, runs: runs.length });
+const quiet = confirmRow.median;
 
 // ---- report ---------------------------------------------------------------
 
@@ -362,7 +391,7 @@ const hot =
   (results.find((r) => r.name.includes("clickableAmong"))?.median || 0) +
   (results.find((r) => r.name.includes("clickSeatOnMap"))?.median || 0);
 const perTick = results.find((r) => r.name.startsWith("per tick"))?.median || 0;
-const cart = results.find((r) => r.name.startsWith("cart"))?.median || 0;
+const cart = cartRow.median;
 console.log("-".repeat(84));
 console.log(`${pad("detect -> click, our own code", 60)}${num(hot)}`);
 console.log(`${pad("added per watch tick (runs 10x/s whether or not anything freed)", 60)}${num(perTick)}`);
