@@ -46,6 +46,10 @@ So Windows drives a real Chrome over the DevTools protocol instead
 WebSocket, where a stall is one socket with a deadline on it. Set
 `NOLSNIPER_HOST=chrome` or `=webview` to force either on either platform.
 
+The Chrome host prefers Chrome and falls back to Edge, which every Windows
+machine has and which is the same engine — a working fallback, not a
+compromise. `NOLSNIPER_BROWSER=<full path to the exe>` picks one explicitly.
+
 **[mac/README.md](mac/README.md) is the manual** — how each function works, what
 was measured, and what it will not do. This page is only the map.
 

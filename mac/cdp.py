@@ -52,27 +52,40 @@ class ChromeNotFound(RuntimeError):
 
 
 def find_chrome() -> str | None:
-    """The first Chromium-family browser we can drive, or None.
+    """The Chromium-family browser to drive, preferring Chrome, or None.
 
     Edge is accepted because it is the one browser guaranteed present on
-    Windows — the same engine, and it speaks the identical protocol.
+    Windows — the same engine, and it speaks the identical protocol, so it is a
+    working fallback rather than a compromise.
+
+    NOLSNIPER_BROWSER=<full path to the exe> overrides the search entirely.
+
+    The loop is browser-major, location-minor on purpose. The other way round —
+    checking every browser under Program Files before looking in LOCALAPPDATA —
+    hands Edge the job on any machine where Chrome was installed per-user,
+    which is what an install without admin rights does. Reported from a real
+    machine: Edge opened while Chrome was present.
     """
+    override = (os.environ.get("NOLSNIPER_BROWSER") or "").strip()
+    if override:
+        return override if Path(override).exists() else None
+
     system = platform.system()
     if system == "Windows":
         roots = [
+            os.environ.get("LOCALAPPDATA", ""),
             os.environ.get("PROGRAMFILES", r"C:\Program Files"),
             os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
-            os.environ.get("LOCALAPPDATA", ""),
         ]
         rels = [
             r"Google\Chrome\Application\chrome.exe",
-            r"Microsoft\Edge\Application\msedge.exe",
             r"Chromium\Application\chrome.exe",
+            r"Microsoft\Edge\Application\msedge.exe",
         ]
-        for root in roots:
-            if not root:
-                continue
-            for rel in rels:
+        for rel in rels:
+            for root in roots:
+                if not root:
+                    continue
                 candidate = Path(root) / rel
                 if candidate.exists():
                     return str(candidate)
