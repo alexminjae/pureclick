@@ -41,7 +41,12 @@ CEILINGS = {
     "currentOpenBlockMs": 100.0,
     "clickSeatOnMapMs": 25.0,
     "checkDomAgreementMs": 25.0,
-    "cartNoticeLagMs": 30.0,
+    # 45, not 30: the regression this guards against measured 65.6ms, and a
+    # Windows CI runner produced 33.9ms on unchanged code while a laptop sits
+    # near 20ms across repeated runs. A ceiling that a noisy runner trips on
+    # healthy code trains people to ignore the whole file, which costs more than
+    # the 15ms of slack — and 45 still fails long before the old behaviour.
+    "cartNoticeLagMs": 45.0,
 }
 
 

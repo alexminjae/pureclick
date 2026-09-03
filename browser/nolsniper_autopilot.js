@@ -3579,10 +3579,18 @@
   // Four stamps, all relative to the instant the availability bitmap flipped
   // 0->1 for the seat we went for:
   //
-  //   click    a real pointer press left our hands
-  //   cart     선택 좌석 rose — the soft hold is on the page, not just on a server
-  //   confirm  선택 완료 was pressed
-  //   outcome  the page answered it
+  //   click          a real pointer press left our hands
+  //   preselectSent  the page's OWN preselect request left the browser
+  //   preselectDone  the server answered it
+  //   cart           선택 좌석 rose — the hold is on the page, not just on a server
+  //   confirm        선택 완료 was pressed
+  //   outcome        the page answered it
+  //
+  // click -> preselectSent is the one that decides whether an API soft hold
+  // could ever beat the map click. Everything from preselectSent onwards is the
+  // site's own round trip, which any path pays; only what sits in front of it
+  // is winnable. Measuring it is what turns that question from an argument into
+  // a number.
   //
   // Kept as a short history rather than a single reading: one catch on a quiet
   // show says nothing about an open, and a median over a sitting is what tells
@@ -3613,14 +3621,20 @@
     // Nothing was clicked: no segment to report, and keeping it would poison
     // the medians with attempts that never reached the map.
     if (stages.click == null) return;
+    const gap = (from, to) =>
+      stages[from] != null && stages[to] != null ? stages[to] - stages[from] : null;
     const record = {
       at: timing.at,
       outcome,
       detectToClick: stages.click,
-      clickToCart: stages.cart != null ? stages.cart - stages.click : null,
-      cartToConfirm: stages.confirm != null && stages.cart != null ? stages.confirm - stages.cart : null,
-      confirmToOutcome:
-        stages.outcome != null && stages.confirm != null ? stages.outcome - stages.confirm : null,
+      // How long the page sat on our press before asking the server. This is
+      // the whole of what a parallel API hold could save.
+      clickToPreselect: gap("click", "preselectSent"),
+      preselectMs: gap("preselectSent", "preselectDone"),
+      holdToCart: gap("preselectDone", "cart"),
+      clickToCart: gap("click", "cart"),
+      cartToConfirm: gap("cart", "confirm"),
+      confirmToOutcome: gap("confirm", "outcome"),
       totalMs: stages.outcome ?? stages.confirm ?? stages.cart ?? stages.click,
     };
     seatState.catchTimings.push(record);
@@ -3642,6 +3656,7 @@
     if (!timing) return "";
     const parts = [];
     if (timing.detectToClick != null) parts.push(`감지→클릭 ${timing.detectToClick}`);
+    if (timing.clickToPreselect != null) parts.push(`→가선점요청 ${timing.clickToPreselect}`);
     if (timing.clickToCart != null) parts.push(`→선택좌석 ${timing.clickToCart}`);
     if (timing.cartToConfirm != null) parts.push(`→선택완료 ${timing.cartToConfirm}`);
     return parts.length ? `${parts.join(" · ")} ms` : "";
@@ -3658,6 +3673,9 @@
     return {
       samples: rows.length,
       detectToClick: median("detectToClick"),
+      clickToPreselect: median("clickToPreselect"),
+      preselectMs: median("preselectMs"),
+      holdToCart: median("holdToCart"),
       clickToCart: median("clickToCart"),
       cartToConfirm: median("cartToConfirm"),
       confirmToOutcome: median("confirmToOutcome"),
@@ -5097,12 +5115,25 @@
   // hand fails the same way the autopilot does, the fault is in the session or
   // the account rather than in anything we send — and this is the only way to
   // see the answer the site got, without spending a single extra request.
-  function notePageSeatNet(label, status, text) {
+  /**
+   * Watch the page's own booking calls.
+   *
+   * `sent` carries when the request left, in both clocks. Until it did, the
+   * only stamp was the answer, and the one number that decides whether an API
+   * soft hold could ever be faster than the map click is the gap between our
+   * pointer press and the page's own preselect leaving the browser. If that
+   * gap is a millisecond there is nothing in front of the round trip to win.
+   */
+  function notePageSeatNet(label, status, text, sent = null) {
     const net = (window.__nolsniperLastSeatNet = window.__nolsniperLastSeatNet || {});
     const at = Date.now();
     const body = String(text || "");
     const name = String(label || "");
     if (/preselect/i.test(name)) {
+      net.preselectSentAt = sent?.at ?? at;
+      // Both halves of the site's own hold, on the catch's clock.
+      if (sent?.perf != null) noteCatchStage("preselectSent", sent.perf);
+      noteCatchStage("preselectDone");
       net.preselectAt = at;
       net.preselectOk =
         status >= 200 &&
@@ -5141,6 +5172,9 @@
       window.fetch = async function nolsniperFetch(input, init) {
         const url = String(input?.url || input || "");
         const watched = /\/onestop\/(gql|api\/(seats|seatStatus|seatMeta))/.test(url);
+        // Taken before the await, so it is when the request left rather than
+        // when it came back.
+        const sent = watched ? { at: Date.now(), perf: performance.now() } : null;
         const response = await window.__nolsniperNativeFetch.apply(window, arguments);
         if (!watched) return response;
         try {
@@ -5148,7 +5182,7 @@
           const text = await response.clone().text();
           const label = (body.match(/mutation\s+(\w+)/) || [])[1] || url.split("?")[0].split("/").pop();
           if (label === "seatStatus") window.__nolsniperNotePageSeatStatus?.(url, text);
-          window.__nolsniperNotePageSeatNet?.(label, response.status, text);
+          window.__nolsniperNotePageSeatNet?.(label, response.status, text, sent);
           traceCall(`page:${label}`, body, `HTTP ${response.status} ${text}`);
         } catch {
           /* opaque or already consumed */
@@ -5170,13 +5204,16 @@
       XMLHttpRequest.prototype.send = function nolsniperSend(body) {
         const url = this.__nolsniperUrl || "";
         if (/\/onestop\/(gql|api\/(seats|seatStatus|seatMeta))/.test(url)) {
+          // The onestop SPA talks through axios, so this is the hook that sees
+          // the page's real preselect. Stamped here, before the native send.
+          const sentAt = { at: Date.now(), perf: performance.now() };
           this.addEventListener("loadend", () => {
             try {
               const sent = String(body || "").slice(0, 200);
               const label = (sent.match(/mutation\s+(\w+)/) || [])[1] || url.split("?")[0].split("/").pop();
               const text = String(this.responseText || "");
               if (label === "seatStatus") window.__nolsniperNotePageSeatStatus?.(url, text);
-              window.__nolsniperNotePageSeatNet?.(label, this.status, text);
+              window.__nolsniperNotePageSeatNet?.(label, this.status, text, sentAt);
               traceCall(`page:${label}`, sent, `HTTP ${this.status} ${text.slice(0, 400)}`);
             } catch {
               /* response not readable as text */
