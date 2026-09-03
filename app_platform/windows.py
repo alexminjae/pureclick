@@ -232,6 +232,12 @@ def _webview2_runtime_version() -> str:
     return ""
 
 
+# Public name for the diagnostic dump in browser_host; the leading-underscore
+# one stays as the in-module spelling ensure_ready() already uses.
+def webview2_runtime_version() -> str:
+    return _webview2_runtime_version()
+
+
 def disable_gpu_rendering() -> None:
     """Force WebView2 to render in software, before any window exists.
 

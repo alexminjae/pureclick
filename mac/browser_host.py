@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import sys
@@ -18,6 +19,7 @@ except ImportError as exc:
     raise SystemExit("pywebview is required. Run: pip install pywebview") from exc
 
 import app_platform  # noqa: E402
+import app_update  # noqa: E402
 import browser_session  # noqa: E402
 from browser_bridge import load_state, locked_state, merge_if_changed, patch_state, save_state  # noqa: E402
 
@@ -29,6 +31,14 @@ PLATFORM_STATE: dict[str, Any] = {
     "document_start": "unknown",
     "document_start_error": "",
     "autopilot_source": "bundled",
+    # Filled in as on_shown runs, so the diagnostic dump can say how far the
+    # 예매 창's own startup actually got on a machine neither of us can watch.
+    "on_shown": "not reached",
+    "doc_start_ms": 0,
+    "cookie_restore": "not attempted",
+    "cookies_in_jar": 0,
+    "cookies_restored": 0,
+    "last_recovery": "",
 }
 
 # A frozen build's __file__ resolves inside sys._MEIPASS, wiped on every
@@ -378,6 +388,114 @@ def write_bridge_health(health: dict[str, Any]) -> None:
         pass  # a health report that cannot be written is not worth crashing for
 
 
+def _desktop_dir() -> Path:
+    """The user's Desktop — where a non-technical user can actually find a file.
+
+    %LOCALAPPDATA% is invisible in normal use; a file on the Desktop can be
+    opened in Notepad and its text pasted into a chat, which is the only
+    diagnostic channel available for a machine neither of us can log into.
+    """
+    if sys.platform == "win32":
+        profile = os.environ.get("USERPROFILE")
+        if profile and (Path(profile) / "Desktop").is_dir():
+            return Path(profile) / "Desktop"
+    if (Path.home() / "Desktop").is_dir():
+        return Path.home() / "Desktop"
+    return Path.home()
+
+
+DIAG_PATH = _desktop_dir() / "NOLSniper-진단.txt"
+
+_PAGE_PROBE_JS = """
+(function () {
+  try {
+    return {
+      readyState: document.readyState,
+      href: location.href,
+      title: document.title,
+      bodyChars: (document.body && document.body.innerHTML.length) || 0,
+      hasAutopilot: !!window.NOLSniper,
+      hasOverlay: !!document.getElementById('nolsniper-overlay'),
+    };
+  } catch (e) { return { probeError: String(e) }; }
+})()
+"""
+
+
+def _probe_page(window: webview.Window) -> Any:
+    """What the page currently is — or the timeout that proves the thread hung."""
+    try:
+        return _call_with_timeout(
+            lambda: window.evaluate_js(_PAGE_PROBE_JS), timeout=2.0, label="diag_probe",
+        )
+    except Exception as exc:  # noqa: BLE001 - the failure IS the datum
+        return f"{type(exc).__name__}: {exc}"
+
+
+def _crash_log_tail(limit: int = 4000) -> str:
+    try:
+        path = app_platform.user_data_dir() / "crash.log"
+        if path.is_file():
+            return path.read_text(encoding="utf-8", errors="replace")[-limit:].strip() or "(비어 있음)"
+    except Exception:  # noqa: BLE001
+        pass
+    return "(없음)"
+
+
+def write_desktop_diagnostic(health: dict[str, Any], probe: Any) -> None:
+    """One human-readable file on the Desktop with everything worth knowing."""
+    try:
+        wv_version = getattr(webview, "__version__", "?")
+    except Exception:  # noqa: BLE001
+        wv_version = "?"
+    try:
+        runtime = app_platform.webview2_runtime_version() or "(찾지 못함 — 이게 원인일 수 있음)"
+    except Exception as exc:  # noqa: BLE001
+        runtime = f"(확인 실패: {exc})"
+
+    last_error = str(health.get("last_error") or "")
+    if "did not return within" in last_error:
+        verdict = "예매 창의 UI 스레드가 멈춤 (응답 없음). 새로고침으로는 못 살림."
+    elif health.get("failures"):
+        verdict = "페이지가 죽었거나 비어 있음 (스레드는 살아 있음). 자동 새로고침 대상."
+    else:
+        verdict = "정상"
+
+    age = time.time() - (health.get("last_ok") or 0)
+    lines = [
+        f"NOL Sniper 진단  —  {datetime.datetime.now().isoformat(timespec='seconds')}",
+        f"버전            : {app_update.version_tag()}",
+        f"파이썬/플랫폼    : {sys.version.split()[0]} / {sys.platform}",
+        f"pywebview       : {wv_version}",
+        f"WebView2 런타임  : {runtime}",
+        "",
+        "=== 예매 창 상태 ===",
+        (f"페이지 마지막 응답: {age:.0f}초 전" if health.get("last_ok")
+         else "페이지가 한 번도 응답한 적 없음"),
+        f"연속 실패        : {health.get('failures')}",
+        f"마지막 오류      : {last_error or '(없음)'}",
+        f"판정            : {verdict}",
+        f"자동 복구 시각    : {PLATFORM_STATE.get('last_recovery') or '(없음)'}",
+        "",
+        "=== 페이지 내용 ===",
+        (json.dumps(probe, ensure_ascii=False, indent=1)
+         if isinstance(probe, (dict, list)) else str(probe)),
+        "",
+        "=== 시작 단계 / 플랫폼 훅 ===",
+        json.dumps(PLATFORM_STATE, ensure_ascii=False, indent=1),
+        "",
+        "=== crash.log (마지막 부분) ===",
+        _crash_log_tail(),
+        "",
+        "──────────",
+        "이 파일 전체를 복사해서 그대로 보내주세요.",
+    ]
+    try:
+        DIAG_PATH.write_text("\n".join(lines), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
     """Read the page every 400ms — and say so when it cannot.
 
@@ -394,6 +512,7 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
     failures = 0
     last_ok = 0.0
     last_error = ""
+    last_reload = 0.0
     while not stop_event.is_set():
         tick += 1
         try:
@@ -434,6 +553,25 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
             failures += 1
             last_error = f"{type(error).__name__}: {error}"[:160]
 
+        # Auto-recover a dead page — a WebView2 renderer that crashed, or a
+        # navigation that landed on nothing — by reloading it. Deliberately NOT
+        # for a hung UI thread ("did not return within …"): load_url would just
+        # queue behind the stuck call and never run. ~30s of misses after the
+        # page had worked at least once, then one reload, then a 60s cooldown so
+        # a site that is genuinely down is not reload-looped.
+        is_hang = "did not return within" in last_error
+        if (failures >= 75 and not is_hang and last_ok > 0
+                and time.time() - last_reload > 60):
+            last_reload = time.time()
+            PLATFORM_STATE["last_recovery"] = datetime.datetime.now().isoformat(timespec="seconds")
+            try:
+                _call_with_timeout(
+                    lambda: window.load_url(START_URL),
+                    timeout=_POLL_CONTEXT_TIMEOUT, label="watchdog_reload",
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_error = f"자동 새로고침 실패: {exc}"[:160]
+
         # Its own small file, not the shared state. This is written every tick
         # so its timestamp ages when the loop dies, and the shared state is
         # ~180KB — merging into that 2.5 times a second would mean rewriting it
@@ -447,6 +585,13 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
             # this is what turns "it doesn't work" into a specific answer.
             **PLATFORM_STATE,
         })
+        # A file the user can actually open. Every ~5s, and once early so it
+        # exists well before anyone goes looking for it.
+        if tick % 12 == 1:
+            write_desktop_diagnostic(
+                {"last_ok": last_ok, "failures": failures, "last_error": last_error},
+                _probe_page(window),
+            )
         stop_event.wait(0.4)
 
 
@@ -513,7 +658,13 @@ def main() -> None:
         if started.is_set():
             return
         started.set()
-        install_document_start_script(window)
+        PLATFORM_STATE["on_shown"] = "started"
+        t0 = time.monotonic()
+        try:
+            install_document_start_script(window)
+        finally:
+            PLATFORM_STATE["doc_start_ms"] = int((time.monotonic() - t0) * 1000)
+        PLATFORM_STATE["on_shown"] = "doc-start done"
         # Carrying the login forward is worth trying, but it must never decide
         # whether the page loads at all. On Windows restore goes through a
         # WebView2 call that raises TimeoutError if its message loop stalls, and
@@ -522,13 +673,25 @@ def main() -> None:
         # 예매 창, with nothing crashing or hanging on the Python side.
         try:
             jar = browser_session.load_jar(COOKIE_PATH)
+            PLATFORM_STATE["cookies_in_jar"] = len(jar)
             if jar:
                 restored = browser_session.restore(window, jar)
+                PLATFORM_STATE["cookies_restored"] = restored
+                PLATFORM_STATE["cookie_restore"] = (
+                    f"실패: {browser_session.LAST_ERROR}"[:160]
+                    if browser_session.LAST_ERROR
+                    else f"ok ({restored}/{len(jar)})"
+                )
                 print(f"[nolsniper] restored {restored} cookies", file=sys.stderr)
+            else:
+                PLATFORM_STATE["cookie_restore"] = "저장된 로그인 없음"
         except Exception as exc:  # noqa: BLE001 - a lost session beats a blank window
+            PLATFORM_STATE["cookie_restore"] = f"실패: {type(exc).__name__}: {exc}"[:160]
             print(f"[nolsniper] cookie restore skipped: {exc}", file=sys.stderr)
         finally:
+            PLATFORM_STATE["on_shown"] = "load_url 호출"
             window.load_url(START_URL)
+            PLATFORM_STATE["on_shown"] = "완료"
 
     window.events.shown += on_shown
 

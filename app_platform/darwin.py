@@ -156,6 +156,11 @@ def restore_cookies(window: Any, rows: list[dict[str, Any]]) -> int:
     return restored
 
 
+def webview2_runtime_version() -> str:
+    """No WebView2 on macOS. Present only so the seam stays symmetric."""
+    return ""
+
+
 def lock_exclusive(handle: Any) -> None:
     import fcntl
 

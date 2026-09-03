@@ -940,6 +940,33 @@ class BrowserHostStartupTests(unittest.TestCase):
                     "on_loaded must not call inject_autopilot inline",
                 )
 
+    def test_poll_context_reloads_a_dead_page_but_not_a_hung_thread(self) -> None:
+        """A crashed renderer / navigation-to-nothing can be reloaded; a hung UI
+        thread cannot (load_url would queue behind the stuck call). poll_context
+        must tell them apart before reloading.
+        """
+        src = (ROOT / "mac" / "browser_host.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        poll = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef) and n.name == "poll_context")
+        body = ast.unparse(poll)
+        self.assertIn("did not return within", body,
+                      "poll_context must recognise the hung-thread error string")
+        self.assertIn("load_url(START_URL)", body,
+                      "poll_context must reload the page on a non-hang failure run")
+        guard = next((n for n in ast.walk(poll)
+                      if isinstance(n, ast.If) and "load_url" in ast.unparse(n)), None)
+        self.assertIsNotNone(guard)
+        self.assertIn("not is_hang", ast.unparse(guard.test))
+
+    def test_poll_context_writes_the_desktop_diagnostic(self) -> None:
+        src = (ROOT / "mac" / "browser_host.py").read_text(encoding="utf-8")
+        self.assertIn('"NOLSniper-진단.txt"', src.replace("'", '"'))
+        tree = ast.parse(src)
+        poll = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef) and n.name == "poll_context")
+        self.assertIn("write_desktop_diagnostic", ast.unparse(poll))
+
     def test_inject_autopilot_skips_the_big_eval_when_document_start_took(self) -> None:
         """The document-start user script already runs the autopilot before page
         scripts; the on-load evaluate_js of the whole 340 KB file is only the

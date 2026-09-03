@@ -60,6 +60,7 @@ cookie_store = backend.cookie_store
 dump_cookies = backend.dump_cookies
 restore_cookies = backend.restore_cookies
 timing_precision = backend.timing_precision
+webview2_runtime_version = backend.webview2_runtime_version
 
 __all__ = [
     "NAME",
@@ -74,4 +75,5 @@ __all__ = [
     "dump_cookies",
     "restore_cookies",
     "timing_precision",
+    "webview2_runtime_version",
 ]
