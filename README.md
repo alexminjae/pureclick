@@ -17,17 +17,34 @@ cd mac && ./run_nolsniper.sh
 
 **Windows** — download `NOLSniper.exe` from the
 [Releases](../../releases) page and double-click it. Nothing to install: the
-exe carries its own Python. It needs the WebView2 runtime, which ships with
-Windows 11 and with current Edge; if it is missing the app says so and links to
-it rather than failing quietly.
+exe carries its own Python. **It drives Chrome** (or Edge, which every Windows
+machine has) as the 예매 창, so one of those must be present — it is not
+embedded, and no WebView2 runtime is involved.
 
 To run from source on Windows instead — which is what you want when the exe
 misbehaves and you need to see the error — double-click `NOLSniper.bat`. That
 one needs Python installed.
 
-Two windows open: the 조작판 (control panel) and the 예매 창 (an embedded
-browser). You log in and type any 보안문자 yourself in the 예매 창; everything
-else is driven from inside that page.
+Two windows open: the 조작판 (control panel) and the 예매 창. You log in and
+type any 보안문자 yourself in the 예매 창; everything else is driven from inside
+that page. **The login is remembered** — on Windows it lives in the browser
+profile under `%LOCALAPPDATA%\NOLSniper\chrome-profile`, so it survives
+restarts on its own.
+
+### Why the two platforms differ
+
+macOS embeds WKWebView through pywebview. Windows used to embed WebView2 the
+same way and cannot: reaching WebView2 goes Python → pywebview → pythonnet →
+.NET, and a call that blocks in there holds Python's GIL, which freezes the
+whole process — every thread, permanently. Measured on a Windows runner, a
+`join(timeout=8)` never returned. That makes every timeout, watchdog and
+diagnostic in this app unreachable at exactly the moment they matter, which is
+why the 예매 창 could sit white and "(응답 없음)" forever with nothing logged.
+
+So Windows drives a real Chrome over the DevTools protocol instead
+(`mac/chrome_host.py`, `mac/cdp.py`): a separate process, spoken to over a
+WebSocket, where a stall is one socket with a deadline on it. Set
+`NOLSNIPER_HOST=chrome` or `=webview` to force either on either platform.
 
 **[mac/README.md](mac/README.md) is the manual** — how each function works, what
 was measured, and what it will not do. This page is only the map.
@@ -36,7 +53,8 @@ was measured, and what it will not do. This page is only the map.
 
 | | |
 |---|---|
-| `mac/` | the app — panel, browser host, bridge, session store |
+| `mac/` | the app — panel, both browser hosts, bridge, session store |
+| `mac/chrome_host.py`, `mac/cdp.py` | the Windows 예매 창: a real Chrome over DevTools |
 | `app_platform/` | the only place the OS matters: WKWebView vs WebView2, flock vs msvcrt |
 | `nolsniper_main.py` | the entry point, for both the panel and the browser process |
 | `app_update.py` | version check, and a checksum-verified refresh of the automation |
