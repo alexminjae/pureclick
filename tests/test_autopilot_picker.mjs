@@ -1975,6 +1975,54 @@ const tests = {
     });
   },
 
+  "a third-party popup is swallowed, not navigated to"() {
+    // The blank 예매 창. NOL's page calls window.open("https://www.facebook.com/tr/…")
+    // for the Meta pixel; the shim honoured it and location.assign'd the whole
+    // booking page onto a tracking endpoint that answers with an empty body.
+    // Confirmed under CDP: window.top === window.self, href facebook.com/tr,
+    // document.body.innerHTML.length === 0. Reproduced as "it shows at first and
+    // then goes blank". The caller still gets a window object back.
+    navigations.length = 0;
+    const win = sandbox.window.open("https://www.facebook.com/tr/?id=1&ev=PageView");
+    assert.deepEqual(navigations, [], "a tracker must not move this window");
+    assert.equal(typeof win.focus, "function", "the tracker still gets a window back");
+
+    win.location.replace("https://connect.facebook.net/signals/config");
+    win.location.href = "https://www.google-analytics.com/collect";
+    assert.deepEqual(navigations, [], "nor through the returned proxy's location");
+  },
+
+  "a third-party form aimed at an iframe keeps its own target"() {
+    // The other half of the same bug: forcing target=_self on *any* form turned
+    // a pixel's hidden-iframe POST into a top-frame navigation, which blanks the
+    // booking page just as thoroughly as window.open did.
+    navigations.length = 0;
+    const form = new HTMLFormElement();
+    form.target = "fb_xdm_frame";
+    form.action = "https://www.facebook.com/tr/";
+    form.submit();
+    assert.equal(form.target, "fb_xdm_frame", "a third-party form must not be retargeted");
+    assert.deepEqual(navigations.at(-1), {
+      post: "https://www.facebook.com/tr/",
+      target: "fb_xdm_frame",
+    });
+  },
+
+  "the booking flow's own popups still come home"() {
+    // The gate must not cost the thing the shim exists for. Same-origin, the
+    // two booking hosts, and the learned queue host all still land here.
+    for (const url of [
+      "https://nol.yanolja.com/ticket/detail",
+      "https://tickets.interpark.com/onestop/seat",
+      "https://poticket.interpark.com/Book/BookMain.asp",
+      "https://nid.naver.com/oauth2.0/authorize",
+    ]) {
+      navigations.length = 0;
+      sandbox.window.open(url);
+      assert.deepEqual(navigations, [{ assign: url }], `${url} must open here`);
+    }
+  },
+
   "the queue path survives window.self.close()"() {
     navigations.length = 0;
     // openPCOnestop: window.self.close(); win.location.replace(waitingUrl)

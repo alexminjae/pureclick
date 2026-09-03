@@ -44,9 +44,48 @@
       console.log("[NOL Sniper] popup", entry);
     };
 
+    // Hosts the booking flow itself steers to. Anything else that calls
+    // window.open is third-party — an ad or analytics pixel — and honouring it
+    // navigates the whole 예매 창 off the booking page.
+    //
+    // Measured live: NOL's page calls window.open("https://www.facebook.com/tr/…")
+    // for the Meta pixel, this shim ran location.assign() on it, and the booking
+    // page was replaced by a tracking response with an empty body. That is the
+    // "it shows at first and then goes blank" report — the window was never
+    // broken, it had been navigated away. Confirmed under CDP with
+    // `window.top === window.self` true and href facebook.com/tr.
+    const BOOKING_HOST = /(^|\.)(yanolja\.com|interpark\.com|naver\.com)$/i;
+
+    const isBookingUrl = (absolute) => {
+      let target;
+      try {
+        target = new URL(absolute);
+      } catch (error) {
+        return false;
+      }
+      if (target.origin === location.origin) return true;
+      if (BOOKING_HOST.test(target.hostname)) return true;
+      // The queue host is learned at run time, not knowable here — see
+      // rememberQueueHost. try/catch also covers reading it before its own
+      // declaration has run, which returns false rather than throwing.
+      try {
+        const queue = localStorage.getItem(QUEUE_HOST_KEY) || "";
+        if (queue && target.origin === new URL(queue).origin) return true;
+      } catch (error) {
+        /* opaque origin, blocked storage, or not yet initialised */
+      }
+      return false;
+    };
+
     const go = (url, { replace = false } = {}) => {
       if (!url) return;
       const absolute = new URL(String(url), location.href).href;
+      if (!isBookingUrl(absolute)) {
+        // Swallow it. The caller still gets the inert popupProxy back, so a
+        // tracker that expects a window object carries on none the wiser.
+        record({ blockedThirdParty: absolute });
+        return;
+      }
       record({ navigate: absolute, replace });
       if (replace) location.replace(absolute);
       else location.assign(absolute);
@@ -105,6 +144,12 @@
         const form = doc.querySelector("form");
         if (!form) return;
         const clone = document.importNode(form, true);
+        // Same gate as the other three paths: a written-in form is only worth
+        // running here if it belongs to the booking flow.
+        if (!isBookingUrl(clone.action)) {
+          record({ blockedWrittenForm: String(clone.action).slice(0, 200) });
+          return;
+        }
         clone.target = "_self";
         document.body.appendChild(clone);
         nativeSubmit.call(clone);
@@ -128,7 +173,12 @@
     if (typeof HTMLFormElement !== "undefined") {
       nativeSubmit = HTMLFormElement.prototype.submit;
       HTMLFormElement.prototype.submit = function nolsniperSubmit() {
-        if (!POPUP_SELF_TARGETS.has(this.target || "")) {
+        // Only retarget the booking flow's own forms. A third-party form aimed
+        // at a hidden iframe — which is how analytics pixels post — becomes a
+        // full top-frame navigation if it is forced to _self, and the booking
+        // page is gone. This is the second half of the blank-page bug: gating
+        // go() alone still left the page being navigated away by a pixel form.
+        if (!POPUP_SELF_TARGETS.has(this.target || "") && isBookingUrl(this.action)) {
           record({ formTarget: this.target, action: this.action });
           this.target = "_self";
         }
@@ -136,12 +186,16 @@
       };
     }
 
-    // User-triggered submits and target=_blank links, for completeness.
+    // User-triggered submits and target=_blank links, for completeness. Same
+    // scoping as above — retarget the booking flow, leave third parties alone.
     document.addEventListener(
       "submit",
       (event) => {
         const form = event.target;
-        if (form && form.target && !POPUP_SELF_TARGETS.has(form.target)) form.target = "_self";
+        if (form && form.target && !POPUP_SELF_TARGETS.has(form.target)
+            && isBookingUrl(form.action)) {
+          form.target = "_self";
+        }
       },
       true,
     );
@@ -149,7 +203,9 @@
       "click",
       (event) => {
         const anchor = event.target?.closest?.("a[target]");
-        if (anchor && !POPUP_SELF_TARGETS.has(anchor.target)) anchor.target = "_self";
+        if (anchor && !POPUP_SELF_TARGETS.has(anchor.target) && isBookingUrl(anchor.href)) {
+          anchor.target = "_self";
+        }
       },
       true,
     );
