@@ -22,7 +22,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from datetime import datetime  # noqa: E402
+from datetime import datetime, timedelta  # noqa: E402
+
+from core.clock import KST, NolSniperError  # noqa: E402
 
 
 def _load(name: str):
@@ -45,11 +47,13 @@ def _load(name: str):
         "datetime": datetime, "timedelta": timedelta,
         "KST": KST, "NolSniperError": NolSniperError,
     }
+    ns["max"] = max
     exec(compile(module, "<panel>", "exec"), ns)  # noqa: S102 - our own source
     return ns[name]
 
 
 render = _load("_render_entry_result")
+bump = _load("_bump_test_time")
 
 
 class FakeVar:
@@ -66,6 +70,57 @@ class FakeVar:
 class FakePanel:
     def __init__(self) -> None:
         self.test_result = FakeVar()
+
+
+class TheRehearsalTimeStaysReachable(unittest.TestCase):
+    """[+1분] must always produce a moment you can actually rehearse against.
+
+    The default rehearsal time is set once, when the panel is built, to a minute
+    out. Nothing refreshes it — so ten minutes into a session the field names a
+    moment ten minutes gone, and [테스트 실행] answers 이미 지난 시각입니다. The
+    button beside it existed to fix that, and bumped from the *field*: one press
+    moved a stale time from ten minutes gone to nine, so it looked like a dead
+    button and the readout never changed.
+    """
+
+    class Panel:
+        TEST_TIME_PAST_TOLERANCE_S = 2.0
+
+        def __init__(self, text: str) -> None:
+            self.written = None
+            self._text = text
+
+        def _test_time_text(self) -> str:
+            if not self._text:
+                raise NolSniperError("비어 있음")
+            return self._text
+
+        def _set_test_time(self, when) -> None:
+            self.written = when
+
+    def test_a_stale_time_is_bumped_from_now_not_from_itself(self) -> None:
+        now = datetime.now(KST).replace(tzinfo=None)
+        stale = (now - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
+        panel = self.Panel(stale)
+        bump(panel)
+        self.assertGreater(
+            panel.written, now,
+            "one press must reach the future, whatever the field said",
+        )
+        self.assertLess(panel.written, now + timedelta(minutes=2))
+
+    def test_a_future_time_is_still_bumped_from_the_field(self) -> None:
+        # Someone lining a rehearsal up on a real open must be able to nudge it.
+        now = datetime.now(KST).replace(tzinfo=None)
+        later = now + timedelta(hours=3)
+        panel = self.Panel(later.strftime("%Y-%m-%d %H:%M:%S"))
+        bump(panel)
+        self.assertEqual(panel.written, later.replace(microsecond=0) + timedelta(minutes=1))
+
+    def test_an_unreadable_field_falls_back_to_now(self) -> None:
+        panel = self.Panel("")
+        bump(panel)
+        self.assertGreater(panel.written, datetime.now(KST).replace(tzinfo=None))
 
 
 class EntryTestReadout(unittest.TestCase):

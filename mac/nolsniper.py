@@ -1567,12 +1567,22 @@ class NolSniperApp(tk.Tk):
         The old control was a list of relative offsets (30초/1분/… 뒤), which
         cannot rehearse against a real open time. This is what that list was
         actually good for, kept as one button beside a real clock.
+
+        It bumps from *now* whenever the field is already in the past, which is
+        the normal state of it: the default is set to "a minute out" once, when
+        the panel is built, and nothing refreshes it. Ten minutes into a session
+        the field names a moment ten minutes gone, and bumping from the field
+        moved it to nine minutes gone — so the button appeared to do nothing and
+        [테스트 실행] answered 이미 지난 시각입니다 however many times it was
+        pressed. One press should always produce a moment you can rehearse
+        against.
         """
+        now = datetime.now(KST).replace(tzinfo=None)
         try:
             when = datetime.strptime(self._test_time_text(), "%Y-%m-%d %H:%M:%S")
         except (ValueError, NolSniperError):
-            when = datetime.now(KST).replace(tzinfo=None)
-        self._set_test_time(when + timedelta(minutes=1))
+            when = now
+        self._set_test_time(max(when, now) + timedelta(minutes=1))
 
     def _test_time_from_show(self) -> None:
         """Aim the rehearsal at this show's own 티켓 오픈."""
@@ -1595,6 +1605,10 @@ class NolSniperApp(tk.Tk):
         self.test_second.set(when.strftime("%S"))
 
     ENTRY_PAGES = {"nol", "goods"}
+    # How far into the past a picked rehearsal time may sit before the press is
+    # refused outright. Wide enough that choosing a moment two seconds out and
+    # taking a moment to press is still a rehearsal, not a rejection.
+    TEST_TIME_PAST_TOLERANCE_S = 2.0
 
     def _entry_page_problem(self) -> str:
         """Why an entry cannot run right now, or "" if it can."""
@@ -1628,6 +1642,24 @@ class NolSniperApp(tk.Tk):
             wanted = self._test_time_text()
         except Exception as exc:  # noqa: BLE001 - reported to the user
             self._note(str(exc), error=True)
+            return
+        # Answer a past time here, not two seconds later out of the worker.
+        #
+        # _arm_worker does check it, but only after syncing the clock — so the
+        # commonest mistake of all, pressing 테스트 실행 against the stale default
+        # time, cost a two-second wait and then "이미 지난 시각입니다", which says
+        # what is wrong and not what to do about it. The local clock is plenty
+        # to decide this: the panel's own offset is milliseconds and the
+        # tolerance below is seconds. The authoritative check stays in the
+        # worker, against the server clock.
+        picked = datetime.strptime(wanted, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
+        late = (datetime.now(KST) - picked).total_seconds()
+        if late > self.TEST_TIME_PAST_TOLERANCE_S:
+            self._note(
+                f"테스트 시각 {picked:%H:%M:%S}은(는) 이미 지났습니다 — "
+                f"[+1분]을 눌러 앞으로 옮긴 뒤 다시 실행하세요.",
+                error=True,
+            )
             return
         self.status.set("테스트 준비 중…")
         self._start_worker(
