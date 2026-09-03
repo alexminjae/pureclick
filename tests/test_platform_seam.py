@@ -178,7 +178,11 @@ class WindowsInjectionTests(unittest.TestCase):
                 done.set()
 
             threading.Thread(target=run, daemon=True).start()
-            self.assertTrue(done.wait(5), "the wait must be bounded")
+            # 30s, not 5: the waiter itself returns in ~2ms (2 tries x 1ms), so
+            # this only has to outlast a loaded CI runner's scheduling stalls —
+            # a 5s ceiling flaked on the Windows runner. Still proves "bounded,
+            # not infinite", which is the whole point.
+            self.assertTrue(done.wait(30), "the wait must be bounded")
         finally:
             windows._WEBVIEW_WAIT_TRIES = original_tries
 
