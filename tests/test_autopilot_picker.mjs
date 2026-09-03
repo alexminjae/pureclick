@@ -3922,6 +3922,73 @@ const tests = {
     }
   },
 
+  "the queue burst is not fired at an origin that cannot read the answer"() {
+    // Measured against the live endpoint, same goods code, three origins:
+    //   tickets.interpark.com  -> 401 + access-control-allow-origin + -credentials
+    //   nol.yanolja.com        -> 403, no CORS header at all
+    //   poticket.interpark.com -> 403, no CORS header at all
+    // So from the NOL product page the browser refuses the read and every
+    // attempt lands as TypeError: Load failed. Measured on a live arm: 215
+    // attempts across the whole 15s window, all dead, and only then did the run
+    // fall through to 예매하기 — which is what actually got in.
+    const { race } = sandbox.window.NOLSniper;
+    const original = sandbox.location.origin;
+    try {
+      sandbox.location.origin = "https://tickets.interpark.com";
+      assert.equal(race.waitingApiUsableHere(), true, "the queue origin keeps its burst");
+      sandbox.location.origin = "https://nol.yanolja.com";
+      assert.equal(race.waitingApiUsableHere(), false, "NOL cannot read the answer");
+      sandbox.location.origin = "https://poticket.interpark.com";
+      assert.equal(race.waitingApiUsableHere(), false);
+    } finally {
+      sandbox.location.origin = original;
+    }
+
+    // And the burst is skipped there rather than merely failing faster.
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
+    assert.match(
+      source,
+      /arm\.use_waiting_api !== false && waitingApiUsableHere\(\)/,
+      "the NOL branch must gate the burst on the origin",
+    );
+  },
+
+  "an answerless endpoint ends the burst instead of spending the whole window"() {
+    // A dropped packet or two is exactly what the burst rides out. Six in a row
+    // with nothing in between is a wall, and the caller has a fallback it
+    // cannot reach until this gives up.
+    const { race } = sandbox.window.NOLSniper;
+    assert.equal(race.isUnreachableError(new TypeError("Load failed")), true);
+    assert.equal(race.isUnreachableError(new Error("Failed to fetch")), true);
+    // An HTTP answer is an answer: the road is open, keep asking.
+    assert.equal(race.isUnreachableError(new Error("waiting HTTP 503")), false);
+    assert.equal(race.isUnreachableError(new Error("선예매 인증이 필요합니다 (NP)")), false);
+    assert.ok(race.WAITING_UNREACHABLE_STREAK >= 3,
+              "one bad packet must not end a burst built to ride bad packets out");
+  },
+
+  async "a queue call that could not be made is not a failed entry"() {
+    // The panel's one pass/fail line read 진입 실패 · TypeError: Load failed on a
+    // run that got in — the queue error stayed on armState while the page's own
+    // route worked. The line you check to know whether the open went well was
+    // saying the opposite of the truth.
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
+    const nolBranch = source.slice(
+      source.indexOf("if (isNolProductPage()) {"),
+      source.indexOf("if (isGatesPage()) {"),
+    );
+    const enterAt = nolBranch.indexOf("await enterFromNolPage(arm)");
+    const clearAt = nolBranch.indexOf('armState.lastError = ""', enterAt);
+    assert.ok(enterAt > 0 && clearAt > enterAt,
+              "the error must be cleared only after the fallback actually returns");
+    // A throw from enterFromNolPage must skip the clear and keep the error.
+    assert.doesNotMatch(
+      nolBranch.slice(enterAt),
+      /try\s*\{[\s\S]*enterFromNolPage/,
+      "the clear must not sit in a catch that swallows a real failure",
+    );
+  },
+
   "the settle ramp covers the window a real preselect lands in"() {
     // The old ramp went from a 16ms frame-check straight to an 80ms poll after
     // six tries, so a cart that landed 280ms after the click — which is what a

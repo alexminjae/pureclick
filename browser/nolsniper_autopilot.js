@@ -1738,6 +1738,52 @@
     throw new Error("NOL 예매하기 버튼을 찾지 못했습니다. 로그인·본인인증을 확인하세요.");
   }
 
+  /**
+   * Can this origin even read the queue endpoint?
+   *
+   * Measured against the live endpoint, same goods code, three origins:
+   *
+   *   Origin: https://tickets.interpark.com  -> 401 + access-control-allow-origin
+   *                                             + access-control-allow-credentials
+   *   Origin: https://nol.yanolja.com        -> 403, no CORS header at all
+   *   Origin: https://poticket.interpark.com -> 403, no CORS header at all
+   *
+   * (The 401 is only my probe having no login cookie; the page has one. What
+   * matters is the header.)
+   *
+   * So from a NOL product page the browser refuses to hand the response to the
+   * page, and every attempt lands as `TypeError: Load failed`. This is not
+   * slowness and retrying cannot fix it: measured on a live arm, 215 attempts
+   * across the whole 15-second window, every single one dead, and only then did
+   * the run fall through to the page's own 예매하기 — which is what actually got
+   * in. Fifteen seconds of the open spent on a request the browser was never
+   * going to complete.
+   *
+   * The burst is kept exactly where it works. This only stops it being fired
+   * somewhere it provably cannot.
+   */
+  const WAITING_API_ORIGINS = new Set([GATE_ORIGIN]);
+
+  function waitingApiUsableHere() {
+    return WAITING_API_ORIGINS.has(location.origin);
+  }
+
+  // A failure that means "the browser never completed this request" rather than
+  // "the server answered something we did not like". fetchWaitingUrl turns every
+  // HTTP answer into an Error carrying its status, so anything that still looks
+  // like a bare network TypeError got no answer at all.
+  function isUnreachableError(error) {
+    return (
+      error instanceof TypeError ||
+      /Load failed|Failed to fetch|NetworkError|ERR_/i.test(String(error?.message || error))
+    );
+  }
+
+  // How many answerless attempts in a row prove the endpoint is not reachable
+  // from here. A dropped packet or two is exactly what the burst exists to ride
+  // out; six in a row with nothing in between is a wall, not weather.
+  const WAITING_UNREACHABLE_STREAK = 6;
+
   // Terminal answers from the waiting API — retrying these is pointless.
   const WAITING_TERMINAL = /^(NP|BL)$/;
 
@@ -1819,6 +1865,7 @@
     armState.waitingLog = [];
     let attempts = 0;
     let lastError = null;
+    let unreachable = 0;
     while (serverTimeUnix() < giveUpAt) {
       // A block ends the attempt, immediately.
       //
@@ -1855,10 +1902,27 @@
           log(`waiting acquired after ${attempts} attempt(s)`);
           return answer;
         }
+        // The server answered. Whatever it said, the road is open.
+        unreachable = 0;
       } catch (error) {
         lastError = error;
         noteWaitingAttempt(sentOffsetMs, `오류 ${String(error).slice(0, 40)}`,
                            performance.now() - startedPerf);
+        // Nothing came back at all. Retrying is what this loop is for when a
+        // packet drops, but a request the browser will not even complete
+        // answers the same way every time — and the caller has a fallback that
+        // actually works, which it cannot reach until this gives up.
+        unreachable = isUnreachableError(error) ? unreachable + 1 : 0;
+        if (unreachable >= WAITING_UNREACHABLE_STREAK) {
+          armState.waitingAttempts = attempts;
+          armState.waitingUnreachable = true;
+          traceCall("waitingUnreachable", null, {
+            attempts,
+            origin: location.origin,
+            error: String(error).slice(0, 120),
+          });
+          throw error;
+        }
       }
       const elapsed = performance.now() - startedPerf;
       if (attempts % 12 === 0) {
@@ -1926,7 +1990,11 @@
 
     if (isNolProductPage()) {
       updateOverlay("NOL 예매 진입…", "info");
-      if (arm.use_waiting_api !== false) {
+      // The queue endpoint sends no CORS header to this origin — see
+      // waitingApiUsableHere(). Asking anyway costs the whole 15s window and
+      // gets a TypeError every time; the page's own 예매하기 below is the route
+      // that actually works from here.
+      if (arm.use_waiting_api !== false && waitingApiUsableHere()) {
         try {
           const waitingUrl = await acquireWaitingUrl(arm);
           armState.waitingUrl = waitingUrl || "";
@@ -1946,8 +2014,19 @@
           armState.lastError = String(error);
           log("NOL waiting API", error);
         }
+      } else if (arm.use_waiting_api !== false) {
+        armState.enteredVia = "";
+        log(`waiting API not readable from ${location.origin}; using the page's own route`);
       }
-      return enterFromNolPage(arm);
+      const entered = await enterFromNolPage(arm);
+      // A queue call that could not be made is not a failed entry when the
+      // page's own route worked. Leaving it set is why a run that got in read
+      // 진입 실패 · TypeError: Load failed on the panel — the one line you check
+      // to know whether the open went well, saying the opposite of the truth.
+      // A throw from enterFromNolPage skips this and keeps the error.
+      armState.lastError = "";
+      if (!armState.enteredVia) armState.enteredVia = "book";
+      return entered;
     }
 
     if (isGatesPage()) {
@@ -1956,7 +2035,7 @@
     }
 
     let waitingUrl = null;
-    if (arm.use_waiting_api !== false && isGoodsPage()) {
+    if (arm.use_waiting_api !== false && isGoodsPage() && waitingApiUsableHere()) {
       try {
         waitingUrl = await acquireWaitingUrl(arm);
         armState.waitingUrl = waitingUrl || "";
@@ -8417,6 +8496,9 @@
         BLOCK_FALLBACK_MS,
         WAITING_ENDPOINT,
         acquireWaitingUrl,
+        waitingApiUsableHere,
+        isUnreachableError,
+        WAITING_UNREACHABLE_STREAK,
         seatInCooldown,
         seatUnreachableNow,
         sweepTakenCooldowns,
