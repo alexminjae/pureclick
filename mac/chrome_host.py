@@ -291,8 +291,9 @@ def main() -> None:
     PLATFORM_STATE["chrome"] = chrome
     _stage(f"chrome: {chrome}")
 
-    proc = cdp.launch(chrome, PROFILE_DIR, "about:blank")
-    _stage(f"chrome launched pid {proc.pid}, profile {PROFILE_DIR}")
+    flags = _window_flags()
+    proc = cdp.launch(chrome, PROFILE_DIR, "about:blank", extra_flags=flags)
+    _stage(f"chrome launched pid {proc.pid}, profile {PROFILE_DIR}, window {flags or 'default'}")
 
     port = cdp.read_port(PROFILE_DIR)
     _stage(f"devtools port {port}")

@@ -91,7 +91,12 @@ def find_chrome() -> str | None:
     return None
 
 
-def launch(chrome: str, profile: Path, start_url: str = "about:blank") -> subprocess.Popen:
+def launch(
+    chrome: str,
+    profile: Path,
+    start_url: str = "about:blank",
+    extra_flags: list[str] | None = None,
+) -> subprocess.Popen:
     """Start Chrome on its own persistent profile with DevTools open.
 
     The profile is the whole point of using a real browser: Chrome keeps the
@@ -112,8 +117,11 @@ def launch(chrome: str, profile: Path, start_url: str = "about:blank") -> subpro
         # Deliberately NOT --enable-automation: that sets navigator.webdriver
         # and shows the "controlled by automated software" infobar. Measured
         # without it: navigator.webdriver === false on the live page.
-        start_url,
     ]
+    # Window position/size, when the panel said where. Before start_url, which
+    # Chrome takes positionally.
+    argv.extend(extra_flags or [])
+    argv.append(start_url)
     creationflags = 0
     if platform.system() == "Windows":
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
