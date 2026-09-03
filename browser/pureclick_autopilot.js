@@ -328,6 +328,12 @@
     runBaseline: null,
     discoveredBlocks: null,
     domCircleCount: 0,
+    // sessionId/channel/lang derived from readInterparkContext() — a real
+    // localStorage/DOM scan, not a free lookup. These do not change within a
+    // round, so onestopHeaders() memoizes them here instead of re-scanning on
+    // every request; adoptBlocksKey() clears this alongside the other per-
+    // round caches when the round actually changes.
+    headerContextCache: null,
   };
 
   // Survives reload_autopilot the same way the trace does. 감시 시작 used to
@@ -696,7 +702,22 @@
 
   function onestopHeaders(initData = null) {
     const data = initData || getInitData();
-    const ctx = readInterparkContext() || {};
+    // readInterparkContext() is a real localStorage/DOM scan, and this runs on
+    // every seatStatus/seatMeta/gql call the catch loop makes — several times
+    // a second while a watch is running. None of what it derives here changes
+    // within a round, so a genuine hit is memoized on seatState and
+    // invalidated by adoptBlocksKey() exactly when discoveredBlocks/showCatalog
+    // already are. A miss (null — the context has not landed in storage yet)
+    // is deliberately NOT cached: caching {} here would have been sticky, so
+    // one early call before the context exists would have kept every later
+    // call reading an empty object for the rest of the run, silently dropping
+    // X-Onestop-Session/Channel from every request after it.
+    // (The scan's own cost is small next to the network round trip it feeds
+    // into — this is worth doing because it is free once warm, not because it
+    // moves the numbers.)
+    const found = seatState.headerContextCache || readInterparkContext();
+    if (found) seatState.headerContextCache = found;
+    const ctx = found || {};
     const headers = { Accept: "application/json" };
     const sessionId = data?.sessionId || ctx.sessionId;
     const channel = data?.channelType || ctx.channelType || "ONESTOP";
@@ -1233,14 +1254,35 @@
     if (takenDialog) {
       dismissSeatTakenDialog();
       if (pageHasSelectedSeats()) clearSelectedSeats();
+      // Handing this seat back is bookkeeping for something already lost —
+      // the next candidate is a different seatInfoId with no dependency on
+      // this release completing. Clear it out of heldSeatIds immediately, so
+      // the loop's own quantity/hold checks downstream are correct without
+      // waiting, and let the release itself settle in the background instead
+      // of blocking the next attempt behind a full BulkDeselectSeats round
+      // trip. Same reasoning the map-click rejection path already uses — "No
+      // sleep: the next seat is being raced for right now too" — brought to
+      // the one place that hadn't caught up to it.
+      //
+      // releasePreselected never rejects: its own try/catch already counts a
+      // failure into releaseFailures/lastReleaseError and logs it, so nothing
+      // further needs to be awaited or chained here. One real behavior
+      // change: a failed release no longer sets this function's own
+      // lastError message, because by the time that background call resolves
+      // the run has moved on to a different seat — a delayed write here would
+      // either never be seen (still running; the band shows 감시 중, not
+      // lastError, while running) or could overwrite whatever lastError the
+      // run set when it actually stopped, for an unrelated reason.
+      // releaseFailures/lastReleaseError still capture the failure either way.
       const held = [...seatState.heldSeatIds];
-      if (held.length) {
-        // Only on success. releasePreselected already prunes what it released.
-        if (!(await releasePreselected(held))) {
-          seatState.lastError =
-            `좌석 ${held.length}석을 반납하지 못했습니다 — 예매 창에서 [전체삭제]를 눌러 주세요.`;
-        }
-      }
+      held.forEach((id) => seatState.heldSeatIds.delete(id));
+      // .catch, not bare — releasePreselected's own try/catch means this never
+      // actually rejects today, but a dropped promise with no handler is a
+      // silent-failure hazard if that ever changes (flagged by tools/audit_js.mjs,
+      // the same D5 class as an un-awaited runArmScheduler() elsewhere in this
+      // file). The catch itself is a no-op: releaseFailures/lastReleaseError are
+      // already set inside releasePreselected before it would ever get here.
+      if (held.length) releasePreselected(held).catch(() => {});
       seatState.locked = false;
       seatState.awaitingPayment = false;
       seatState.lastExit = "takenByAnother";
@@ -1251,14 +1293,14 @@
     dismissSeatTakenDialog();
     dismissSeatErrorDialog();
     if (pageHasSelectedSeats()) clearSelectedSeats();
+    // Left as-is (not decoupled): this branch is the genuinely-broken-session
+    // case, not a lost race, and nothing here established this 500ms is safe
+    // to shorten or run concurrently with — unlike the taken-dialog branch
+    // above, there is no sibling path in this file to compare it against.
     await sleep(500);
     const held = [...seatState.heldSeatIds];
-    if (held.length) {
-      if (!(await releasePreselected(held))) {
-        seatState.lastError =
-          `좌석 ${held.length}석을 반납하지 못했습니다 — 예매 창에서 [전체삭제]를 눌러 주세요.`;
-      }
-    }
+    held.forEach((id) => seatState.heldSeatIds.delete(id));
+    if (held.length) releasePreselected(held).catch(() => {});
     seatState.locked = false;
     seatState.awaitingPayment = false;
     seatState.lastExit = "confirmPreselectionInvalid";
@@ -3650,6 +3692,11 @@
     // Learned from the venue we just left, and venues differ. Keeping it made
     // the next show start by trying the wrong mapping.
     seatState.blockEntryHypothesis = "";
+    // onestopHeaders()'s memoized sessionId/channel/lang lookup — see there.
+    // Erring on the side of re-scanning too often rather than too rarely: a
+    // round change is the established "the environment moved" signal every
+    // other per-round cache here already keys off.
+    seatState.headerContextCache = null;
     traceCall("roundChanged", blocksKey, { was });
     return true;
   }
@@ -4605,17 +4652,27 @@
     return results;
   }
 
-  async function fetchMetaBatch(rawInitData, blockKeys) {
-    const initData = withLivePlaySeq(rawInitData);
-    const goods = initData.goods;
-    const playSeq = initData.playSeq;
+  // Shared by fetchMetaBatch and fetchSeatStatus, which built this identically
+  // twice. Not hoisted out of the call — goodsCode/placeCode/playSeq can
+  // genuinely change mid-run (a round switch), and blockKeys is by definition
+  // a different batch on every call, so there is nothing here that is safe to
+  // memoize across calls the way headerContextCache is above. This only
+  // removes the duplication; the object itself still has to be built fresh
+  // every time it's asked for a different batch.
+  function seatQueryParams(initData, blockKeys) {
     const params = new URLSearchParams({
-      goodsCode: goods.goodsCode,
-      placeCode: goods.placeCode,
-      playSeq: playSeq.playSeq,
+      goodsCode: initData.goods.goodsCode,
+      placeCode: initData.goods.placeCode,
+      playSeq: initData.playSeq.playSeq,
       bizCode: initData.bizCode || "WEBBR",
     });
     for (const blockKey of blockKeys) params.append("blockKeys", blockKey);
+    return params;
+  }
+
+  async function fetchMetaBatch(rawInitData, blockKeys) {
+    const initData = withLivePlaySeq(rawInitData);
+    const params = seatQueryParams(initData, blockKeys);
     const payload = await fetchJson(`/onestop/api/seatMeta?${params}`);
     return Array.isArray(payload) ? payload : payload?.data || [];
   }
@@ -4657,15 +4714,7 @@
 
   async function fetchSeatStatus(rawInitData, blockKeys = []) {
     const initData = withLivePlaySeq(rawInitData);
-    const goods = initData.goods;
-    const playSeq = initData.playSeq;
-    const params = new URLSearchParams({
-      goodsCode: goods.goodsCode,
-      placeCode: goods.placeCode,
-      playSeq: playSeq.playSeq,
-      bizCode: initData.bizCode || "WEBBR",
-    });
-    for (const blockKey of blockKeys) params.append("blockKeys", blockKey);
+    const params = seatQueryParams(initData, blockKeys);
     try {
       const payload = await fetchJson(`/onestop/api/seatStatus?${params}`);
       seatState.statusFailures = 0;
@@ -7797,6 +7846,9 @@
         aimForCandidates,
         noteMapMove,
         notePageSeatStatus,
+        onestopHeaders,
+        seatQueryParams,
+        releasePreselected,
       },
       /**
        * Take the panel's whole-venue trigger.

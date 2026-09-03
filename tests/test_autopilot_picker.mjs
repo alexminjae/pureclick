@@ -2518,6 +2518,146 @@ const tests = {
     }
   },
 
+  "a lost race hands the seat back without waiting for the release to finish": async () => {
+    // The next candidate is a different seatInfoId with no dependency on this
+    // release completing, and the release itself is a BulkDeselectSeats round
+    // trip — awaiting it before trying the next seat was the one place this
+    // rejection path hadn't caught up to the map-click rejection path's own
+    // "No sleep: the next seat is being raced for right now too".
+    const { race } = sandbox.window.PureClick;
+    const confirmButton = { textContent: "확인", click() {} };
+    const modal = {
+      innerText: "이미 선점된 좌석입니다.",
+      getBoundingClientRect: () => ({ width: 310, height: 130 }),
+      querySelectorAll: () => [confirmButton],
+    };
+
+    const originalQsa = sandbox.document.querySelectorAll;
+    const originalFetch = sandbox.fetch;
+    let releaseStarted = false;
+    let releaseResolved = false;
+    // A release that never resolves on its own — if recoverFailedConfirm
+    // waited on it, this test would hang and time out. It resolving *after*
+    // the assertions below is the point.
+    let releaseGate;
+    const releaseGatePromise = new Promise((resolve) => { releaseGate = resolve; });
+    sandbox.fetch = async () => {
+      releaseStarted = true;
+      await releaseGatePromise;
+      releaseResolved = true;
+      return { ok: false, status: 500, json: async () => ({}) };
+    };
+
+    race.state.takenUntil.clear();
+    race.state.heldSeatIds.clear();
+    race.state.heldSeatIds.add("s1");
+    race.state.heldSeatIds.add("s2");
+    race.state.releaseFailures = 0;
+    race.state.lastError = "";
+    try {
+      sandbox.document.querySelectorAll = (sel) => (String(sel).includes("div") ? [modal] : []);
+
+      const result = await race.recoverFailedConfirm("[R석] 13열 2", "net");
+
+      assert.equal(result.takenConflict, true);
+      // The whole claim: the function has already returned, and the network
+      // call it fired is either not yet resolved or (on a very slow machine)
+      // has at least been started — never awaited before the return above.
+      assert.ok(releaseStarted, "the release was fired");
+      assert.equal(releaseResolved, false, "...but not waited on before returning");
+      assert.equal(
+        race.state.heldSeatIds.size, 0,
+        "cleared synchronously, so the very next attempt's hold/quantity " +
+        "checks are correct without waiting on the network",
+      );
+      assert.equal(
+        race.state.lastError, "",
+        "no lastError from this path — see the comment in recoverFailedConfirm " +
+        "for why a delayed write here would race the run's own status",
+      );
+
+      releaseGate();
+      await releaseGatePromise.then(() => new Promise((r) => setTimeout(r, 0)));
+      assert.equal(
+        race.state.releaseFailures, 1,
+        "the failure is still counted once the background call actually resolves",
+      );
+    } finally {
+      sandbox.document.querySelectorAll = originalQsa;
+      sandbox.fetch = originalFetch;
+      race.state.takenUntil.clear();
+      race.state.heldSeatIds.clear();
+      race.state.releaseFailures = 0;
+    }
+  },
+
+  "the session-context lookup is memoized, but only on a genuine hit": () => {
+    // readInterparkContext() is a real localStorage scan and onestopHeaders()
+    // runs on every seatStatus/seatMeta/gql call — several times a second
+    // while a watch is running — so a genuine hit is worth caching. A miss
+    // must not be: caching {} would have been sticky, so one call before the
+    // context lands in storage would leave every later call — for the rest of
+    // the run — reading an empty object and silently dropping
+    // X-Onestop-Session/Channel from every request after it.
+    const { race } = sandbox.window.PureClick;
+    sandbox.localStorage._data.clear();
+    race.state.headerContextCache = null;
+    try {
+      // Miss: nothing in storage yet.
+      const missHeaders = race.onestopHeaders({});
+      assert.equal(missHeaders["X-Onestop-Session"], undefined);
+      assert.equal(race.state.headerContextCache, null, "a miss must not be cached");
+
+      // Hit: the context lands (as it does once the page has actually loaded
+      // one), and it must be picked up and then remembered.
+      sandbox.localStorage.setItem(
+        "interpark/context",
+        JSON.stringify({ sessionId: "sess-1", channelType: "ONESTOP", goods: {} }),
+      );
+      const hitHeaders = race.onestopHeaders({});
+      assert.equal(hitHeaders["X-Onestop-Session"], "sess-1");
+      assert.equal(race.state.headerContextCache?.sessionId, "sess-1");
+
+      // Cached: even once storage no longer has it (it was consumed, or the
+      // page navigated), the memoized value keeps answering.
+      sandbox.localStorage._data.clear();
+      const cachedHeaders = race.onestopHeaders({});
+      assert.equal(cachedHeaders["X-Onestop-Session"], "sess-1", "served from the cache");
+
+      // Invalidated on a round change, the same signal every other per-round
+      // cache in this file already keys off.
+      race.adoptBlocksKey("G:001");
+      assert.notEqual(race.state.headerContextCache, null, "the first sighting sets a baseline");
+      race.adoptBlocksKey("G:002");
+      assert.equal(race.state.headerContextCache, null, "and a real change clears it");
+    } finally {
+      sandbox.localStorage._data.clear();
+      race.state.headerContextCache = null;
+      race.state.blocksKey = null;
+    }
+  },
+
+  "the trace ID is never reused across calls": () => {
+    // Reusing it would be exactly the kind of pattern a fraud/abuse system
+    // watches for — the memoization above must stop at the context lookup and
+    // not spread to this.
+    const { race } = sandbox.window.PureClick;
+    const a = race.onestopHeaders({})["X-OneStop-Trace-ID"];
+    const b = race.onestopHeaders({})["X-OneStop-Trace-ID"];
+    assert.notEqual(a, b);
+  },
+
+  "seatMeta and seatStatus build the same query shape from the same helper"() {
+    const { race } = sandbox.window.PureClick;
+    const initData = { goods: { goodsCode: "G1", placeCode: "P1" }, playSeq: { playSeq: "007" }, bizCode: "WEBBR" };
+    const params = race.seatQueryParams(initData, ["001:001", "001:002"]);
+    assert.equal(params.get("goodsCode"), "G1");
+    assert.equal(params.get("placeCode"), "P1");
+    assert.equal(params.get("playSeq"), "007");
+    assert.equal(params.get("bizCode"), "WEBBR");
+    assert.deepEqual(params.getAll("blockKeys"), ["001:001", "001:002"]);
+  },
+
   "이미 선점된 좌석입니다 is a lost race, not a seat error": () => {
     // The two mean opposite things. The errors already matched mean "something
     // went wrong, back off"; this means "that one seat is gone, take the next

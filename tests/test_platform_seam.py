@@ -871,3 +871,47 @@ class AtomicStateTests(unittest.TestCase):
         finally:
             browser_bridge.os.replace = original_replace
             browser_bridge.time.sleep = original_sleep
+
+
+class BrowserHostStartupTests(unittest.TestCase):
+    """The blank 예매 창 on Windows: panel healthy, nothing crashing or hanging,
+    the browser window drawing nothing. One way that happens is on_shown raising
+    before it navigates — the window then sits on about:blank forever.
+    """
+
+    def _main_and_on_shown(self) -> tuple[ast.FunctionDef, ast.FunctionDef]:
+        tree = ast.parse((ROOT / "mac" / "browser_host.py").read_text(encoding="utf-8"))
+        main = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef) and n.name == "main")
+        on_shown = next(n for n in ast.walk(main)
+                        if isinstance(n, ast.FunctionDef) and n.name == "on_shown")
+        return main, on_shown
+
+    def test_the_page_still_loads_when_cookie_restore_fails(self) -> None:
+        _main, on_shown = self._main_and_on_shown()
+
+        def _calls(node: ast.AST, dotted: str) -> bool:
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Call):
+                    if ast.unparse(sub.func).endswith(dotted):
+                        return True
+            return False
+
+        tries = [n for n in ast.walk(on_shown) if isinstance(n, ast.Try)]
+        self.assertTrue(
+            any(_calls(t, "browser_session.restore") and
+                any(_calls(stmt, "load_url") for stmt in t.finalbody)
+                for t in tries),
+            "on_shown must call load_url(START_URL) from a finally: so a failing "
+            "cookie restore cannot leave the window on about:blank",
+        )
+
+    def test_main_readies_the_platform_before_creating_the_window(self) -> None:
+        body = (ROOT / "mac" / "browser_host.py").read_text(encoding="utf-8")
+        start = body.index("def main() -> None:")
+        segment = body[start:]
+        at_create = segment.index("webview.create_window(")
+        for call in ("prepare_display()", "ensure_ready()", "disable_gpu_rendering()"):
+            self.assertIn(call, segment, f"main() must call {call}")
+            self.assertLess(segment.index(call), at_create,
+                            f"{call} must run before create_window")

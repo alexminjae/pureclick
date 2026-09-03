@@ -440,6 +440,17 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
 def main() -> None:
     stop_event = threading.Event()
 
+    # DPI awareness is per-process. The panel sets it for itself; this process
+    # never did, so on a scaled Windows display the WebView2 host ran
+    # DPI-unaware. No-op on macOS.
+    app_platform.prepare_display()
+
+    # The panel checks this before spawning us, so on the normal path it just
+    # passes again here. It earns its place for the standalone/--browser-host
+    # invocation: a missing WebView2 runtime then raises a clean crash.log
+    # entry instead of putting up a blank window with nothing to diagnose.
+    app_platform.ensure_ready()
+
     # Must run before create_window — that is when the WebView2 environment
     # itself gets created, and the flag this sets has no effect afterward. A
     # no-op on macOS; see app_platform.disable_gpu_rendering.
@@ -478,11 +489,21 @@ def main() -> None:
             return
         started.set()
         install_document_start_script(window)
-        jar = browser_session.load_jar(COOKIE_PATH)
-        if jar:
-            restored = browser_session.restore(window, jar)
-            print(f"[pureclick] restored {restored} cookies", file=sys.stderr)
-        window.load_url(START_URL)
+        # Carrying the login forward is worth trying, but it must never decide
+        # whether the page loads at all. On Windows restore goes through a
+        # WebView2 call that raises TimeoutError if its message loop stalls, and
+        # an exception here used to mean load_url(START_URL) below never ran —
+        # the window sat on about:blank forever and rendered as a pure blank
+        # 예매 창, with nothing crashing or hanging on the Python side.
+        try:
+            jar = browser_session.load_jar(COOKIE_PATH)
+            if jar:
+                restored = browser_session.restore(window, jar)
+                print(f"[pureclick] restored {restored} cookies", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001 - a lost session beats a blank window
+            print(f"[pureclick] cookie restore skipped: {exc}", file=sys.stderr)
+        finally:
+            window.load_url(START_URL)
 
     window.events.shown += on_shown
 

@@ -1,1 +1,5 @@
-pywebview>=5.0
+pywebview>=5.0,<7
+# pywebview's Windows backend runs on pythonnet (imported as `clr`). Recent
+# pywebview pulls it via an environment marker of its own, but naming it here
+# keeps a working Windows build from depending on that staying true.
+pythonnet>=3.0.3; sys_platform == "win32"
