@@ -40,6 +40,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r mac/requirements.txt
 
+      # The Chrome host is what Windows actually ships now, so prove it first:
+      # Chrome up, autopilot injected at document-start, window.NOLSniper
+      # present on the real page with its API surface intact. This is the
+      # "Chrome up + NolSniper object present" check.
+      - name: Chrome host smoke — is the autopilot live on the page?
+        shell: pwsh
+        run: python -u tools/chrome_smoke.py
+
       - name: Report the WebView2 runtime this runner has
         shell: pwsh
         run: python -c "import app_platform as p; print('platform:', p.NAME); print('webview2:', p.webview2_runtime_version() or 'NOT FOUND')"

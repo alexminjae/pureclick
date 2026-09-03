@@ -3,3 +3,7 @@ pywebview>=5.0,<7
 # pywebview pulls it via an environment marker of its own, but naming it here
 # keeps a working Windows build from depending on that staying true.
 pythonnet>=3.0.3; sys_platform == "win32"
+# The Chrome/CDP host (mac/chrome_host.py) talks DevTools over a WebSocket.
+# Pure Python, so it freezes cleanly into the one-file build, and nothing in it
+# can block a thread inside a native call the way the pythonnet path does.
+websocket-client>=1.7

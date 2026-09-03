@@ -44,6 +44,11 @@ hiddenimports = [
     "browser_host",
     "browser_bridge",
     "browser_session",
+    # The Chrome/CDP host and its one dependency. Imported by name through
+    # browser_bridge's host selection, so nothing static references them.
+    "chrome_host",
+    "cdp",
+    "websocket",
     "nolsniper",
     "app_update",
 ]

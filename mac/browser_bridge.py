@@ -137,6 +137,34 @@ def merge_if_changed(path: Path, key: str, value: Any) -> bool:
         return True
 
 
+def _host_module() -> str:
+    """Which 예매 창 implementation the panel spawns.
+
+    Windows gets Chrome over CDP. The embedded WebView2 path reaches WebView2
+    through pywebview and pythonnet, and a blocked marshalled call there holds
+    the GIL — measured on a Windows runner, `worker.join(timeout=8)` never
+    returned — which freezes the whole process and makes every timeout, watchdog
+    and diagnostic in this app unreachable at exactly the moment they are needed.
+
+    macOS keeps WKWebView. It has no equivalent failure (verified: the same page,
+    520,833 characters, document-start ok, 83/83 cookies restored) and it is what
+    has actually been running, so there is nothing to gain by moving it.
+
+    NOLSNIPER_HOST=chrome|webview forces either, which is how both are tested.
+    """
+    choice = (os.environ.get("NOLSNIPER_HOST") or "").strip().lower()
+    if choice == "chrome":
+        return "chrome_host"
+    if choice == "webview":
+        return "browser_host"
+    return "chrome_host" if sys.platform == "win32" else "browser_host"
+
+
+def host_flag() -> str:
+    """The argv flag the frozen build dispatches on. See nolsniper_main."""
+    return "--chrome-host" if _host_module() == "chrome_host" else "--browser-host"
+
+
 class BrowserBridge:
     def __init__(self, mac_dir: Path) -> None:
         self.mac_dir = mac_dir
@@ -147,7 +175,7 @@ class BrowserBridge:
         data_dir = app_platform.user_data_dir() if getattr(sys, "frozen", False) else mac_dir
         self.state_path = data_dir / ".nolsniper_browser_state.json"
         self.health_path = data_dir / ".nolsniper_bridge_health.json"
-        self.host_script = mac_dir / "browser_host.py"
+        self.host_script = mac_dir / f"{_host_module()}.py"
         self.process: subprocess.Popen[str] | None = None
 
     @property
@@ -162,7 +190,7 @@ class BrowserBridge:
         # itself, so it is re-run with a flag the entry point dispatches on.
         # Passing host_script there would relaunch the control panel instead.
         if getattr(sys, "frozen", False):
-            argv = [sys.executable, "--browser-host", str(self.state_path)]
+            argv = [sys.executable, host_flag(), str(self.state_path)]
         else:
             argv = [sys.executable, str(self.host_script), str(self.state_path)]
         if geometry:

@@ -24,6 +24,7 @@ for extra in (ROOT, ROOT / "mac"):
         sys.path.insert(0, str(extra))
 
 BROWSER_HOST_FLAG = "--browser-host"
+CHROME_HOST_FLAG = "--chrome-host"
 
 
 def _crash_log_path() -> Path:
@@ -75,16 +76,22 @@ threading.excepthook = _thread_crashed
 
 
 def main() -> None:
-    if BROWSER_HOST_FLAG in sys.argv:
-        # browser_host reads its own argv positionally; drop the flag so the
-        # state path stays at argv[1] where it expects it.
-        sys.argv = [sys.argv[0]] + [a for a in sys.argv[1:] if a != BROWSER_HOST_FLAG]
+    # Two 예매 창 implementations: WebView2/WKWebView through pywebview
+    # (browser_host) and a real Chrome over CDP (chrome_host). browser_bridge
+    # decides which, and passes the matching flag; both read their own argv
+    # positionally, so the flag is stripped and the state path stays at argv[1].
+    for flag, module, label in (
+        (BROWSER_HOST_FLAG, "browser_host", "browser_host (예매 창)"),
+        (CHROME_HOST_FLAG, "chrome_host", "chrome_host (예매 창)"),
+    ):
+        if flag not in sys.argv:
+            continue
+        sys.argv = [sys.argv[0]] + [a for a in sys.argv[1:] if a != flag]
         try:
-            import browser_host
-
-            browser_host.main()
+            host = __import__(module)
+            host.main()
         except BaseException as exc:  # noqa: BLE001 - SystemExit counts too; log, then still exit
-            _log_crash("browser_host (예매 창)", exc)
+            _log_crash(label, exc)
             raise
         return
 
