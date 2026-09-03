@@ -61,17 +61,26 @@ jobs:
           '{}' | Set-Content -Encoding utf8 $state
           # -u: the first run of this job produced sixty seconds of total
           # silence, because a force-killed Python never flushes its buffers.
+          $health = Join-Path (Split-Path $state) '.nolsniper_bridge_health.json'
+          Remove-Item $health -ErrorAction SilentlyContinue
+          # --chrome-host: what Windows actually ships. This job ran
+          # --browser-host for its whole life, which meant it was exercising the
+          # very path the revamp replaced and proving nothing about the new one.
           $p = Start-Process -PassThru -FilePath python `
-                 -ArgumentList '-u','nolsniper_main.py','--browser-host',$state `
+                 -ArgumentList '-u','nolsniper_main.py','--chrome-host',$state `
                  -RedirectStandardOutput host_out.log -RedirectStandardError host_err.log
           Write-Host "started pid $($p.Id)"
-          # 120s, not 60: when every evaluate_js times out a poll tick costs
-          # _POLL_CONTEXT_TIMEOUT seconds, so the loop gets through far fewer
-          # ticks than the 0.4s cadence suggests.
-          Start-Sleep -Seconds 120
+          $ok = $false
+          foreach ($i in 1..45) {
+            Start-Sleep -Seconds 2
+            if (Test-Path $health) { $ok = $true; break }
+            if ($p.HasExited) { break }
+          }
           if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; Write-Host 'stopped it' }
           else { Write-Host "it exited on its own, code $($p.ExitCode)" }
           "$state" | Set-Content statepath.txt
+          if (-not $ok) { throw 'chrome_host never wrote a bridge health report' }
+          Write-Host 'chrome_host wrote bridge health'
 
       # Never fail the job on a missing file: "the diagnostic was not written"
       # is itself the finding, and a red X hides the logs behind a click.

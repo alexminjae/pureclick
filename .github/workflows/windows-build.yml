@@ -52,6 +52,36 @@ jobs:
       - name: Build
         run: pyinstaller nolsniper.spec --noconfirm
 
+      # The exe is what people actually run, and PyInstaller silently omitting a
+      # hidden import — cdp, websocket, chrome_host are all reached by name, so
+      # nothing static references them — only shows up at launch, on someone
+      # else's machine, as a window that never appears. Run the real artifact
+      # with the real flag and require it to get far enough to report health.
+      - name: Smoke the built exe's Chrome host
+        shell: pwsh
+        run: |
+          $state = Join-Path $env:RUNNER_TEMP 'exe_state.json'
+          '{}' | Set-Content -Encoding utf8 $state
+          $health = Join-Path (Split-Path $state) '.nolsniper_bridge_health.json'
+          Remove-Item $health -ErrorAction SilentlyContinue
+          $p = Start-Process -PassThru -FilePath dist\NOLSniper.exe `
+                 -ArgumentList '--chrome-host',$state `
+                 -RedirectStandardOutput exe_out.log -RedirectStandardError exe_err.log
+          $ok = $false
+          foreach ($i in 1..45) {
+            Start-Sleep -Seconds 2
+            if (Test-Path $health) { $ok = $true; break }
+            if ($p.HasExited) { break }
+          }
+          if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          Write-Host '=== stdout ==='; if (Test-Path exe_out.log) { Get-Content exe_out.log -Raw }
+          Write-Host '=== stderr ==='; if (Test-Path exe_err.log) { Get-Content exe_err.log -Raw }
+          Write-Host '=== startup breadcrumbs ==='
+          $trail = Join-Path $env:LOCALAPPDATA 'NOLSniper\startup.log'
+          if (Test-Path $trail) { Get-Content $trail -Raw } else { Write-Host '(absent)' }
+          if (-not $ok) { throw 'the built exe never wrote bridge health with --chrome-host' }
+          Write-Host '=== bridge health ==='; Get-Content $health -Raw
+
       - name: Write the update manifest
         shell: pwsh
         run: |
