@@ -593,7 +593,10 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
         # A file the user can actually open. First one a few seconds in so it
         # exists, then every ~30s — the page may still be loading at the first
         # write, so the "예매 창 켜진 지" line says how far along this snapshot is.
-        if tick in (8, 40) or tick % 80 == 0:
+        # tick 2 first: when every evaluate_js is timing out a tick costs
+        # _POLL_CONTEXT_TIMEOUT seconds, so tick 8 was landing past a 60s
+        # window and the file looked absent when the loop was in fact running.
+        if tick in (2, 10, 40) or tick % 80 == 0:
             write_desktop_diagnostic(
                 {"last_ok": last_ok, "failures": failures, "last_error": last_error},
                 _probe_page(window),

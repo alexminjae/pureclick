@@ -57,9 +57,13 @@ jobs:
                  -ArgumentList '-u','nolsniper_main.py','--browser-host',$state `
                  -RedirectStandardOutput host_out.log -RedirectStandardError host_err.log
           Write-Host "started pid $($p.Id)"
-          Start-Sleep -Seconds 60
+          # 120s, not 60: when every evaluate_js times out a poll tick costs
+          # _POLL_CONTEXT_TIMEOUT seconds, so the loop gets through far fewer
+          # ticks than the 0.4s cadence suggests.
+          Start-Sleep -Seconds 120
           if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; Write-Host 'stopped it' }
           else { Write-Host "it exited on its own, code $($p.ExitCode)" }
+          "$state" | Set-Content statepath.txt
 
       # Never fail the job on a missing file: "the diagnostic was not written"
       # is itself the finding, and a red X hides the logs behind a click.
@@ -81,7 +85,14 @@ jobs:
           Show 'diagnostic (Desktop)' $desk
           Show 'diagnostic (home)' $home_
           Show 'crash.log' (Join-Path $env:LOCALAPPDATA 'NOLSniper\crash.log')
-          Show 'bridge health' (Join-Path $env:LOCALAPPDATA 'NOLSniper\.nolsniper_bridge_health.json')
+          # The health file sits next to the state file it was given in argv[1],
+          # NOT under LOCALAPPDATA — looking in the wrong place made a running
+          # poll loop look dead on the previous run.
+          if (Test-Path statepath.txt) {
+            $sp = (Get-Content statepath.txt -Raw).Trim()
+            Show 'bridge health (next to state)' (Join-Path (Split-Path $sp) '.nolsniper_bridge_health.json')
+            Show 'state file' $sp
+          }
 
       - uses: actions/upload-artifact@v4
         if: always()
