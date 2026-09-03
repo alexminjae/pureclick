@@ -161,28 +161,30 @@ def _await_on_ui(browser: Any, start_task: Any, timeout: float = _CALL_TIMEOUT_S
     return box.get("result")
 
 
-def _run_on_ui_thread(browser: Any, fn: Any) -> None:
-    """Run a synchronous, void WebView2 call on the thread that owns the control.
+def _run_on_ui_thread(browser: Any, fn: Any) -> Any:
+    """Run a synchronous (non-Task) call on the thread that owns the control.
 
-    `_await_on_ui` is for calls that hand back a Task to await. CreateCookie and
-    AddOrUpdateCookie return void and just have to happen on the UI thread —
-    called from a background thread (which is where the startup sequence now
-    runs, so it cannot wedge the UI thread) they otherwise throw or hang. From
-    the UI thread itself this is a direct call; from anywhere else it is a
-    blocking Control.Invoke, which the UI thread's own message loop services.
+    `_await_on_ui` is for calls that hand back a Task to await. Everything that
+    merely *touches* CoreWebView2 — reading `.CoreWebView2`, `.CookieManager`,
+    a cookie's `.Name`, calling `AddOrUpdateCookie` — throws
+    "CoreWebView2 can only be accessed from the UI thread" when done from
+    anywhere else, and the startup sequence now runs on a background thread. On
+    the UI thread this is a direct call; off it, a blocking Control.Invoke the
+    UI thread's own message loop services. Returns whatever `fn` returns.
     """
     if _message_loop_running():
-        fn()
-        return
+        return fn()
     _Action, Func, Object, _String, _Task, _TaskScheduler = _clr()
+    box: dict[str, Any] = {}
 
     def _wrapped() -> Any:
-        fn()
+        box["result"] = fn()
         return None
 
     # Func[Object], not Action — matches _await_on_ui's idiom and what pywebview
     # itself hands Invoke, so the same fakes exercise it.
     browser.webview.Invoke(Func[Object](_wrapped))
+    return box.get("result")
 
 
 def prepare_display() -> None:
@@ -316,17 +318,22 @@ def install_document_start_script(window: Any, source: str) -> bool:
     browser = _browser(window)
     if browser is None:
         raise RuntimeError(f"window {window.uid!r} has no WebView2 yet")
-    core = browser.webview.CoreWebView2
 
-    previous = _script_ids.pop(window.uid, None)
-    if previous is not None:
-        # Before adding, never after: a failure between the two must not leave
-        # two copies registered.
-        core.RemoveScriptToExecuteOnDocumentCreated(previous)
+    def _swap_and_add() -> Any:
+        # Every line here touches CoreWebView2, which throws on any thread but
+        # the UI one — and this is now reached from the background startup
+        # thread. _await_on_ui runs this closure on the UI thread (inline when
+        # already there, inside Invoke otherwise), so the `.CoreWebView2` read
+        # and the Remove call are as safe here as the Async call, and unsafe
+        # anywhere outside it. Before adding, never after: a failure between the
+        # two must not leave two copies registered.
+        core = browser.webview.CoreWebView2
+        previous = _script_ids.pop(window.uid, None)
+        if previous is not None:
+            core.RemoveScriptToExecuteOnDocumentCreated(previous)
+        return core.AddScriptToExecuteOnDocumentCreatedAsync(source)
 
-    script_id = _await_on_ui(
-        browser, lambda: core.AddScriptToExecuteOnDocumentCreatedAsync(source)
-    )
+    script_id = _await_on_ui(browser, _swap_and_add)
     if script_id is None:
         raise RuntimeError("WebView2 returned no script id")
     _script_ids[window.uid] = str(script_id)
@@ -374,19 +381,27 @@ class _CookieStore:
     """The subset of WKHTTPCookieStore that browser_session actually uses."""
 
     def __init__(self, browser: Any) -> None:
+        # No CoreWebView2 access here on purpose — a _CookieStore is built on the
+        # background startup / poll thread, and `.CoreWebView2.CookieManager`
+        # would throw there. Every touch is deferred to a UI-thread hop below.
         self._browser = browser
-        self._manager = browser.webview.CoreWebView2.CookieManager
+
+    def _manager(self) -> Any:
+        return self._browser.webview.CoreWebView2.CookieManager
 
     def all_cookies(self, url: str | None = None) -> list[dict[str, Any]]:
-        cookies = _await_on_ui(self._browser, lambda: self._manager.GetCookiesAsync(url))
-        return [cookie_row_from(c) for c in (cookies or [])]
+        cookies = _await_on_ui(self._browser, lambda: self._manager().GetCookiesAsync(url))
+        # cookie_row_from reads each cookie's .Name/.Value/… — also UI-thread-only.
+        return _run_on_ui_thread(
+            self._browser, lambda: [cookie_row_from(c) for c in (cookies or [])]
+        )
 
     def set_cookie(self, row: dict[str, Any]) -> None:
-        manager = self._manager
-        _run_on_ui_thread(
-            self._browser,
-            lambda: manager.AddOrUpdateCookie(cookie_from_row(manager, row)),
-        )
+        def _do() -> None:
+            manager = self._manager()
+            manager.AddOrUpdateCookie(cookie_from_row(manager, row))
+
+        _run_on_ui_thread(self._browser, _do)
 
 
 def cookie_store(window: Any) -> Any | None:

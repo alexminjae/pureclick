@@ -174,9 +174,12 @@ def install_document_start_script(window: webview.Window) -> bool:
 # this app already has.
 _EVALUATE_JS_TIMEOUT = 8.0
 # poll_context runs every 400ms and is the only source of the bridge health
-# report the panel reads — a stuck call there has to be noticed and reported
-# within a few ticks, not eventually.
-_POLL_CONTEXT_TIMEOUT = 3.0
+# report the panel reads. 3s was too tight: nol.yanolja.com/ticket is a ~500 KB
+# SPA and a genuine evaluate_js against it, queued behind the page's own script,
+# routinely took longer than that — so the panel flipped to "응답 없음" over a
+# page that was fine, just slow to read. The watchdog counts ticks, not seconds,
+# so a longer per-call ceiling does not slow real-hang detection much.
+_POLL_CONTEXT_TIMEOUT = 8.0
 
 
 def _call_with_timeout(fn: Any, *, timeout: float, label: str) -> Any:
@@ -442,7 +445,7 @@ def _crash_log_tail(limit: int = 4000) -> str:
     return "(없음)"
 
 
-def write_desktop_diagnostic(health: dict[str, Any], probe: Any) -> None:
+def write_desktop_diagnostic(health: dict[str, Any], probe: Any, elapsed: float = 0.0) -> None:
     """One human-readable file on the Desktop with everything worth knowing."""
     try:
         wv_version = getattr(webview, "__version__", "?")
@@ -464,6 +467,7 @@ def write_desktop_diagnostic(health: dict[str, Any], probe: Any) -> None:
     age = time.time() - (health.get("last_ok") or 0)
     lines = [
         f"NOL Sniper 진단  —  {datetime.datetime.now().isoformat(timespec='seconds')}",
+        f"예매 창 켜진 지    : {elapsed:.0f}초  (짧으면 아직 로딩 중일 수 있음 — 1분 뒤 다시 저장됨)",
         f"버전            : {app_update.version_tag()}",
         f"파이썬/플랫폼    : {sys.version.split()[0]} / {sys.platform}",
         f"pywebview       : {wv_version}",
@@ -508,6 +512,7 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
     right; being silent about it is not.
     """
     tick = 0
+    started_at = time.time()
     saved_jar: list[dict[str, Any]] = []
     failures = 0
     last_ok = 0.0
@@ -585,12 +590,14 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
             # this is what turns "it doesn't work" into a specific answer.
             **PLATFORM_STATE,
         })
-        # A file the user can actually open. Every ~5s, and once early so it
-        # exists well before anyone goes looking for it.
-        if tick % 12 == 1:
+        # A file the user can actually open. First one a few seconds in so it
+        # exists, then every ~30s — the page may still be loading at the first
+        # write, so the "예매 창 켜진 지" line says how far along this snapshot is.
+        if tick in (8, 40) or tick % 80 == 0:
             write_desktop_diagnostic(
                 {"last_ok": last_ok, "failures": failures, "last_error": last_error},
                 _probe_page(window),
+                elapsed=time.time() - started_at,
             )
         stop_event.wait(0.4)
 
