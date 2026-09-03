@@ -1,0 +1,88 @@
+name: Windows smoke
+
+# Actually run the 예매 창 on Windows and report what it did.
+#
+# Every Windows fix so far has been made blind: the panel is on a machine
+# neither the developer nor the model can see, each hypothesis costs a build,
+# a KakaoTalk transfer and a manual test, and the one diagnostic that ever came
+# back was from a build three versions old. macOS renders the same page from the
+# same code perfectly, so there is nothing to reproduce locally.
+#
+# This job is the missing loop. It launches the browser host on a real Windows
+# runner, lets it settle, and prints the diagnostic the app already writes —
+# WebView2 runtime version, how far on_shown got, whether the document-start
+# script registered, what the page actually is. Three minutes, no human.
+#
+# A runner is not the user's laptop: no GPU, a different WebView2 build, a
+# non-interactive desktop. It will not reproduce every rendering fault. It does
+# catch the whole class this project keeps hitting — wrong-thread CoreWebView2
+# calls, injection failures, navigation that never happens, startup that stalls
+# before load_url — all of which have shipped to the user at least once.
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r mac/requirements.txt
+
+      - name: Report the WebView2 runtime this runner has
+        shell: pwsh
+        run: python -c "import app_platform as p; print('platform:', p.NAME); print('webview2:', p.webview2_runtime_version() or 'NOT FOUND')"
+
+      # The host blocks in webview.start(), so it is started detached and killed
+      # after it has had time to navigate, inject and poll a few times.
+      - name: Run the 예매 창 for 60s
+        shell: pwsh
+        run: |
+          $state = Join-Path $env:RUNNER_TEMP 'smoke_state.json'
+          '{}' | Set-Content -Encoding utf8 $state
+          $p = Start-Process -PassThru -FilePath python `
+                 -ArgumentList 'nolsniper_main.py','--browser-host',$state `
+                 -RedirectStandardOutput host_out.log -RedirectStandardError host_err.log
+          Write-Host "started pid $($p.Id)"
+          Start-Sleep -Seconds 60
+          if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; Write-Host 'stopped it' }
+          else { Write-Host "it exited on its own, code $($p.ExitCode)" }
+
+      # Never fail the job on a missing file: "the diagnostic was not written"
+      # is itself the finding, and a red X hides the logs behind a click.
+      - name: What happened
+        if: always()
+        shell: pwsh
+        run: |
+          function Show($label, $path) {
+            Write-Host "=============== $label ==============="
+            if (Test-Path $path) { Get-Content $path -Raw } else { Write-Host "(absent)" }
+          }
+          Show 'stdout' host_out.log
+          Show 'stderr' host_err.log
+          $desk = Join-Path $env:USERPROFILE 'Desktop\NOLSniper-진단.txt'
+          $home_ = Join-Path $env:USERPROFILE 'NOLSniper-진단.txt'
+          Show 'diagnostic (Desktop)' $desk
+          Show 'diagnostic (home)' $home_
+          Show 'crash.log' (Join-Path $env:LOCALAPPDATA 'NOLSniper\crash.log')
+          Show 'bridge health' (Join-Path $env:LOCALAPPDATA 'NOLSniper\.nolsniper_bridge_health.json')
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-smoke-logs
+          path: |
+            host_out.log
+            host_err.log
+          if-no-files-found: ignore
