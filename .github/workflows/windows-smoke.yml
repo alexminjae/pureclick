@@ -51,8 +51,10 @@ jobs:
         run: |
           $state = Join-Path $env:RUNNER_TEMP 'smoke_state.json'
           '{}' | Set-Content -Encoding utf8 $state
+          # -u: the first run of this job produced sixty seconds of total
+          # silence, because a force-killed Python never flushes its buffers.
           $p = Start-Process -PassThru -FilePath python `
-                 -ArgumentList 'nolsniper_main.py','--browser-host',$state `
+                 -ArgumentList '-u','nolsniper_main.py','--browser-host',$state `
                  -RedirectStandardOutput host_out.log -RedirectStandardError host_err.log
           Write-Host "started pid $($p.Id)"
           Start-Sleep -Seconds 60
@@ -69,6 +71,9 @@ jobs:
             Write-Host "=============== $label ==============="
             if (Test-Path $path) { Get-Content $path -Raw } else { Write-Host "(absent)" }
           }
+          # The breadcrumb trail first — it is the one thing that survives a
+          # kill, and it says how far startup actually got.
+          Show 'startup breadcrumbs' (Join-Path $env:LOCALAPPDATA 'NOLSniper\startup.log')
           Show 'stdout' host_out.log
           Show 'stderr' host_err.log
           $desk = Join-Path $env:USERPROFILE 'Desktop\NOLSniper-진단.txt'

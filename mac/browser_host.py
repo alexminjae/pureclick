@@ -602,28 +602,54 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
         stop_event.wait(0.4)
 
 
+STARTUP_LOG = "startup.log"
+
+
+def _stage(msg: str) -> None:
+    """A breadcrumb per startup milestone, written the instant it happens.
+
+    A Windows run of this process produced sixty seconds of complete silence —
+    no stdout, no stderr, no bridge health, no crash.log — which says only that
+    it stopped somewhere before poll_context, and nothing about where. Buffered
+    output is lost when the process is killed, so this flushes on every call and
+    also appends to a file, and it runs before anything that could hang.
+    """
+    line = f"{datetime.datetime.now().isoformat(timespec='seconds')} {msg}"
+    print(f"[nolsniper] stage: {msg}", file=sys.stderr, flush=True)
+    try:
+        with (app_platform.user_data_dir() / STARTUP_LOG).open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError:
+        pass  # a breadcrumb that cannot be written must not be the thing that stops us
+
+
 def main() -> None:
     stop_event = threading.Event()
+    _stage("main() entered")
 
     # DPI awareness is per-process. The panel sets it for itself; this process
     # never did, so on a scaled Windows display the WebView2 host ran
     # DPI-unaware. No-op on macOS.
     app_platform.prepare_display()
+    _stage("prepare_display done")
 
     # The panel checks this before spawning us, so on the normal path it just
     # passes again here. It earns its place for the standalone/--browser-host
     # invocation: a missing WebView2 runtime then raises a clean crash.log
     # entry instead of putting up a blank window with nothing to diagnose.
     app_platform.ensure_ready()
+    _stage("ensure_ready done — WebView2 usable")
 
     # Must run before create_window — that is when the WebView2 environment
     # itself gets created, and the flag this sets has no effect afterward. A
     # no-op on macOS; see app_platform.disable_gpu_rendering.
     app_platform.disable_gpu_rendering()
+    _stage("disable_gpu_rendering done")
 
     # A target=_blank click would otherwise hand the booking flow to Safari,
     # where none of this exists. Everything stays in this one window.
     webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = False
+    _stage("webview.settings applied")
 
     # Started blank so the saved session can be put back *before* the first
     # request goes out; otherwise NOL is asked for the page as a logged-out
@@ -640,6 +666,7 @@ def main() -> None:
         height=height,
         min_size=(760, 640),
     )
+    _stage("create_window returned")
 
     def on_loaded() -> None:
         # Never inline. pywebview fires `loaded` synchronously on WebView2's UI
@@ -724,6 +751,7 @@ def main() -> None:
     # being chased, but it pops its own window unbidden — which just looked like
     # another bug to the user — and the Desktop 진단.txt now carries the page
     # state it was there to expose.
+    _stage("threads started; entering webview.start()")
     webview.start(debug=bool(os.environ.get("NOLSNIPER_DEVTOOLS")))
 
 
