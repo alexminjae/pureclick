@@ -919,3 +919,42 @@ class BrowserHostStartupTests(unittest.TestCase):
             self.assertIn(call, segment, f"main() must call {call}")
             self.assertLess(segment.index(call), at_create,
                             f"{call} must run before create_window")
+
+    def test_on_loaded_does_not_inject_on_the_ui_thread(self) -> None:
+        """`loaded` fires on WebView2's UI thread; inject_autopilot makes
+        WebView2 calls and waits on them, which deadlocks that thread on
+        Windows. It must be handed to a worker thread, not called inline.
+        """
+        _main, _on_shown = self._main_and_on_shown()
+        tree = ast.parse((ROOT / "mac" / "browser_host.py").read_text(encoding="utf-8"))
+        on_loaded = next(n for n in ast.walk(tree)
+                         if isinstance(n, ast.FunctionDef) and n.name == "on_loaded")
+        body = ast.unparse(on_loaded)
+        self.assertIn("Thread(", body,
+                      "on_loaded must start a thread rather than block the UI thread")
+        self.assertIn("inject_autopilot", body)
+        for stmt in on_loaded.body:
+            if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                self.assertNotEqual(
+                    ast.unparse(stmt.value.func), "inject_autopilot",
+                    "on_loaded must not call inject_autopilot inline",
+                )
+
+    def test_inject_autopilot_skips_the_big_eval_when_document_start_took(self) -> None:
+        """The document-start user script already runs the autopilot before page
+        scripts; the on-load evaluate_js of the whole 340 KB file is only the
+        fallback for when that registration failed.
+        """
+        tree = ast.parse((ROOT / "mac" / "browser_host.py").read_text(encoding="utf-8"))
+        inject = next(n for n in ast.walk(tree)
+                      if isinstance(n, ast.FunctionDef) and n.name == "inject_autopilot")
+        guarded = [
+            n for n in ast.walk(inject)
+            if isinstance(n, ast.If) and "document_start" in ast.unparse(n.test)
+            and any("_call_with_timeout" in ast.unparse(s) for s in ast.walk(n))
+        ]
+        self.assertTrue(
+            guarded,
+            "the inject_autopilot evaluate_js of load_script() must sit behind a "
+            "check that document-start injection did not already take",
+        )

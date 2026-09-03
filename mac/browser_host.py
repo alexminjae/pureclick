@@ -292,32 +292,45 @@ def apply_state(window: webview.Window) -> None:
         patch_state(STATE_PATH, drop=drop)
 
 
+# Serialises inject_autopilot against itself. It now runs on a fresh thread per
+# `loaded` event (see on_loaded), and two overlapping navigations would otherwise
+# race the _script_ids bookkeeping inside install_document_start_script.
+_inject_lock = threading.Lock()
+
+
 def inject_autopilot(window: webview.Window) -> None:
     # The window starts blank so the saved session can be restored before the
     # first request; there is nothing to automate on an opaque origin.
     if (window.get_current_url() or "").startswith(("about:", "data:")):
         return
-    # Keep document-start in sync with disk on every load — otherwise a long-
-    # lived app keeps re-injecting the script from process start.
-    install_document_start_script(window)
-    # Storage first, script second.
-    #
-    # localStorage is per-origin and the booking flow crosses two of them
-    # (nol.yanolja.com for the product page, tickets.interpark.com for the seat
-    # map). This ran the other way round, so on every fresh origin the script
-    # booted, bootRoute() read an empty config and decided there was nothing to
-    # do, and only then was the config written. bootRoute() is not called again
-    # — `if (!alreadyLoaded)` guards it, and the 400ms watcher only re-runs it
-    # when the URL *changes*, which it just had. So the arm and the seat config
-    # arrived one moment too late to be read, which is how you can land on the
-    # seat map after the queue and have nothing start.
-    apply_state(window)
-    _call_with_timeout(
-        lambda: window.evaluate_js(load_script()),
-        timeout=_EVALUATE_JS_TIMEOUT, label="inject_autopilot",
-    )
-    # And once more, for anything the panel wrote while the script was loading.
-    apply_state(window)
+    with _inject_lock:
+        # Keep document-start in sync with disk on every load — otherwise a long-
+        # lived app keeps re-injecting the script from process start.
+        install_document_start_script(window)
+        # Storage first, script second.
+        #
+        # localStorage is per-origin and the booking flow crosses two of them
+        # (nol.yanolja.com for the product page, tickets.interpark.com for the
+        # seat map). This ran the other way round, so on every fresh origin the
+        # script booted, bootRoute() read an empty config and decided there was
+        # nothing to do, and only then was the config written. bootRoute() is not
+        # called again — `if (!alreadyLoaded)` guards it, and the 400ms watcher
+        # only re-runs it when the URL *changes*, which it just had. So the arm
+        # and the seat config arrived one moment too late to be read, which is
+        # how you can land on the seat map after the queue and have nothing
+        # start.
+        apply_state(window)
+        # The document-start user script already ran the autopilot before the
+        # page's own scripts. This re-eval is only the fallback for when that
+        # registration failed — when it took, skip it rather than push a 340 KB
+        # evaluate_js through the bridge on every single navigation.
+        if PLATFORM_STATE.get("document_start") != "ok":
+            _call_with_timeout(
+                lambda: window.evaluate_js(load_script()),
+                timeout=_EVALUATE_JS_TIMEOUT, label="inject_autopilot",
+            )
+        # And once more, for anything the panel wrote while the script loaded.
+        apply_state(window)
 
 
 def watch_state(window: webview.Window, stop_event: threading.Event) -> None:
@@ -477,7 +490,19 @@ def main() -> None:
     )
 
     def on_loaded() -> None:
-        inject_autopilot(window)
+        # Never inline. pywebview fires `loaded` synchronously on WebView2's UI
+        # thread, and inject_autopilot makes WebView2 calls and waits on them —
+        # done from that same thread on Windows it deadlocks it, so every full
+        # navigation (each Naver OAuth hop is one) froze the 예매 창 for the
+        # stacked length of those waits. Windows drew that as 응답 없음 over a
+        # blank window that never came back. On a worker thread the same calls
+        # marshal in against a UI thread that is still pumping — the shape they
+        # are built for. macOS never hit this (main-thread JS eval is fine
+        # there) but the worker thread is harmless on it too.
+        threading.Thread(
+            target=inject_autopilot, args=(window,),
+            name="inject_autopilot", daemon=True,
+        ).start()
 
     window.events.loaded += on_loaded
     window.events.closed += lambda: stop_event.set()
