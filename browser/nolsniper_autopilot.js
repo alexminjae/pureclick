@@ -7133,6 +7133,90 @@
     return report;
   }
 
+  // ---- Can we do entry over the API from here? -----------------------------
+  //
+  // The queue endpoint sends CORS headers only to https://tickets.interpark.com
+  // (measured — see waitingApiUsableHere). From the NOL product page the burst
+  // is impossible, so entry falls back to clicking 예매하기, and before a show
+  // opens that button does not exist. Hence the folk remedy of moving the
+  // machine's clock forward until it appears, which invalidates the session's
+  // own time-checked tokens and logs you out.
+  //
+  // There is a tickets.interpark.com page for the same show, and it answers
+  // 200. If the 예매 창 can sit on it without being bounced back to NOL, and if
+  // the login session reaches it, then the existing burst works from there with
+  // no clock trickery and no button at all.
+  //
+  // Those are two facts about a live session, not something to reason out. This
+  // spends exactly one /waiting request to settle both.
+  async function probeQueueOrigin() {
+    const report = {
+      at: new Date().toISOString().slice(11, 23),
+      build: AUTOPILOT_BUILD,
+      href: String(location.href).slice(0, 200),
+      origin: location.origin,
+      onAllowedOrigin: waitingApiUsableHere(),
+    };
+
+    const blockedFor = gatewayBlockRemainingMs();
+    if (blockedFor > 0) {
+      report.verdict = `접속 차단 중 — ${Math.ceil(blockedFor / 1000)}초 후에 다시 시도하세요.`;
+      seatState.lastQueueOriginProbe = report;
+      return report;
+    }
+    if (!report.onAllowedOrigin) {
+      // Bounced. The parking page redirected us somewhere the burst cannot run.
+      report.verdict =
+        `이 창은 ${location.origin}에 있습니다 — 대기열 API를 읽을 수 없는 출처입니다.`;
+      seatState.lastQueueOriginProbe = report;
+      return report;
+    }
+
+    const arm = loadArmConfig();
+    report.armPresent = Boolean(arm?.goods_code);
+    if (!arm?.goods_code || !arm?.play_date) {
+      report.verdict = "공연 정보가 이 출처에 아직 없습니다 — 조작판에서 다시 보내 주세요.";
+      seatState.lastQueueOriginProbe = report;
+      return report;
+    }
+    report.asked = { goods: arm.goods_code, playDate: arm.play_date, playSeq: arm.play_seq };
+
+    // Exactly one. This is a live endpoint that answers abuse with a ~165s
+    // lockout, and one answer is all the question needs.
+    const startedPerf = performance.now();
+    try {
+      const answer = await fetchWaitingUrl(arm);
+      report.ms = Math.round(performance.now() - startedPerf);
+      report.answer = describeWaitingAnswer(answer);
+      report.readable = true;
+      report.verdict =
+        answer === "NP"
+          ? "출처는 통과 — 다만 선예매 인증이 필요합니다 (NP)."
+          : answer === "BL"
+            ? "차단 상태입니다 (BL) — 중단하세요."
+            : "대기열 API를 읽을 수 있습니다 — 이 페이지에서 API 진입이 가능합니다.";
+    } catch (error) {
+      report.ms = Math.round(performance.now() - startedPerf);
+      report.readable = false;
+      report.error = String(error).slice(0, 200);
+      // The two failures mean opposite things, and telling them apart is most
+      // of the value of asking at all.
+      report.unreachable = isUnreachableError(error);
+      report.verdict = report.unreachable
+        ? "출처는 맞지만 요청 자체가 막혔습니다 — API 진입은 불가능합니다."
+        : /401|로그인|Unauthorized/i.test(report.error)
+          ? "출처는 통과 — 다만 이 페이지에 로그인 세션이 없습니다."
+          : "대기열 API가 오류를 돌려줬습니다 — 아래 내용을 확인하세요.";
+    }
+    traceCall("probeQueueOrigin", report.origin, {
+      readable: report.readable,
+      answer: report.answer,
+      error: report.error,
+    });
+    seatState.lastQueueOriginProbe = report;
+    return report;
+  }
+
   function seatStatusSummary() {
     return {
       seat: {
@@ -7201,6 +7285,8 @@
         // The last answer to "does a bare API hold reach the cart?", so the
         // spike's result survives in the state file instead of a screenshot.
         softHoldProbe: seatState.lastSoftHoldProbe || null,
+        // Whether entry can be done over the API from wherever the 예매 창 is.
+        queueOriginProbe: seatState.lastQueueOriginProbe || null,
         softHoldWaitMs: seatState.lastSoftHoldWaitMs ?? null,
         // Where the watch is standing, and how often it had to go back.
         parkedBlock: seatState.parkedBlock || "",
@@ -8548,6 +8634,7 @@
         clickableAmong,
         parkInWatchedBlock,
         probeSoftHold,
+        probeQueueOrigin,
         describeSeatBinding,
         preselectSeat,
         bulkPreselectSeats,
@@ -8610,6 +8697,9 @@
       // The spike. Holds one seat over the API, watches whether the 예매 창
       // notices, hands it straight back, and never presses 선택 완료.
       probeSoftHold: () => probeSoftHold(),
+      // One /waiting request from wherever the 예매 창 is, to settle whether
+      // API entry is possible from this page. Never enters, never navigates.
+      probeQueueOrigin: () => probeQueueOrigin(),
       stopAll() {
         window.__nolsniperRunGen = (window.__nolsniperRunGen || 0) + 1;
         seatState.running = false;

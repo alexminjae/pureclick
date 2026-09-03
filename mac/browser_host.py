@@ -93,6 +93,9 @@ _COMMAND_JS = {
     # own 선택 좌석 notices, hand it straight back. Never presses 선택 완료 —
     # the question it answers is whether pressing it would be safe.
     "probe_soft_hold": "window.NOLSniper && NOLSniper.probeSoftHold()",
+    # One /waiting request from wherever the 예매 창 is, to settle whether entry
+    # can be done over the API from this page. Never enters, never navigates.
+    "probe_queue_origin": "window.NOLSniper && NOLSniper.probeQueueOrigin()",
     "sync_grades": "window.NOLSniper && NOLSniper.syncGrades()",
     "fetch_show": "window.NOLSniper && NOLSniper.fetchShowCatalog()",
     "stop_all": "window.NOLSniper && NOLSniper.stopAll()",

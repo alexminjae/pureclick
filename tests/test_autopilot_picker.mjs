@@ -3989,6 +3989,46 @@ const tests = {
     );
   },
 
+  "the queue-origin probe asks once and never enters"() {
+    // It exists to settle two facts about a live session — does the 예매 창 stay
+    // on tickets.interpark.com, and does the login reach it — so that entry can
+    // stop depending on a 예매하기 button that does not exist before an open.
+    // A probe that entered to find out would have answered nothing and spent
+    // the queue slot.
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
+    const probe = source.slice(
+      source.indexOf("async function probeQueueOrigin()"),
+      source.indexOf("function seatStatusSummary()"),
+    );
+    assert.ok(probe.length > 400, "the probe must exist");
+    assert.doesNotMatch(probe, /location\.href\s*=/, "it must not navigate");
+    assert.doesNotMatch(probe, /openBookSession|enterFromNolPage|clickFirstMatching/,
+                        "and must not enter by any route");
+    assert.doesNotMatch(probe, /acquireWaitingUrl/, "one request, not the burst");
+    assert.equal((probe.match(/fetchWaitingUrl\(/g) || []).length, 1,
+                 "exactly one /waiting request");
+    assert.match(probe, /gatewayBlockRemainingMs\(\)/, "and never asks through a block");
+
+    // The two failure kinds mean opposite things: a blocked request says the
+    // origin is useless, a 401 says the origin is fine and the session is not.
+    assert.match(probe, /isUnreachableError\(error\)/);
+    assert.match(probe, /401\|로그인\|Unauthorized/);
+  },
+
+  async "the probe refuses to claim anything from the wrong origin"() {
+    const { race } = sandbox.window.NOLSniper;
+    const original = sandbox.location.origin;
+    try {
+      sandbox.location.origin = "https://nol.yanolja.com";
+      const report = await race.probeQueueOrigin();
+      assert.equal(report.onAllowedOrigin, false);
+      assert.equal(report.readable, undefined, "it must not report a reading it never took");
+      assert.match(report.verdict, /출처/);
+    } finally {
+      sandbox.location.origin = original;
+    }
+  },
+
   "the settle ramp covers the window a real preselect lands in"() {
     // The old ramp went from a 16ms frame-check straight to an 80ms poll after
     // six tries, so a cart that landed 280ms after the click — which is what a
