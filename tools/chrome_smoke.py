@@ -95,7 +95,14 @@ def main() -> int:
                 last_error = f"{type(exc).__name__}: {exc}"
                 page.refresh_root_frame()
                 continue
-            if probe and probe.get("bodyChars", 0) > 10000:
+            # Wait for the autopilot to have finished booting, not merely for
+            # the body to have some content in it. window.NOLSniper is assigned
+            # at the end of the autopilot's IIFE, so on a slower machine a page
+            # still in readyState "loading" reports the popup shim installed
+            # (the first thing it does) and no API yet — which failed this check
+            # on the Windows runner at 20,631 chars while macOS, being faster,
+            # never showed it.
+            if probe and probe.get("hasAutopilot") and probe.get("bodyChars", 0) > 10000:
                 break
 
         print(f"  probe: {json.dumps(probe, ensure_ascii=False)}", flush=True)
