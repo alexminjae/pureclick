@@ -89,6 +89,10 @@ _COMMAND_JS = {
     "run_seats": "window.NOLSniper && NOLSniper.runSeats()",
     "run_catch": "window.NOLSniper && NOLSniper.runCatch()",
     "probe_seats": "window.NOLSniper && NOLSniper.probeSeats()",
+    # The soft-hold spike: hold one seat over the API, watch whether the page's
+    # own 선택 좌석 notices, hand it straight back. Never presses 선택 완료 —
+    # the question it answers is whether pressing it would be safe.
+    "probe_soft_hold": "window.NOLSniper && NOLSniper.probeSoftHold()",
     "sync_grades": "window.NOLSniper && NOLSniper.syncGrades()",
     "fetch_show": "window.NOLSniper && NOLSniper.fetchShowCatalog()",
     "stop_all": "window.NOLSniper && NOLSniper.stopAll()",

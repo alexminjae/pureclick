@@ -3818,6 +3818,110 @@ const tests = {
     }
   },
 
+  async "one seat is held with preselectSeat, never the bulk mutation"() {
+    // Measured: for a single seat the bulk mutation answers P40021
+    // "좌석 요청이 잘못 되었습니다" while the singular preselectSeat answers true
+    // for that same seat in the same session. Bulk is for seat groups.
+    const { race } = sandbox.window.NOLSniper;
+    const sent = [];
+    const originalFetch = sandbox.fetch;
+    sandbox.fetch = async (url, init) => {
+      sent.push(String(init?.body || ""));
+      return {
+        ok: true,
+        status: 200,
+        text: async () => "{}",
+        json: async () => ({ data: { preselectSeat: true, bulkPreselectSeats: true } }),
+      };
+    };
+    const initData = { playSeq: { playSeq: "001" }, goods: { goodsCode: "G", placeCode: "P" } };
+    const seat = (id) => ({ seatInfoId: id, seatGrade: "1", blockKey: "001:001" });
+    try {
+      await race.bulkPreselectSeats(initData, [seat("S1")]);
+      assert.equal(sent.length, 1);
+      assert.match(sent[0], /PreselectSeat/, "a single seat takes the singular mutation");
+      assert.doesNotMatch(sent[0], /BulkPreselectSeats/);
+      assert.match(sent[0], /"seatInfoId"/, "with the singular command shape");
+
+      sent.length = 0;
+      await race.bulkPreselectSeats(initData, [seat("S1"), seat("S2")]);
+      assert.match(sent[0], /BulkPreselectSeats/, "a real group still goes in bulk");
+      assert.match(sent[0], /"seatInfoIds"/);
+    } finally {
+      sandbox.fetch = originalFetch;
+    }
+  },
+
+  async "the soft-hold spike never confirms, and never leaves a seat held"() {
+    // The spike exists to find out whether pressing 선택 완료 after an API hold
+    // would be safe. A probe that presses it to find out has answered nothing
+    // and has spent the seat. And a hold left behind counts against the
+    // account's allowance until the server expires it, which arrives later as
+    // 예매 가능 매수를 초과하였습니다 on an unrelated run.
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
+    const probe = source.slice(
+      source.indexOf("async function probeSoftHold()"),
+      source.indexOf("function seatStatusSummary()"),
+    );
+    assert.ok(probe.length > 500, "the probe must exist");
+    assert.doesNotMatch(probe, /clickConfirmSelect|선택\s*완료를 누른/, "it must never confirm");
+    assert.doesNotMatch(probe, /COMMIT_BUTTON|결제/, "and never go near payment");
+    assert.match(probe, /releasePreselected\(\[/, "it hands the seat back");
+    // And in a finally, so a throw between the hold and the release cannot
+    // strand a seat against the account's allowance.
+    const holdAt = probe.indexOf("preselectSeat(initData, target)");
+    const finallyAt = probe.indexOf("} finally {", holdAt);
+    const releaseAt = probe.indexOf("releasePreselected([", holdAt);
+    assert.ok(finallyAt > 0 && releaseAt > finallyAt,
+              "the release must sit in a finally after the hold, not on the happy path");
+    assert.match(probe, /gatewayBlockRemainingMs\(\)/, "and refuses to probe through a block");
+    assert.match(probe, /gatewayBlockedMs >= 0/, "and stops dead if it earns one");
+    assert.match(probe, /preselectSeat\(initData, target\)/,
+                 "one seat means the singular mutation");
+
+    // It must refuse rather than act when the page cannot give a clean answer.
+    const { race } = sandbox.window.NOLSniper;
+    const originalLocation = sandbox.location.pathname;
+    try {
+      sandbox.location.pathname = "/ticket/products/26012515";
+      const off = await race.probeSoftHold();
+      assert.match(off.verdict, /좌석맵/, "off the seat map it refuses");
+      assert.equal(off.cartUpdated, null, "and claims nothing about the cart");
+    } finally {
+      sandbox.location.pathname = originalLocation;
+    }
+  },
+
+  async "the spike refuses while a watch is running or a seat is held"() {
+    // Holding a seat over the API underneath a run that is mid-selection is how
+    // 선택 가능한 매수를 초과했어요 happens, and a cart that already holds
+    // something cannot prove a rise.
+    const { race } = sandbox.window.NOLSniper;
+    const state = race.state;
+    const wasRunning = state.running;
+    const wasLocked = state.locked;
+    const originalPath = sandbox.location.pathname;
+    const originalHost = sandbox.location.hostname;
+    try {
+      sandbox.location.hostname = "tickets.interpark.com";
+      sandbox.location.pathname = "/onestop/seat";
+      state.running = true;
+      const busy = await race.probeSoftHold();
+      assert.match(busy.verdict, /감시/, "it refuses under a running watch");
+      assert.equal(busy.cartUpdated, null);
+
+      state.running = false;
+      state.locked = true;
+      const held = await race.probeSoftHold();
+      assert.match(held.verdict, /감시/, "and while a seat is locked");
+    } finally {
+      state.running = wasRunning;
+      state.locked = wasLocked;
+      sandbox.location.pathname = originalPath;
+      sandbox.location.hostname = originalHost;
+    }
+  },
+
   "the settle ramp covers the window a real preselect lands in"() {
     // The old ramp went from a 16ms frame-check straight to an 80ms poll after
     // six tries, so a cart that landed 280ms after the click — which is what a

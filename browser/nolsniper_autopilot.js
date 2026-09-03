@@ -6845,6 +6845,215 @@
     return report;
   }
 
+  // ---- The soft-hold spike -------------------------------------------------
+  //
+  // One question, answered on a live map instead of argued about:
+  //
+  //   Does a bare GraphQL preselectSeat reach the page's own cart?
+  //
+  // It matters because the server does not refuse the mutation — it answers
+  // true — and it is tempting to conclude the hold is therefore usable. It is
+  // not the same claim. 선택 완료 is refused unless the SPA's own state says a
+  // seat is selected, and that state is set by the page's handler when *its*
+  // request resolves. A hold the page never learned about is the empty-cart
+  // failure: 좌석 선택 도중 오류 / P40021, with the seat locked on the server
+  // and counting against the allowance.
+  //
+  // So this holds one seat, watches for every kind of proof the page could
+  // give, and hands it straight back. It never presses 선택 완료 — the whole
+  // point is to find out whether pressing it would be safe, and a probe that
+  // takes that risk to answer the question has answered nothing.
+  //
+  // It also captures, in the same pass, how the circle is wired to React: the
+  // handler's own source and the fiber props around it name the store the page
+  // uses. If the cart never moves, that is the next place to look, and getting
+  // it here costs no second round trip on a live show.
+  const SOFT_HOLD_PROBE_WATCH_MS = 2500;
+  const SOFT_HOLD_PROBE_SAMPLE_MS = 25;
+
+  /**
+   * How the seat circle is bound to React, by name only.
+   *
+   * Handler sources are truncated and no prop *values* are read beyond the
+   * seat's own identifiers — this goes into a report the user may paste, and a
+   * fiber carries session material.
+   */
+  function describeSeatBinding(node) {
+    if (!node) return null;
+    const fiberKey = Object.keys(node).find(
+      (key) => key.startsWith("__reactFiber") || key.startsWith("__reactInternalInstance"),
+    );
+    if (!fiberKey) return { found: false, why: "no react fiber on the circle" };
+    const chain = [];
+    let fiber = node[fiberKey];
+    for (let depth = 0; depth < 8 && fiber; depth += 1) {
+      const props = fiber.memoizedProps || fiber.pendingProps || {};
+      const handlers = Object.keys(props).filter(
+        (key) => /^on[A-Z]/.test(key) && typeof props[key] === "function",
+      );
+      chain.push({
+        depth,
+        name:
+          typeof fiber.type === "string"
+            ? fiber.type
+            : fiber.type?.displayName || fiber.type?.name || "(anonymous)",
+        props: Object.keys(props).slice(0, 24),
+        handlers,
+        // Minified, but it names the action or store the press dispatches into,
+        // which is the whole reason to look.
+        source: handlers.length
+          ? String(props[handlers[0]]).replace(/\s+/g, " ").slice(0, 300)
+          : null,
+      });
+      fiber = fiber.return;
+    }
+    return { found: true, chain };
+  }
+
+  async function probeSoftHold() {
+    const report = {
+      at: new Date().toISOString().slice(11, 23),
+      build: AUTOPILOT_BUILD,
+      verdict: "",
+      cartUpdated: null,
+    };
+
+    // Refusals, in the order they would bite.
+    if (!isSeatPage()) {
+      report.verdict = "좌석맵이 아니어서 확인할 수 없습니다.";
+      return report;
+    }
+    const blockedFor = gatewayBlockRemainingMs();
+    if (blockedFor > 0) {
+      // Never probe through a block: the whole cost of one is that nothing can
+      // be caught while it lasts, and another request can extend it.
+      report.verdict = `접속 차단 중 — ${Math.ceil(blockedFor / 1000)}초 후에 다시 시도하세요.`;
+      return report;
+    }
+    if (seatState.running || seatState.locked || seatState.confirmStarted) {
+      report.verdict = "감시가 도는 중에는 확인할 수 없습니다. [전부 정지] 후 다시 눌러 주세요.";
+      return report;
+    }
+    const initData = getInitData();
+    if (!initData?.sessionId || !initData?.goods || !initData?.playSeq) {
+      report.verdict = "예매 세션이 없습니다. [예매하기]로 좌석맵에 다시 들어오세요.";
+      return report;
+    }
+    const cartBefore = selectedSeatCount();
+    if (cartBefore > 0) {
+      // A cart that already holds something cannot prove a rise, and clearing
+      // it for a probe would throw away a seat the user may be holding.
+      report.verdict = `이미 ${cartBefore}석이 선택돼 있습니다. [전체삭제] 후 다시 눌러 주세요.`;
+      return report;
+    }
+    report.cartReadable = cartBefore >= 0;
+
+    // A rendered seat, so the circle's own isSelected prop can be watched as a
+    // second, finer proof than the sidebar number.
+    const config = loadSeatConfig();
+    const dom = collectDomCandidates([], [], { ...config, watch_rect: null });
+    const target = clickableAmong(dom)[0] || dom[0] || null;
+    if (!target) {
+      report.verdict =
+        "화면에 잡을 수 있는 좌석이 없습니다. 구역을 열고 좌석이 보이는 상태에서 다시 눌러 주세요.";
+      report.domCircles = seatState.domCircleCount || 0;
+      return report;
+    }
+    const node = seatNodeFor(target.seatInfoId);
+    report.seat = { label: target.label, blockKey: target.blockKey, rendered: Boolean(node) };
+    report.binding = describeSeatBinding(node);
+
+    updateOverlay(`가선점 확인 중 — ${target.label}<br>선택 완료는 누르지 않습니다`, "info");
+
+    // --- the one mutation ---------------------------------------------------
+    const startedPerf = performance.now();
+    let answered = null;
+    try {
+      // Singular, deliberately: measured, the bulk mutation answers P40021 for
+      // a single seat while this one answers true for the same seat in the
+      // same session.
+      answered = await preselectSeat(initData, target);
+      report.preselect = { ok: answered?.preselectSeat === true, raw: answered ?? null };
+    } catch (error) {
+      if (error?.gatewayBlockedMs >= 0) {
+        report.verdict = "게이트웨이 차단 — 즉시 중단했습니다. 다시 시도하지 마세요.";
+        report.preselect = { ok: false, blocked: true, error: String(error).slice(0, 200) };
+        return report;
+      }
+      report.preselect = { ok: false, error: String(error).slice(0, 200) };
+    }
+    report.preselectMs = Math.round(performance.now() - startedPerf);
+
+    // --- did the page notice? ----------------------------------------------
+    //
+    // Everything from here is inside a finally that hands the seat back. The
+    // request has already been sent, so from this point a throw anywhere —
+    // a sidebar read, a fiber walk — would otherwise leave a seat held on the
+    // server, counting against the account's allowance until it expires. That
+    // arrives later as 예매 가능 매수를 초과하였습니다 on an unrelated run, which
+    // is a miserable thing to have to trace back to a probe.
+    try {
+      const samples = [];
+      let cartRoseAt = null;
+      let selectedRoseAt = null;
+      const deadline = performance.now() + SOFT_HOLD_PROBE_WATCH_MS;
+      while (performance.now() < deadline) {
+        const cartNow = selectedSeatCount();
+        const rendered = node ? seatRenderProps(node) : null;
+        const isSelected = rendered ? Boolean(rendered.isSelected) : null;
+        const since = Math.round(performance.now() - startedPerf);
+        samples.push({ ms: since, cart: cartNow, isSelected });
+        if (cartRoseAt === null && cartNow > Math.max(cartBefore, 0)) cartRoseAt = since;
+        if (selectedRoseAt === null && isSelected === true) selectedRoseAt = since;
+        // A dialog is an answer too, and a loud one.
+        if (seatErrorDialogVisible() || seatTakenDialogVisible()) {
+          report.dialog = unknownBlockingDialogText() || "좌석 관련 안내창";
+          break;
+        }
+        if (cartRoseAt !== null && selectedRoseAt !== null) break;
+        await sleep(SOFT_HOLD_PROBE_SAMPLE_MS);
+      }
+      // Thinned: the shape is the evidence, 100 rows of it is not.
+      report.samples = samples.filter((row, at) => at % 4 === 0 || row.cart > 0 || row.isSelected);
+      report.cartRoseAtMs = cartRoseAt;
+      report.seatMarkedSelectedAtMs = selectedRoseAt;
+      report.cartUpdated = cartRoseAt !== null;
+      report.cartAfter = selectedSeatCount();
+    } finally {
+      report.released = await releasePreselected([target.seatInfoId]);
+      try {
+        if (selectedSeatCount() > Math.max(cartBefore, 0)) {
+          report.clearedCart = clearSelectedSeats();
+        }
+        dismissSeatErrorDialog();
+        dismissSeatTakenDialog();
+      } catch (error) {
+        report.cleanupError = String(error).slice(0, 160);
+      }
+    }
+
+    report.verdict = !report.preselect?.ok
+      ? "가선점 자체가 거절됐습니다 — API 경로는 이 세션에서 쓸 수 없습니다."
+      : report.cartUpdated
+        ? "가선점이 예매 창 장바구니에 반영됐습니다 — API 경로를 쓸 수 있습니다."
+        : "가선점은 성공했지만 예매 창은 모릅니다 — 이 상태로 [선택 완료]를 누르면 P40021입니다.";
+    updateOverlay(
+      `가선점 확인 완료<br>${report.cartUpdated ? "장바구니 반영됨" : "장바구니 변화 없음"}` +
+        `<br>좌석은 반납했습니다`,
+      report.cartUpdated ? "ok" : "warn",
+    );
+    traceCall("probeSoftHold", target.seatInfoId, {
+      preselectOk: report.preselect?.ok,
+      preselectMs: report.preselectMs,
+      cartUpdated: report.cartUpdated,
+      cartRoseAtMs: cartRoseAt,
+      seatMarkedSelectedAtMs: selectedRoseAt,
+      released: report.released,
+    });
+    seatState.lastSoftHoldProbe = report;
+    return report;
+  }
+
   function seatStatusSummary() {
     return {
       seat: {
@@ -6910,6 +7119,9 @@
         // decided in, as medians over this sitting.
         catchTiming: catchTimingSummary(),
         catchTimingLine: catchTimingLine(),
+        // The last answer to "does a bare API hold reach the cart?", so the
+        // spike's result survives in the state file instead of a screenshot.
+        softHoldProbe: seatState.lastSoftHoldProbe || null,
         softHoldWaitMs: seatState.lastSoftHoldWaitMs ?? null,
         // Where the watch is standing, and how often it had to go back.
         parkedBlock: seatState.parkedBlock || "",
@@ -8253,6 +8465,10 @@
         applyBlockMask,
         clickableAmong,
         parkInWatchedBlock,
+        probeSoftHold,
+        describeSeatBinding,
+        preselectSeat,
+        bulkPreselectSeats,
         clickSeatOnMap,
         seatNodeFor,
         checkDomAgreement,
@@ -8309,6 +8525,9 @@
       runCatch: () =>
         runSeatAutopilot(loadSeatConfig(), { catchMode: true, userInitiated: true }),
       probeSeats: () => runSeatAutopilot(loadSeatConfig(), { probe: true, userInitiated: true }),
+      // The spike. Holds one seat over the API, watches whether the 예매 창
+      // notices, hands it straight back, and never presses 선택 완료.
+      probeSoftHold: () => probeSoftHold(),
       stopAll() {
         window.__nolsniperRunGen = (window.__nolsniperRunGen || 0) + 1;
         seatState.running = false;
