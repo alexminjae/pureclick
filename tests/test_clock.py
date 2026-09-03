@@ -17,7 +17,7 @@ from core.clock import (
 )
 
 
-class PureClickCoreTests(unittest.TestCase):
+class NolSniperCoreTests(unittest.TestCase):
     def test_parse_http_date(self) -> None:
         unix = parse_http_date("Thu, 28 May 2026 01:00:00 GMT")
         self.assertEqual(datetime.fromtimestamp(unix, UTC).year, 2026)

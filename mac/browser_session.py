@@ -52,7 +52,7 @@ def dump(window: Any, *, timeout: float = 5.0) -> list[dict[str, Any]]:
         return rows
     except Exception as exc:  # noqa: BLE001 - reported, not swallowed
         LAST_ERROR = f"쿠키를 저장하지 못했습니다: {exc}"
-        print(f"[pureclick] {LAST_ERROR}", file=sys.stderr)
+        print(f"[nolsniper] {LAST_ERROR}", file=sys.stderr)
         return []
 
 
@@ -67,7 +67,7 @@ def restore(window: Any, rows: list[dict[str, Any]]) -> int:
         return restored
     except Exception as exc:  # noqa: BLE001 - reported, not swallowed
         LAST_ERROR = f"로그인 정보를 복원하지 못했습니다: {exc}"
-        print(f"[pureclick] {LAST_ERROR}", file=sys.stderr)
+        print(f"[nolsniper] {LAST_ERROR}", file=sys.stderr)
         return 0
 
 

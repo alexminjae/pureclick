@@ -33,10 +33,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-PANEL = (ROOT / "mac" / "pureclick.py").read_text(encoding="utf-8")
+PANEL = (ROOT / "mac" / "nolsniper.py").read_text(encoding="utf-8")
 _TREE = ast.parse(PANEL)
 _CLS = next(
-    n for n in _TREE.body if isinstance(n, ast.ClassDef) and n.name == "PureClickMacApp"
+    n for n in _TREE.body if isinstance(n, ast.ClassDef) and n.name == "NolSniperApp"
 )
 
 

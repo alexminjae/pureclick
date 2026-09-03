@@ -24,7 +24,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOL = ROOT / "tools" / "audit_js.mjs"
-TARGET = ROOT / "browser" / "pureclick_autopilot.js"
+TARGET = ROOT / "browser" / "nolsniper_autopilot.js"
 
 NO_PARSER_EXIT = 2
 
@@ -64,7 +64,7 @@ class StaticAuditTests(unittest.TestCase):
                 slow();
                 return shadowed();
               }
-              window.PureClick = { run };
+              window.NOLSniper = { run };
             })();
             """,
             encoding="utf-8",

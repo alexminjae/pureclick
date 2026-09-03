@@ -18,7 +18,7 @@ from pathlib import Path
 
 from core.seat import SeatPreferences
 
-AUTOPILOT = Path(__file__).resolve().parent.parent / "browser" / "pureclick_autopilot.js"
+AUTOPILOT = Path(__file__).resolve().parent.parent / "browser" / "nolsniper_autopilot.js"
 
 # `enabled` is synthesised by to_mapping() rather than being a dataclass field.
 PANEL_ONLY: frozenset[str] = frozenset({"enabled"})

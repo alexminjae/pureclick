@@ -46,7 +46,7 @@ def user_data_dir() -> Path:
         base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
     else:
         base = Path.home() / "Library" / "Application Support"
-    path = base / "PureClick"
+    path = base / "NOLSniper"
     path.mkdir(parents=True, exist_ok=True)
     return path
 

@@ -19,15 +19,15 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 import os as _os
 
 datas = [
-    ("browser/pureclick_autopilot.js", "browser"),
+    ("browser/nolsniper_autopilot.js", "browser"),
 ]
-# mac/pureclick_seat_config.json is NOT bundled: it is per-user runtime state —
+# mac/nolsniper_seat_config.json is NOT bundled: it is per-user runtime state —
 # saved 매수/전략/디스코드 웹훅 preferences, written by the running app, correctly
 # gitignored, absent on a fresh checkout. Bundling it would have shipped
 # whoever built the exe's own saved settings to every user, and the CI runner
 # does not even have one — PyInstaller failed outright with "Unable to find
-# ...pureclick_seat_config.json" when this tried to. The app already handles a
-# missing file on first run (mac/pureclick.py's _load_seat_config).
+# ...nolsniper_seat_config.json" when this tried to. The app already handles a
+# missing file on first run (mac/nolsniper.py's _load_seat_config).
 # Written by the workflow immediately before this runs. Absent in a local build,
 # and app_update treats that as "no update source", which is correct there.
 for _stamp in ("VERSION", "UPDATE_URL"):
@@ -44,13 +44,13 @@ hiddenimports = [
     "browser_host",
     "browser_bridge",
     "browser_session",
-    "pureclick",
+    "nolsniper",
     "app_update",
 ]
 hiddenimports += collect_submodules("webview.platforms")
 
 a = Analysis(
-    ["pureclick_main.py"],
+    ["nolsniper_main.py"],
     pathex=[".", "mac"],
     binaries=[],
     datas=datas,
@@ -69,10 +69,10 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="PureClick",
+    name="NOLSniper",
     debug=False,
     strip=False,
     upx=False,          # UPX-packed exes are a routine false positive for AV
     console=False,      # no console window behind the panel
-    icon="mac/pureclick.ico" if __import__("os").path.exists("mac/pureclick.ico") else None,
+    icon="mac/nolsniper.ico" if __import__("os").path.exists("mac/nolsniper.ico") else None,
 )

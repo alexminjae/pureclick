@@ -1,7 +1,7 @@
 @echo off
-rem Run PureClick from source on Windows.
+rem Run NOL Sniper from source on Windows.
 rem
-rem The normal way to use this on Windows is PureClick.exe from the Releases
+rem The normal way to use this on Windows is NOLSniper.exe from the Releases
 rem page — no Python needed. This file is for running the source directly, which
 rem is what you want when the exe misbehaves and you need to see the error.
 
@@ -28,8 +28,8 @@ call ".venv\Scripts\activate.bat" || goto :fail
 python -m pip install --quiet --upgrade pip
 python -m pip install --quiet -r mac\requirements.txt || goto :fail
 
-rem One entry point, both roles — see pureclick_main.py.
-python pureclick_main.py
+rem One entry point, both roles — see nolsniper_main.py.
+python nolsniper_main.py
 if errorlevel 1 goto :fail
 exit /b 0
 

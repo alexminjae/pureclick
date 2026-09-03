@@ -7,7 +7,7 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from core.clock import ClickError, PureClickError
+from core.clock import ClickError, NolSniperError
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -99,7 +99,7 @@ def _post_mouse_event(event_type: int, x: int, y: int) -> None:
 
 def accessibility_hint() -> str:
     return (
-        "macOS requires Accessibility permission for PureClick to click other apps. "
+        "macOS requires Accessibility permission for NOL Sniper to click other apps. "
         "Open System Settings → Privacy & Security → Accessibility and enable "
         "Terminal, iTerm, or Python."
     )
@@ -107,8 +107,8 @@ def accessibility_hint() -> str:
 
 def ensure_mac_ready() -> None:
     if platform.system() != "Darwin":
-        raise PureClickError("PureClick for Mac only runs on macOS")
+        raise NolSniperError("NOL Sniper for Mac only runs on macOS")
     try:
         _coregraphics()
     except MacClickError as exc:
-        raise PureClickError(str(exc)) from exc
+        raise NolSniperError(str(exc)) from exc

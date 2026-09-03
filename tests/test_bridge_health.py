@@ -69,7 +69,7 @@ class BridgeLineTest(unittest.TestCase):
 
     def test_every_exit_the_page_can_emit_has_words(self) -> None:
         emitted = set()
-        for src in (ROOT / "browser" / "pureclick_autopilot.js",):
+        for src in (ROOT / "browser" / "nolsniper_autopilot.js",):
             text = src.read_text(encoding="utf-8")
             import re
             emitted |= set(re.findall(r'lastExit\s*=\s*"(\w+)"', text))
@@ -120,12 +120,12 @@ class HostHealthTest(unittest.TestCase):
 class ClockTickTest(unittest.TestCase):
     """One bad reading must not stop the clock for the session."""
 
-    SRC = (ROOT / "mac" / "pureclick.py").read_text(encoding="utf-8")
+    SRC = (ROOT / "mac" / "nolsniper.py").read_text(encoding="utf-8")
 
     def test_the_tick_reschedules_outside_its_try(self) -> None:
         tree = ast.parse(self.SRC)
         cls = next(n for n in tree.body
-                   if isinstance(n, ast.ClassDef) and n.name == "PureClickMacApp")
+                   if isinstance(n, ast.ClassDef) and n.name == "NolSniperApp")
         fn = next(n for n in cls.body if getattr(n, "name", None) == "_tick_server_time")
         body = ast.get_source_segment(self.SRC, fn) or ""
         self.assertIn("try:", body, "it rescheduled itself with no guard at all")

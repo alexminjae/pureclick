@@ -7,7 +7,7 @@ form has to be filled.
 ## Run
 
 ```bash
-cd ~/Desktop/pureclick/mac && ./run_pureclick.sh
+cd ~/Desktop/pureclick/mac && ./run_nolsniper.sh
 ```
 
 A browser window titled **NOL 예매** opens next to this control panel.
@@ -32,7 +32,7 @@ hand, every launch. So the jar is saved and restored explicitly through
 `WKHTTPCookieStore` (`browser_session.py`), which also keeps `cf_clearance` and
 avoids a fresh Cloudflare challenge.
 
-`mac/.pureclick_cookies.json` is a live session — anyone holding it is logged in
+`mac/.nolsniper_cookies.json` is a live session — anyone holding it is logged in
 as you. It is written `0600` and gitignored. **Delete it to sign out.**
 
 ## One window, no popups
@@ -278,12 +278,12 @@ the path *up to* the lock is a race.
 
 | File | Role |
 |---|---|
-| `pureclick.py` | Control panel |
+| `nolsniper.py` | Control panel |
 | `browser_host.py` | pywebview + document-start script injection |
 | `browser_bridge.py` | Panel ↔ browser state, over a flock-guarded JSON file |
 | `browser_session.py` | Cookie jar save/restore, so login survives a restart |
-| `pureclick_mac_core.py` | CoreGraphics helpers and the accessibility check |
-| `../browser/pureclick_autopilot.js` | Everything that happens inside the page |
+| `nolsniper_mac_core.py` | CoreGraphics helpers and the accessibility check |
+| `../browser/nolsniper_autopilot.js` | Everything that happens inside the page |
 | `../core/clock.py` | Server-time sync and the open-time parser |
 | `../core/seat.py` | Grade ranking, bitmap decoding, seat grouping, panel text |
 | `../core/showinfo.py` | Show lookup, remaining counts, engine classification |

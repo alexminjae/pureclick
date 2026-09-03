@@ -651,7 +651,7 @@ class PersistentDataTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        for name in ("browser_bridge", "browser_host", "pureclick"):
+        for name in ("browser_bridge", "browser_host", "nolsniper"):
             sys.modules.pop(name, None)
 
     tearDown = setUp
@@ -662,8 +662,8 @@ class PersistentDataTests(unittest.TestCase):
         import browser_bridge
 
         bridge = browser_bridge.BrowserBridge(Path("/repo/mac"))
-        self.assertEqual(bridge.state_path, Path("/repo/mac/.pureclick_browser_state.json"))
-        self.assertEqual(bridge.health_path, Path("/repo/mac/.pureclick_bridge_health.json"))
+        self.assertEqual(bridge.state_path, Path("/repo/mac/.nolsniper_browser_state.json"))
+        self.assertEqual(bridge.health_path, Path("/repo/mac/.nolsniper_bridge_health.json"))
 
     def test_a_frozen_build_moves_persistent_files_out_of_the_extraction_dir(self) -> None:
         sys.frozen = True

@@ -1,10 +1,10 @@
-"""Draw PureClick.icns — the Dock icon.
+"""Draw NOLSniper.icns — the Dock icon.
 
 No image library. A PNG is zlib plus four chunks, and the only shapes here are
 a rounded square and a reticle, so adding Pillow to requirements.txt for one
 icon that will never change would cost more than it saves.
 
-The palette is the app's own (see the header of pureclick.py): ink ground, one
+The palette is the app's own (see the header of nolsniper.py): ink ground, one
 hot accent, nothing else. A Dock icon is the smallest surface this design has,
 so it is the last place to start adding hues.
 """
@@ -121,8 +121,8 @@ def render(size: int) -> list[bytearray]:
 
 
 def main() -> int:
-    out = MAC_DIR / "PureClick.icns"
-    iconset = MAC_DIR / "PureClick.iconset"
+    out = MAC_DIR / "NOLSniper.icns"
+    iconset = MAC_DIR / "NOLSniper.iconset"
     subprocess.run(["rm", "-rf", str(iconset)], check=True)
     iconset.mkdir()
 

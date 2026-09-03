@@ -4,7 +4,7 @@ The app runs as two processes: the 조작판 and the 예매 창. From a source c
 the second is started as `python mac/browser_host.py …`, which works because
 `sys.executable` is the interpreter.
 
-Inside a PyInstaller bundle it is not — `sys.executable` is PureClick.exe. That
+Inside a PyInstaller bundle it is not — `sys.executable` is NOLSniper.exe. That
 spawn would relaunch the control panel instead of the browser, endlessly. It
 works from source and is silently wrong once frozen, which is the worst pairing,
 so both roles go through one entry point that decides by argv.
@@ -29,7 +29,7 @@ BROWSER_HOST_FLAG = "--browser-host"
 def _crash_log_path() -> Path:
     """Where an uncaught exception from either role gets written.
 
-    The frozen build runs with no console (console=False in pureclick.spec),
+    The frozen build runs with no console (console=False in nolsniper.spec),
     so an exception that kills the 예매 창 subprocess before it ever writes a
     bridge health report — a missing DLL, a broken WebView2 install, anything
     — is otherwise invisible to the user and to whoever is trying to diagnose
@@ -89,11 +89,11 @@ def main() -> None:
         return
 
     try:
-        from pureclick import PureClickMacApp
+        from nolsniper import NolSniperApp
 
-        PureClickMacApp().mainloop()
+        NolSniperApp().mainloop()
     except BaseException as exc:  # noqa: BLE001 - see above
-        _log_crash("pureclick (조작판)", exc)
+        _log_crash("nolsniper (조작판)", exc)
         raise
 
 

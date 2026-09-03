@@ -1,4 +1,4 @@
-# PureClick
+# NOL Sniper
 
 NOL / Interpark ticket assistant for macOS and Windows. Two jobs, and nothing
 else:
@@ -12,17 +12,17 @@ else:
 **macOS** — from a checkout:
 
 ```bash
-cd mac && ./run_pureclick.sh
+cd mac && ./run_nolsniper.sh
 ```
 
-**Windows** — download `PureClick.exe` from the
+**Windows** — download `NOLSniper.exe` from the
 [Releases](../../releases) page and double-click it. Nothing to install: the
 exe carries its own Python. It needs the WebView2 runtime, which ships with
 Windows 11 and with current Edge; if it is missing the app says so and links to
 it rather than failing quietly.
 
 To run from source on Windows instead — which is what you want when the exe
-misbehaves and you need to see the error — double-click `PureClick.bat`. That
+misbehaves and you need to see the error — double-click `NOLSniper.bat`. That
 one needs Python installed.
 
 Two windows open: the 조작판 (control panel) and the 예매 창 (an embedded
@@ -38,10 +38,10 @@ was measured, and what it will not do. This page is only the map.
 |---|---|
 | `mac/` | the app — panel, browser host, bridge, session store |
 | `app_platform/` | the only place the OS matters: WKWebView vs WebView2, flock vs msvcrt |
-| `pureclick_main.py` | the entry point, for both the panel and the browser process |
+| `nolsniper_main.py` | the entry point, for both the panel and the browser process |
 | `app_update.py` | version check, and a checksum-verified refresh of the automation |
 | `tools/` | the static audit, and the Windows icon |
-| `browser/pureclick_autopilot.js` | everything that happens inside the booking page |
+| `browser/nolsniper_autopilot.js` | everything that happens inside the booking page |
 | `core/` | pure logic — no tkinter, no pywebview, no filesystem, all tested |
 | `tests/` | `pytest tests/` and `node tests/test_autopilot_picker.mjs` |
 | `research/probes/` | one script per measurement the design rests on |
@@ -64,7 +64,7 @@ Automated booking also breaches the site's terms of use.
 ## Updates on Windows
 
 A downloaded exe is a snapshot, but the part that goes stale fastest is not the
-Python — it is `browser/pureclick_autopilot.js`, because it tracks NOL's markup.
+Python — it is `browser/nolsniper_autopilot.js`, because it tracks NOL's markup.
 So on launch the app checks the release manifest:
 
 - a newer exe is **reported** with a link; nothing installs itself

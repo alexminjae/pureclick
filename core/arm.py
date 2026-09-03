@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from typing import Any
 
 
-ARM_STORAGE_KEY = "pureclick_arm_v1"
-SEAT_STORAGE_KEY = "pureclick_seat_v1"
+ARM_STORAGE_KEY = "nolsniper_arm_v1"
+SEAT_STORAGE_KEY = "nolsniper_seat_v1"
 
 
 @dataclass(frozen=True)
@@ -97,7 +97,7 @@ def browser_config_snippet(*, arm_payload: ArmPayload, seat_mapping: dict[str, A
     arm_json = serialize_arm_payload(arm_payload)
     return "\n".join(
         [
-            "// PureClick — paste in Chrome DevTools console on tickets.interpark.com",
+            "// NOL Sniper — paste in Chrome DevTools console on tickets.interpark.com",
             f'localStorage.setItem("{ARM_STORAGE_KEY}", {json.dumps(arm_json)});',
             f'localStorage.setItem("{SEAT_STORAGE_KEY}", {json.dumps(seat_json)});',
         ]

@@ -34,13 +34,13 @@
   if (location.protocol === "about:" || location.protocol === "data:") return;
 
   function installPopupShim() {
-    if (window.__pureclickPopupShim) return;
-    window.__pureclickPopupShim = true;
-    window.__pureclickPopups = [];
+    if (window.__nolsniperPopupShim) return;
+    window.__nolsniperPopupShim = true;
+    window.__nolsniperPopups = [];
 
     const record = (entry) => {
-      window.__pureclickPopups.push({ at: Date.now(), ...entry });
-      if (window.__pureclickPopups.length > 20) window.__pureclickPopups.shift();
+      window.__nolsniperPopups.push({ at: Date.now(), ...entry });
+      if (window.__nolsniperPopups.length > 20) window.__nolsniperPopups.shift();
       console.log("[NOL Sniper] popup", entry);
     };
 
@@ -116,7 +116,7 @@
     let nativeSubmit = null;
 
     if (typeof window.open === "function") {
-      window.open = function pureclickOpen(url, name, features) {
+      window.open = function nolsniperOpen(url, name, features) {
         record({ open: String(url || ""), name: String(name || ""), features: String(features || "") });
         if (url) go(url);
         return popupProxy(name);
@@ -127,7 +127,7 @@
     // call NOL uses for the seat-booking POST, so the prototype has to be patched.
     if (typeof HTMLFormElement !== "undefined") {
       nativeSubmit = HTMLFormElement.prototype.submit;
-      HTMLFormElement.prototype.submit = function pureclickSubmit() {
+      HTMLFormElement.prototype.submit = function nolsniperSubmit() {
         if (!POPUP_SELF_TARGETS.has(this.target || "")) {
           record({ formTarget: this.target, action: this.action });
           this.target = "_self";
@@ -157,7 +157,7 @@
     // openPCOnestop's queue path calls window.self.close() *before* steering the
     // popup. Honouring it would close the only window we have.
     try {
-      window.close = function pureclickClose() {
+      window.close = function nolsniperClose() {
         record({ close: location.href });
       };
     } catch {
@@ -179,28 +179,28 @@
   })();
   if (!isTopFrame) return;
 
-  const alreadyLoaded = Boolean(window.PureClick);
+  const alreadyLoaded = Boolean(window.NOLSniper);
   // Abort any in-flight run from a previous script copy. Old async loops keep
   // their old selectSeats (with the API fallback) unless we invalidate them.
-  window.__pureclickRunGen = (window.__pureclickRunGen || 0) + 1;
+  window.__nolsniperRunGen = (window.__nolsniperRunGen || 0) + 1;
   if (alreadyLoaded) {
     try {
-      window.PureClick.stopAll();
+      window.NOLSniper.stopAll();
     } catch {
       /* ignore */
     }
   }
-  if (window.__pureclickWatchId) {
-    clearInterval(window.__pureclickWatchId);
-    window.__pureclickWatchId = 0;
+  if (window.__nolsniperWatchId) {
+    clearInterval(window.__nolsniperWatchId);
+    window.__nolsniperWatchId = 0;
   }
 
   function runWasSuperseded(runGen) {
-    return runGen !== window.__pureclickRunGen;
+    return runGen !== window.__nolsniperRunGen;
   }
 
-  const SEAT_STORAGE_KEY = "pureclick_seat_v1";
-  const ARM_STORAGE_KEY = "pureclick_arm_v1";
+  const SEAT_STORAGE_KEY = "nolsniper_seat_v1";
+  const ARM_STORAGE_KEY = "nolsniper_arm_v1";
   const SYNC_URL = "https://poticket.interpark.com/Book/BookMain.asp";
   const TICKETFRONT = "https://api-ticketfront.interpark.com";
   const NOL_ORIGIN = "https://nol.yanolja.com";
@@ -343,7 +343,7 @@
   // without a version a fixed builder keeps serving the old build's output and
   // the fix looks like it did nothing. That cost a full round of debugging.
   const SKETCH_CACHE_VERSION = 5;
-  const parkedSketch = (window.__pureclickZoneSketch = window.__pureclickZoneSketch || {
+  const parkedSketch = (window.__nolsniperZoneSketch = window.__nolsniperZoneSketch || {
     points: [],
     key: null,
     v: SKETCH_CACHE_VERSION,
@@ -534,10 +534,10 @@
 
   function updateOverlay(message, tone = "info") {
     seatState.message = String(message || "").replace(/<br\s*\/?>/gi, " · ");
-    let root = document.getElementById("pureclick-overlay");
+    let root = document.getElementById("nolsniper-overlay");
     if (!root) {
       root = document.createElement("div");
-      root.id = "pureclick-overlay";
+      root.id = "nolsniper-overlay";
       root.style.cssText = [
         "position:fixed",
         "right:16px",
@@ -756,7 +756,7 @@
 
   const CAPTCHA_LENGTH = 6;
   const CAPTCHA_TTL_MS = 5 * 60 * 1000;
-  const CAPTCHA_JUNK = /^(NOL|LOGO|TICKET|INTERPARK|YANOLJA|CAPTCHA|IMAGE|PURECLICK)$/;
+  const CAPTCHA_JUNK = /^(NOL|LOGO|TICKET|INTERPARK|YANOLJA|CAPTCHA|IMAGE|NOLSNIPER)$/;
 
   // Only the Interpark modal title. Never "보안문자" — that string is in our
   // own toast, and matching it made the sniper wait forever after a manual solve.
@@ -765,7 +765,7 @@
   }
 
   function isSniperOverlay(node) {
-    return Boolean(node && (node.id === "pureclick-overlay" || node.closest?.("#pureclick-overlay")));
+    return Boolean(node && (node.id === "nolsniper-overlay" || node.closest?.("#nolsniper-overlay")));
   }
 
   function isVisible(el) {
@@ -853,7 +853,7 @@
     const body = document.body;
     if (!body) return "";
     const text = body.innerText || "";
-    const overlay = document.getElementById("pureclick-overlay");
+    const overlay = document.getElementById("nolsniper-overlay");
     const own = overlay ? overlay.innerText || "" : "";
     // Subtracting the string beats hiding the node: no reflow, and this runs on
     // every loop iteration over maps with thousands of seats.
@@ -1183,7 +1183,7 @@
       if (seatErrorDialogVisible()) {
         return { ok: false, via: "dialog" };
       }
-      const net = window.__pureclickLastSeatNet || {};
+      const net = window.__nolsniperLastSeatNet || {};
       if ((net.selectAt || 0) >= since) {
         return { ok: Boolean(net.selectOk), via: "net", status: net.selectStatus };
       }
@@ -1202,7 +1202,7 @@
       seatState.unknownDialog = unknown;
       traceCall("unknownDialog", null, { text: unknown });
     }
-    const net = window.__pureclickLastSeatNet || {};
+    const net = window.__nolsniperLastSeatNet || {};
     if ((net.selectAt || 0) >= since) {
       return { ok: Boolean(net.selectOk), via: "net-late", status: net.selectStatus };
     }
@@ -1217,7 +1217,7 @@
     let sawPreselect = false;
     while (Date.now() - start < timeoutMs) {
       if (seatErrorDialogVisible()) return false;
-      const net = window.__pureclickLastSeatNet || {};
+      const net = window.__nolsniperLastSeatNet || {};
       if ((net.preselectAt || 0) >= since) {
         if (net.preselectOk === false) return false;
         sawPreselect = true;
@@ -1913,7 +1913,7 @@
     throw new Error(armState.lastError || "대기열 API와 예매하기 모두 실패");
   }
 
-  const QUEUE_HOST_KEY = "pureclick_queue_host_v1";
+  const QUEUE_HOST_KEY = "nolsniper_queue_host_v1";
 
   /**
    * Warm the queue host before the open, if we have ever seen it.
@@ -1934,13 +1934,13 @@
     } catch (error) {
       return "";
     }
-    if (!host || document.querySelector(`link[data-pureclick-preconnect="${host}"]`)) return host;
+    if (!host || document.querySelector(`link[data-nolsniper-preconnect="${host}"]`)) return host;
     try {
       const link = document.createElement("link");
       link.rel = "preconnect";
       link.href = host;
       link.crossOrigin = "anonymous";
-      link.dataset.pureclickPreconnect = host;
+      link.dataset.nolsniperPreconnect = host;
       document.head?.appendChild(link);
       log(`preconnect ${host}`);
     } catch (error) {
@@ -2097,7 +2097,7 @@
     // Before the open there is nothing to recover from — the scheduler is
     // already waiting for T, and a second entry beside it is a duplicate. This
     // is deliberately keyed off the target rather than `fired`, because `fired`
-    // does not survive: apply_state rewrites pureclick_arm_v1 from the panel's
+    // does not survive: apply_state rewrites nolsniper_arm_v1 from the panel's
     // copy, which stays false, on every state-file change.
     const target = Number(arm.target_server_unix);
     if (Number.isFinite(target) && target > 0 && serverTimeUnix() < target) return;
@@ -3114,8 +3114,8 @@
   // waiting a moment.
   let pointerHeldOnMap = false;
   function watchMapPointer() {
-    if (window.__pureclickMapPointerWatch) return;
-    window.__pureclickMapPointerWatch = true;
+    if (window.__nolsniperMapPointerWatch) return;
+    window.__nolsniperMapPointerWatch = true;
     window.addEventListener("pointerdown", () => { pointerHeldOnMap = true; }, true);
     for (const type of ["pointerup", "pointercancel"]) {
       window.addEventListener(type, () => { pointerHeldOnMap = false; }, true);
@@ -4732,12 +4732,12 @@
   // A short ring of the seat-related calls and what came back. Without it every
   // failure looked the same from outside the browser — the page shows its own
   // "좌석 선택 도중 오류" dialog whoever caused it, and the panel could only
-  // repeat that. Read through PureClick.status().seat.trace.
+  // repeat that. Read through NOLSniper.status().seat.trace.
   const TRACE_LIMIT = 24;
   // Parked on `window`, not in this closure. `reload_autopilot` re-runs the
   // whole IIFE, which is how every fix gets deployed — with the array declared
   // here, each deployment wiped the evidence from the attempt that motivated it.
-  const trace = (window.__pureclickTrace = window.__pureclickTrace || []);
+  const trace = (window.__nolsniperTrace = window.__nolsniperTrace || []);
 
   function traceCall(label, request, response) {
     trace.push({
@@ -4754,7 +4754,7 @@
   // the account rather than in anything we send — and this is the only way to
   // see the answer the site got, without spending a single extra request.
   function notePageSeatNet(label, status, text) {
-    const net = (window.__pureclickLastSeatNet = window.__pureclickLastSeatNet || {});
+    const net = (window.__nolsniperLastSeatNet = window.__nolsniperLastSeatNet || {});
     const at = Date.now();
     const body = String(text || "");
     const name = String(label || "");
@@ -4783,28 +4783,28 @@
   function installNetworkWatch() {
     // Always refresh the recorder so a script reload picks up new parsing
     // without re-wrapping fetch/XHR (which would stack wrappers forever).
-    window.__pureclickNotePageSeatNet = notePageSeatNet;
-    window.__pureclickNotePageSeatStatus = notePageSeatStatus;
+    window.__nolsniperNotePageSeatNet = notePageSeatNet;
+    window.__nolsniperNotePageSeatStatus = notePageSeatStatus;
     // v5+ records select/preselect outcomes. Older hooks only traced; rebuild once.
-    if (window.__pureclickNetWatchNotes) return;
-    window.__pureclickNetWatchNotes = true;
-    window.__pureclickNetWatch = true;
+    if (window.__nolsniperNetWatchNotes) return;
+    window.__nolsniperNetWatchNotes = true;
+    window.__nolsniperNetWatch = true;
 
-    const nativeFetch = window.__pureclickNativeFetch || window.fetch;
+    const nativeFetch = window.__nolsniperNativeFetch || window.fetch;
     if (typeof nativeFetch === "function") {
-      window.__pureclickNativeFetch =
+      window.__nolsniperNativeFetch =
         typeof nativeFetch.bind === "function" ? nativeFetch.bind(window) : nativeFetch;
-      window.fetch = async function pureclickFetch(input, init) {
+      window.fetch = async function nolsniperFetch(input, init) {
         const url = String(input?.url || input || "");
         const watched = /\/onestop\/(gql|api\/(seats|seatStatus|seatMeta))/.test(url);
-        const response = await window.__pureclickNativeFetch.apply(window, arguments);
+        const response = await window.__nolsniperNativeFetch.apply(window, arguments);
         if (!watched) return response;
         try {
           const body = String(init?.body || "").slice(0, 200);
           const text = await response.clone().text();
           const label = (body.match(/mutation\s+(\w+)/) || [])[1] || url.split("?")[0].split("/").pop();
-          if (label === "seatStatus") window.__pureclickNotePageSeatStatus?.(url, text);
-          window.__pureclickNotePageSeatNet?.(label, response.status, text);
+          if (label === "seatStatus") window.__nolsniperNotePageSeatStatus?.(url, text);
+          window.__nolsniperNotePageSeatNet?.(label, response.status, text);
           traceCall(`page:${label}`, body, `HTTP ${response.status} ${text}`);
         } catch {
           /* opaque or already consumed */
@@ -4815,24 +4815,24 @@
 
     // The onestop SPA talks through axios, which is XMLHttpRequest — a fetch
     // hook alone sees none of the page's own booking calls.
-    if (!window.__pureclickXhrHooked) {
-      window.__pureclickXhrHooked = true;
+    if (!window.__nolsniperXhrHooked) {
+      window.__nolsniperXhrHooked = true;
       const nativeOpen = XMLHttpRequest.prototype.open;
       const nativeSend = XMLHttpRequest.prototype.send;
-      XMLHttpRequest.prototype.open = function pureclickOpen(method, url) {
-        this.__pureclickUrl = String(url || "");
+      XMLHttpRequest.prototype.open = function nolsniperOpen(method, url) {
+        this.__nolsniperUrl = String(url || "");
         return nativeOpen.apply(this, arguments);
       };
-      XMLHttpRequest.prototype.send = function pureclickSend(body) {
-        const url = this.__pureclickUrl || "";
+      XMLHttpRequest.prototype.send = function nolsniperSend(body) {
+        const url = this.__nolsniperUrl || "";
         if (/\/onestop\/(gql|api\/(seats|seatStatus|seatMeta))/.test(url)) {
           this.addEventListener("loadend", () => {
             try {
               const sent = String(body || "").slice(0, 200);
               const label = (sent.match(/mutation\s+(\w+)/) || [])[1] || url.split("?")[0].split("/").pop();
               const text = String(this.responseText || "");
-              if (label === "seatStatus") window.__pureclickNotePageSeatStatus?.(url, text);
-              window.__pureclickNotePageSeatNet?.(label, this.status, text);
+              if (label === "seatStatus") window.__nolsniperNotePageSeatStatus?.(url, text);
+              window.__nolsniperNotePageSeatNet?.(label, this.status, text);
               traceCall(`page:${label}`, sent, `HTTP ${this.status} ${text.slice(0, 400)}`);
             } catch {
               /* response not readable as text */
@@ -6653,7 +6653,7 @@
     // loop beside it. Both drive the same seatState — observed live as the
     // 좌석 잡기 run reaching its 80-attempt cap and setting running = false out
     // from under the watch, which looked exactly like a stall.
-    const runGen = (window.__pureclickRunGen = (window.__pureclickRunGen || 0) + 1);
+    const runGen = (window.__nolsniperRunGen = (window.__nolsniperRunGen || 0) + 1);
     seatState.lastExit = "started";
     if (userInitiated) seatState.haltedByUser = false;
     else if (seatState.haltedByUser) {
@@ -7752,7 +7752,7 @@
   function boot() {
     const seat = loadSeatConfig();
     saveSeatConfig(seat);
-    window.PureClick = {
+    window.NOLSniper = {
       build: AUTOPILOT_BUILD,
       seatConfig: seat,
       armConfig: loadArmConfig,
@@ -7892,7 +7892,7 @@
         runSeatAutopilot(loadSeatConfig(), { catchMode: true, userInitiated: true }),
       probeSeats: () => runSeatAutopilot(loadSeatConfig(), { probe: true, userInitiated: true }),
       stopAll() {
-        window.__pureclickRunGen = (window.__pureclickRunGen || 0) + 1;
+        window.__nolsniperRunGen = (window.__nolsniperRunGen || 0) + 1;
         seatState.running = false;
         seatState.stopRequested = true;
         // Sticky: bootRoute must not restart it on the next URL change.
@@ -8033,7 +8033,7 @@
   }
 
   let lastPath = location.href;
-  window.__pureclickWatchId = setInterval(() => {
+  window.__nolsniperWatchId = setInterval(() => {
     if (location.href !== lastPath) {
       lastPath = location.href;
       seatState.running = false;

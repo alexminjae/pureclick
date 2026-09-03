@@ -763,7 +763,7 @@ EXIT_REASONS = {
 BRIDGE_STALE_SECONDS = 3.0
 
 # How long a pressed button may go unanswered before the panel says so.
-# `browser_host.apply_state` fires every command as `window.PureClick && …` and
+# `browser_host.apply_state` fires every command as `window.NOLSniper && …` and
 # then drops it from the state file whether or not anything was there to run it,
 # so a press against a page with no autopilot on it vanished without a trace.
 ACK_SECONDS = 3.0

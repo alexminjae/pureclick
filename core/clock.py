@@ -16,15 +16,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterable
 
 
-class PureClickError(Exception):
-    """Base exception for user-facing PureClick failures."""
+class NolSniperError(Exception):
+    """Base exception for user-facing NOL Sniper failures."""
 
 
-class ServerTimeError(PureClickError):
+class ServerTimeError(NolSniperError):
     """Raised when server time cannot be sampled."""
 
 
-class ClickError(PureClickError):
+class ClickError(NolSniperError):
     """Raised when a click cannot be sent."""
 
 
@@ -216,7 +216,7 @@ class KeepAliveProbe:
                 connection.request(
                     "HEAD",
                     self._path,
-                    headers={"Connection": "keep-alive", "User-Agent": "PureClick"},
+                    headers={"Connection": "keep-alive", "User-Agent": "NOLSniper"},
                 )
                 response = connection.getresponse()
                 response.read()

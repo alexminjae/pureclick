@@ -24,7 +24,7 @@ import app_update  # noqa: E402
 SOURCE = "// autopilot v2\n"
 GOOD_SHA = app_update.sha256_of(SOURCE)
 MANIFEST_URL = "https://example.invalid/manifest.json"
-JS_URL = "https://example.invalid/pureclick_autopilot.js"
+JS_URL = "https://example.invalid/nolsniper_autopilot.js"
 
 
 def manifest(**over) -> dict:
@@ -53,7 +53,7 @@ def opener_for(man: dict, body: str = SOURCE, *, fail: str = ""):
 class UpdateTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
-        self.cache = Path(self._tmp.name) / "PureClick" / "pureclick_autopilot.js"
+        self.cache = Path(self._tmp.name) / "NOLSniper" / "nolsniper_autopilot.js"
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -145,19 +145,19 @@ class VersionTagTests(unittest.TestCase):
         os.environ.update(self._env_before)
 
     def test_an_unstamped_checkout_reads_as_dev_not_as_a_confusing_zero(self) -> None:
-        os.environ.pop("PURECLICK_VERSION", None)
+        os.environ.pop("NOLSNIPER_VERSION", None)
         self.assertEqual(app_update.version_tag(), "(dev)")
 
     def test_a_tagged_release_shows_its_number(self) -> None:
-        os.environ["PURECLICK_VERSION"] = "0.1.6"
+        os.environ["NOLSNIPER_VERSION"] = "0.1.6"
         self.assertEqual(app_update.version_tag(), "(v0.1.6)")
 
     def test_a_branch_build_still_shows_something_specific(self) -> None:
-        os.environ["PURECLICK_VERSION"] = "0.0.0+abc1234"
+        os.environ["NOLSNIPER_VERSION"] = "0.0.0+abc1234"
         self.assertEqual(app_update.version_tag(), "(v0.0.0+abc1234)")
 
     def test_the_panel_actually_puts_this_in_its_title(self) -> None:
         """A helper nobody calls is exactly as useful as not having one."""
-        source = (ROOT / "mac" / "pureclick.py").read_text(encoding="utf-8")
+        source = (ROOT / "mac" / "nolsniper.py").read_text(encoding="utf-8")
         self.assertIn("app_update.version_tag()", source,
                       "version_tag must reach the window title, not just exist")

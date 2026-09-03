@@ -25,7 +25,7 @@ from core.seat import (
 )
 
 
-class PureClickSeatCoreTests(unittest.TestCase):
+class NolSniperSeatCoreTests(unittest.TestCase):
     def test_parse_goods_code_from_url(self) -> None:
         self.assertEqual(
             parse_goods_code("https://tickets.interpark.com/goods/26006325"),

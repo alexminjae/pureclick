@@ -26,9 +26,9 @@ from datetime import datetime  # noqa: E402
 
 
 def _load(name: str):
-    source = (ROOT / "mac" / "pureclick.py").read_text(encoding="utf-8")
+    source = (ROOT / "mac" / "nolsniper.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
-    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "PureClickMacApp")
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "NolSniperApp")
     fn = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == name)
     module = ast.Module(body=[fn], type_ignores=[])
     ast.fix_missing_locations(module)
@@ -36,14 +36,14 @@ def _load(name: str):
     # names in its globals or it raises NameError the moment a log is present.
     from datetime import datetime, timedelta
 
-    from core.clock import KST, PureClickError
+    from core.clock import KST, NolSniperError
     from core.seat import waiting_log_lines
 
     # A function lifted out of its module has none of that module's globals.
     ns: dict = {
         "waiting_log_lines": waiting_log_lines,
         "datetime": datetime, "timedelta": timedelta,
-        "KST": KST, "PureClickError": PureClickError,
+        "KST": KST, "NolSniperError": NolSniperError,
     }
     exec(compile(module, "<panel>", "exec"), ns)  # noqa: S102 - our own source
     return ns[name]
@@ -135,9 +135,9 @@ class EntryTestReadout(unittest.TestCase):
         This used to read the first 600 bytes, so adding a comment moved the
         line it was checking out of range and failed a working change.
         """
-        source = (ROOT / "mac" / "pureclick.py").read_text(encoding="utf-8")
+        source = (ROOT / "mac" / "nolsniper.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
-        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "PureClickMacApp")
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "NolSniperApp")
         fn = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == name)
         return ast.get_source_segment(source, fn) or ""
 
@@ -157,7 +157,7 @@ class EntryTestReadout(unittest.TestCase):
         for. The offsets are gone; "+1분" survives as a smoke test beside a real
         clock.
         """
-        source = (ROOT / "mac" / "pureclick.py").read_text(encoding="utf-8")
+        source = (ROOT / "mac" / "nolsniper.py").read_text(encoding="utf-8")
         self.assertNotIn("TEST_OFFSETS", source, "the offset table is gone")
         fn = self._body("_test_time_text")
         for var in ("test_hour", "test_minute", "test_second", "test_date"):
@@ -182,7 +182,7 @@ class EntryTestReadout(unittest.TestCase):
         self.assertEqual(datetime.fromtimestamp(parsed, KST).strftime("%H:%M:%S"), "14:00:07")
 
     def test_an_impossible_time_is_refused_rather_than_armed(self) -> None:
-        from core.clock import PureClickError
+        from core.clock import NolSniperError
 
         build = _load("_test_time_text")
         panel = FakePanel()
@@ -192,7 +192,7 @@ class EntryTestReadout(unittest.TestCase):
         panel.test_hour.set("99")
         panel.test_minute.set("00")
         panel.test_second.set("00")
-        with self.assertRaises(PureClickError):
+        with self.assertRaises(NolSniperError):
             build(panel)
 
 

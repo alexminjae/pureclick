@@ -4,27 +4,27 @@ __pycache__/
 build/
 dist/
 # *.spec generally means "PyInstaller's auto-generated boilerplate" — but
-# pureclick.spec is hand-written and does real work (bundles the WebView2
+# nolsniper.spec is hand-written and does real work (bundles the WebView2
 # interop assemblies pyinstaller cannot find on its own). It stayed untracked
 # under the old blanket *.spec pattern until the Windows build failed with
 # "Spec file not found" because it had never actually been pushed.
 *.spec
-!pureclick.spec
+!nolsniper.spec
 .DS_Store
 .pytest_cache/
-pureclick_fire_log.csv
-pureclick_seat_config.json
-pureclick_watch_config.json
-mac/.pureclick_browser_state.json
-mac/.pureclick_browser_state.json.lock
-mac/pureclick_seat_config.json
-mac/pureclick_arm_config.json
-mac/.pureclick_cookies.json
-mac/.pureclick_bridge_health.json
+nolsniper_fire_log.csv
+nolsniper_seat_config.json
+nolsniper_watch_config.json
+mac/.nolsniper_browser_state.json
+mac/.nolsniper_browser_state.json.lock
+mac/nolsniper_seat_config.json
+mac/nolsniper_arm_config.json
+mac/.nolsniper_cookies.json
+mac/.nolsniper_bridge_health.json
 
 # Built by mac/make_app.sh — regenerate, do not commit
-mac/PureClick.icns
-mac/PureClick.iconset/
+mac/NOLSniper.icns
+mac/NOLSniper.iconset/
 
 # Written by the Windows build immediately before PyInstaller runs, so the exe
 # knows its own version and where to look for newer automation. Not source.

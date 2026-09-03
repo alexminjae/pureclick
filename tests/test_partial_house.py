@@ -118,7 +118,7 @@ class TheMapShowsWhatCanBeAimedAt(unittest.TestCase):
         self.assertAlmostEqual(max(s.venue_x for s in view.seats), 164.6, places=1)
 
     def test_the_panel_filters_before_it_projects(self) -> None:
-        panel = (ROOT / "mac" / "pureclick.py").read_text(encoding="utf-8")
+        panel = (ROOT / "mac" / "nolsniper.py").read_text(encoding="utf-8")
         self.assertIn("live_block_keys(self._zone_sketch)", panel)
         self.assertIn("drawable", panel)
 

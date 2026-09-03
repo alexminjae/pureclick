@@ -48,7 +48,7 @@ if (!acorn) {
   process.exit(2);
 }
 
-const FILE = process.argv[2] ?? "browser/pureclick_autopilot.js";
+const FILE = process.argv[2] ?? "browser/nolsniper_autopilot.js";
 const ALL = process.argv.includes("--all");
 const src = readFileSync(FILE, "utf8");
 const ast = acorn.parse(src, { ecmaVersion: 2023, locations: true, sourceType: "script" });
@@ -77,7 +77,7 @@ const scopeOf = (n) => {
 
 // References inside the debug-export object are not uses.
 const exportAssign = of("AssignmentExpression").find(
-  (n) => src.slice(n.left.start, n.left.end) === "window.PureClick",
+  (n) => src.slice(n.left.start, n.left.end) === "window.NOLSniper",
 );
 const EX = exportAssign ? [exportAssign.right.start, exportAssign.right.end] : [-1, -1];
 const inExports = (n) => n.start >= EX[0] && n.end <= EX[1];

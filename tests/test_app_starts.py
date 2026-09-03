@@ -1,7 +1,7 @@
 """Every name the panel imports at startup actually exists.
 
 Written after deleting the Windows edition removed `ensure_mac_ready` along
-with the dead code above it — `mac/pureclick.py` imports that on line 24, so
+with the dead code above it — `mac/nolsniper.py` imports that on line 24, so
 the panel would have failed to start with an ImportError and no test would have
 noticed. The suite covered the logic modules thoroughly and the wiring not at
 all.
@@ -37,10 +37,10 @@ def _declared_imports(source: Path) -> list[tuple[str, str]]:
 
 
 # The two files that actually run: the panel and the browser host it launches.
-ENTRY_POINTS = [MAC / "pureclick.py", MAC / "browser_host.py"]
+ENTRY_POINTS = [MAC / "nolsniper.py", MAC / "browser_host.py"]
 # Third-party and stdlib are the environment's problem, not ours.
 OURS = {
-    "browser_bridge", "browser_host", "browser_session", "pureclick_mac_core",
+    "browser_bridge", "browser_host", "browser_session", "nolsniper_mac_core",
     "core.arm", "core.clock", "core.seat", "core.showinfo",
     "core.watch_trigger", "core.zone_map",
 }
@@ -68,7 +68,7 @@ class AppStartsTest(unittest.TestCase):
     def test_the_autopilot_script_the_host_injects_exists(self) -> None:
         # browser_host reads this off disk at document-start injection time, so
         # a rename would not surface until a page loaded.
-        script = ROOT / "browser" / "pureclick_autopilot.js"
+        script = ROOT / "browser" / "nolsniper_autopilot.js"
         self.assertTrue(script.exists(), "the injected autopilot script is missing")
         self.assertIn("AUTOPILOT_BUILD", script.read_text(encoding="utf-8")[:2000])
 

@@ -1,7 +1,7 @@
 """Tell the user about a newer build, and refresh the autopilot safely.
 
 A downloaded exe is a snapshot. But the file that changes most is not the Python
-— over the last 60 days `browser/pureclick_autopilot.js` had 18 commits against
+— over the last 60 days `browser/nolsniper_autopilot.js` had 18 commits against
 15 for the panel — because it tracks someone else's markup. So the Python shell
 ships in the binary and the automation can be refreshed in place.
 
@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 # Where the running app looks for the release manifest. The workflow publishes it
-# beside PureClick.exe. Empty means "no update source configured", and the check
+# beside NOLSniper.exe. Empty means "no update source configured", and the check
 # is then skipped in silence rather than reporting a failure that is not one —
 # which is the state of a source checkout with no remote.
 def _stamped(name: str, default: str = "") -> str:
@@ -40,7 +40,7 @@ def _stamped(name: str, default: str = "") -> str:
     repo. An environment variable overrides both, which is how this gets tested
     without a release.
     """
-    override = os.environ.get(f"PURECLICK_{name}")
+    override = os.environ.get(f"NOLSNIPER_{name}")
     if override:
         return override.strip()
     for base in (getattr(sys, "_MEIPASS", None), Path(__file__).resolve().parent):

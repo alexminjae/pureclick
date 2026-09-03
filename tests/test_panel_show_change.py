@@ -22,9 +22,9 @@ sys.path.insert(0, str(ROOT / "mac"))
 
 
 def _load(name: str):
-    source = (ROOT / "mac" / "pureclick.py").read_text(encoding="utf-8")
+    source = (ROOT / "mac" / "nolsniper.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
-    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "PureClickMacApp")
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "NolSniperApp")
     fn = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == name)
     module = ast.Module(body=[fn], type_ignores=[])
     ast.fix_missing_locations(module)

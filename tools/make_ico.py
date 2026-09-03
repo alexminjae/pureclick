@@ -1,4 +1,4 @@
-"""Write mac/pureclick.ico from the same drawing the .icns uses.
+"""Write mac/nolsniper.ico from the same drawing the .icns uses.
 
 The exe is a file you hand to someone, and a generic PyInstaller icon reads as
 unfinished. The macOS pipeline could not produce this: make_icon.py resizes with
@@ -24,7 +24,7 @@ from make_icon import render  # noqa: E402
 # 256 is what Explorer shows at large sizes; 16 and 32 are the taskbar and title
 # bar, and are drawn rather than downscaled so they stay legible.
 SIZES = (16, 24, 32, 48, 64, 128, 256)
-OUT = ROOT / "mac" / "pureclick.ico"
+OUT = ROOT / "mac" / "nolsniper.ico"
 
 
 def png_bytes(size: int, rows: list[bytearray]) -> bytes:

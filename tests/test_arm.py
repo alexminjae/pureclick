@@ -5,7 +5,7 @@ import unittest
 from core.arm import ArmPayload, browser_config_snippet
 
 
-class PureClickArmCoreTests(unittest.TestCase):
+class NolSniperArmCoreTests(unittest.TestCase):
     def test_arm_payload_round_trip(self) -> None:
         payload = ArmPayload(
             enabled=True,
@@ -49,8 +49,8 @@ class PureClickArmCoreTests(unittest.TestCase):
             arm_payload=payload,
             seat_mapping={"enabled": True, "grade_order": ["2", "3"]},
         )
-        self.assertIn("pureclick_arm_v1", snippet)
-        self.assertIn("pureclick_seat_v1", snippet)
+        self.assertIn("nolsniper_arm_v1", snippet)
+        self.assertIn("nolsniper_seat_v1", snippet)
 
 
 if __name__ == "__main__":

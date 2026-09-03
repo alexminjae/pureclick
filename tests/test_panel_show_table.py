@@ -77,7 +77,7 @@ class ShowTableTests(unittest.TestCase):
 
     def test_panel_delegates_instead_of_duplicating(self) -> None:
         """The panel must call the shared builder, not grow its own copy."""
-        source = (MAC_DIR / "pureclick.py").read_text(encoding="utf-8")
+        source = (MAC_DIR / "nolsniper.py").read_text(encoding="utf-8")
         start = source.index("def _render_seat_table")
         body = source[start : source.index("\n    def ", start + 1)]
         self.assertIn("seat_table_lines(", body)

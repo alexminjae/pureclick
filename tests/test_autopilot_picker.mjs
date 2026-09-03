@@ -2,7 +2,7 @@
  * Verifies the in-browser seat picker behaves like the tested Python core.
  *
  * The autopilot is an IIFE that expects a DOM, so this harness stubs just
- * enough of the browser to let it install `window.PureClick`, then exercises
+ * enough of the browser to let it install `window.NOLSniper`, then exercises
  * the exported pure helpers with seat shapes taken from real shows.
  */
 
@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
 
 const noop = () => {};
 
@@ -122,10 +122,10 @@ sandbox.self = sandbox;
 sandbox.top = sandbox; // a top-level page; the autopilot skips subframes
 
 vm.createContext(sandbox);
-vm.runInContext(source, sandbox, { filename: "pureclick_autopilot.js" });
+vm.runInContext(source, sandbox, { filename: "nolsniper_autopilot.js" });
 
-const picker = sandbox.window.PureClick?.picker;
-assert.ok(picker, "autopilot did not expose window.PureClick.picker");
+const picker = sandbox.window.NOLSniper?.picker;
+assert.ok(picker, "autopilot did not expose window.NOLSniper.picker");
 
 const seat = (id, grade, gradeName, rowNo, seatNo, extra = {}) => ({
   seatInfoId: id,
@@ -147,7 +147,7 @@ function armFixture({ targetOffsetSeconds }) {
   loc.hostname = "nol.yanolja.com";
   loc.pathname = "/ticket/products/26012515";
   loc.href = "https://nol.yanolja.com/ticket/products/26012515";
-  sandbox.localStorage.setItem("pureclick_arm_v1", JSON.stringify({
+  sandbox.localStorage.setItem("nolsniper_arm_v1", JSON.stringify({
     enabled: true,
     fired: false,
     goods_code: "26012515",
@@ -157,12 +157,12 @@ function armFixture({ targetOffsetSeconds }) {
     offset_seconds: 0,
     use_waiting_api: true,
   }));
-  sandbox.localStorage.setItem("pureclick_seat_v1", JSON.stringify({ reentry: true, quantity: 1 }));
+  sandbox.localStorage.setItem("nolsniper_seat_v1", JSON.stringify({ reentry: true, quantity: 1 }));
   return () => {
     Object.assign(loc, before);
-    sandbox.localStorage.removeItem("pureclick_arm_v1");
-    sandbox.localStorage.removeItem("pureclick_seat_v1");
-    sandbox.window.PureClick.race.resetReentryState();
+    sandbox.localStorage.removeItem("nolsniper_arm_v1");
+    sandbox.localStorage.removeItem("nolsniper_seat_v1");
+    sandbox.window.NOLSniper.race.resetReentryState();
   };
 }
 
@@ -280,14 +280,14 @@ const tests = {
     // usable:false and triggerBursts stays 0 — so the saving was never spent
     // and the watch ran at its slowest rate forever. Measured on 26006903:
     // 75 blocks, 1 request per 154ms tick, a 5.9 second lap.
-    const { steadyRequestsPerTick } = sandbox.window.PureClick.picker;
-    const state = sandbox.window.PureClick.__seatState ?? null;
+    const { steadyRequestsPerTick } = sandbox.window.NOLSniper.picker;
+    const state = sandbox.window.NOLSniper.__seatState ?? null;
 
     // 75 blocks -> 38 requests. With a trigger, stay at one and wait for it.
-    sandbox.window.PureClick.setWatchTrigger({ usable: true, total: 5 });
+    sandbox.window.NOLSniper.setWatchTrigger({ usable: true, total: 5 });
     assert.equal(steadyRequestsPerTick(38, 100), 1, "a usable trigger keeps the saving");
 
-    sandbox.window.PureClick.setWatchTrigger({ usable: false, total: 0 });
+    sandbox.window.NOLSniper.setWatchTrigger({ usable: false, total: 0 });
     assert.equal(steadyRequestsPerTick(38, 100), 4, "nothing to save for, so spend");
 
     // A venue small enough to lap quickly gains nothing and asks for nothing.
@@ -299,7 +299,7 @@ const tests = {
   },
 
   "the watch tick honours a slower setting but never a faster one"() {
-    const { catchPollMs } = sandbox.window.PureClick.picker;
+    const { catchPollMs } = sandbox.window.NOLSniper.picker;
     assert.equal(catchPollMs({}), 100, "absent means the floor");
     assert.equal(catchPollMs({ speed_ms: 0 }), 100, "0 means the floor");
     assert.equal(catchPollMs({ speed_ms: 50 }), 100, "a faster number cannot lower the floor");
@@ -311,7 +311,7 @@ const tests = {
     // were counted in — 26012673 has 622 such seats across 1F/2F D and E. The
     // panel then reported hundreds of free seats no run could take, and
     // explained the contradiction with a grade filter that does not exist.
-    const { seatSellable } = sandbox.window.PureClick.picker;
+    const { seatSellable } = sandbox.window.NOLSniper.picker;
     assert.equal(seatSellable({ isExposable: true, seatGrade: "1", seatInfoId: "x" }), true);
     assert.equal(seatSellable({ isExposable: true, seatGrade: "", seatInfoId: "x" }), false,
       "no grade means not on sale this round");
@@ -322,7 +322,7 @@ const tests = {
   },
 
   "the watch explains itself without naming a filter that was removed"() {
-    const { catchStatusText } = sandbox.window.PureClick.picker;
+    const { catchStatusText } = sandbox.window.NOLSniper.picker;
     const withRect = catchStatusText([], 12, 100, false, [0, 0, 10, 10]);
     assert.match(withRect, /감시 구역 밖/);
     assert.doesNotMatch(withRect, /등급/, "there is no grade selection in the panel");
@@ -346,7 +346,7 @@ const tests = {
     // Not every venue exposes a subtree we can observe. When one does not, the
     // watch must fall back to scanning rather than run on an empty index and
     // decide nothing is clickable.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const node = {
       __reactProps$test: { seat: { seatInfoId: "Z9", seatGrade: "2" }, blockKey: "022:001" },
       getAttribute: () => "3",
@@ -374,7 +374,7 @@ const tests = {
     // it the loop then did `candidates = []; continue`, throwing the ranking
     // away and going back round for another poll before clicking anything.
     // clickableAmong is what lets the tick finish the job it started.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const seat = { seatInfoId: "S1", blockKey: "022:001", seatGrade: "1" };
     const node = {
       __reactProps$t: { seat: { seatInfoId: "S1", seatGrade: "1" }, blockKey: "022:001" },
@@ -411,7 +411,7 @@ const tests = {
     // capped at two keys — so a 34-block venue spends 17 requests and ~4.4s to
     // answer a question the remaining-seat feed answers in one and ~132ms.
     // Measured agreement: round 097 read 202 both ways.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const state = race.state;
     const set = (trigger) => {
       state.watchTrigger = trigger;
@@ -447,7 +447,7 @@ const tests = {
     // The budget is an average. Spending almost nothing while the venue is
     // quiet is what makes it affordable to spend the whole sweep at the moment
     // something actually frees.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const state = race.state;
     const blocks = [];
     for (let i = 1; i <= 8; i += 1) {
@@ -500,7 +500,7 @@ const tests = {
     // settles for up to 900ms, then a fit. Fitting the 구역 already open costs
     // a fraction of that. Ranking by distance alone sent the macro on that
     // journey for a seat one row nearer, which by arrival is usually gone.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const nearer = { seatInfoId: "far-block", blockKey: "001:001", posTop: 0 };
     const reachable = { seatInfoId: "same-block", blockKey: "022:001", posTop: 90 };
     const ranked = [nearer, reachable];
@@ -519,7 +519,7 @@ const tests = {
     // The settle budgets these run against (900/700/250ms) are ceilings someone
     // chose; the only real figure anywhere was a 389ms note in a comment. The
     // travel is the biggest latency in 취켓팅, so it needs measuring.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     race.state.mapMoves = {};
     return (async () => {
       await race.noteMapMove("enterBlock", "022:001", async () => ({ ok: true }));
@@ -542,7 +542,7 @@ const tests = {
     // The tick now lives in one function, catchPollMs, shared by the run loop
     // and by the request budget — they used to compute it separately, which is
     // how a budget change could miss the loop that spends it.
-    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     const at = source.indexOf("function catchPollMs(");
     assert.ok(at > 0, "the configured value must be read in one place");
     const region = source.slice(at, at + 400);
@@ -551,7 +551,7 @@ const tests = {
     assert.match(region, /Math\.max\(CATCH_MIN_POLL_MS/,
       "a configured speed may only ever slow the watch down");
 
-    const panel = readFileSync(resolve(here, "../mac/pureclick.py"), "utf8");
+    const panel = readFileSync(resolve(here, "../mac/nolsniper.py"), "utf8");
     assert.ok(
       !/max\(int\(preferences\.speed_ms\), 400\)/.test(panel),
       "the panel must not floor the watch at 400ms on load",
@@ -570,7 +570,7 @@ const tests = {
     // still holding and the server answers 이미 선점된 좌석입니다.
     //
     // One rendered circle, clicked once. Nothing before it.
-    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     assert.ok(!/apiHoldFirst/.test(source), "no API hold may be attempted before a click");
     assert.ok(!/api_hold_first/.test(source), "and no flag left to switch one back on");
 
@@ -593,7 +593,7 @@ const tests = {
     // the document, it included `a` anchors, and leaveBlockToVenue clicked them
     // one at a time until the seats disappeared. Navigating away makes seats
     // disappear, so pressing 마이페이지 scored as success.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const pressed = [];
     const control = (label, tag = "BUTTON") => ({
       tagName: tag,
@@ -645,7 +645,7 @@ const tests = {
     // frame. Preparing at 감시 시작 is the difference.
     //
     // Structural: driving it needs a live map, but the ordering is the claim.
-    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     const loopAt = source.indexOf("while (seatState.attempts < maxAttempts");
     const prepAt = source.indexOf("if (isCatch && !config.auto_assign) {");
     assert.ok(prepAt > 0, "the watch must prepare its 구역");
@@ -666,7 +666,7 @@ const tests = {
     // freeing just behind the cursor waited a whole sweep, nearly nine
     // seconds. The 감시 구역 was applied only as a filter after fetching, so
     // drawing one narrowed the results but never the work.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const state = race.state;
 
     // A venue of 20 blocks, of which the user watches two.
@@ -723,7 +723,7 @@ const tests = {
   // the gateway budget that caps our own sweep.
 
   "a seat the page's own traffic shows opening is caught without a request"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const state = race.state;
     const block = {
       blockKey: "001:001",
@@ -761,7 +761,7 @@ const tests = {
   "a first sighting is not an opening"() {
     // Without a previous mask every free seat would read as newly freed, and
     // the watch would fire on the whole venue the moment it started.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const state = race.state;
     const block = {
       blockKey: "001:001",
@@ -786,7 +786,7 @@ const tests = {
   "unreadable page traffic is ignored rather than thrown from"() {
     // This runs inside a network callback on the booking page. Throwing there
     // would surface as a page error on traffic that is none of our business.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const state = race.state;
     state.lastBlocks = [{ blockKey: "001:001", mask: [false], seats: [] }];
     try {
@@ -833,7 +833,7 @@ const tests = {
   // seatStatus requests inside 13ms, so six concurrent is a width it plainly
   // accepts.
   "a sweep issues its requests together, not one after another"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const originalFetch = sandbox.fetch;
     const events = [];
     let open = 0;
@@ -869,7 +869,7 @@ const tests = {
     // The caller matches masks to keys positionally. Collapsing a failure
     // instead of keeping its slots would apply one block's bitmap to another —
     // silently, and it would read as seats freeing where they had not.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const originalFetch = sandbox.fetch;
     sandbox.fetch = async (url) => {
       const keys = [...String(url).matchAll(/blockKeys=([^&]+)/g)]
@@ -917,7 +917,7 @@ const tests = {
     // burst is not a steady state, which is why the sustained rate stays two
     // orders of magnitude below it — but it is why six concurrent is a width
     // the gateway demonstrably accepts.
-    assert.equal(sandbox.window.PureClick.race.SWEEP_CONCURRENCY, 6,
+    assert.equal(sandbox.window.NOLSniper.race.SWEEP_CONCURRENCY, 6,
                  "match the page's own observed burst width, not more");
   },
 
@@ -931,7 +931,7 @@ const tests = {
   // the autopilot believe a modal was permanently up. The test below pins that
   // narrower page-text behaviour; the two must stay different.
   "the post-selection modal is matched however it is worded"() {
-    const seen = (text) => sandbox.window.PureClick.guards.BOOKING_MODAL_COPY.test(text);
+    const seen = (text) => sandbox.window.NOLSniper.guards.BOOKING_MODAL_COPY.test(text);
 
     assert.equal(
       seen("취소/환불 기간이 지난 예매를 선택했습니다. 이 일정은 예매 후 취소/환불이 불가능합니다."),
@@ -954,7 +954,7 @@ const tests = {
   // end-of-run cleanup then released it. Observed as: PreselectSeat true, no
   // page:select at all, then BulkDeselectSeats.
   "an empty sidebar right after a click is not proof of no seat"() {
-    const held = sandbox.window.PureClick.picker.pageHasSelectedSeats;
+    const held = sandbox.window.NOLSniper.picker.pageHasSelectedSeats;
     const withText = (text) => {
       sandbox.document.body.innerText = text;
       return held();
@@ -1031,7 +1031,7 @@ const tests = {
   },
 
   "payment buttons are never treated as advance buttons"() {
-    const { COMMIT_BUTTON, ADVANCE_BUTTON } = sandbox.window.PureClick.guards;
+    const { COMMIT_BUTTON, ADVANCE_BUTTON } = sandbox.window.NOLSniper.guards;
     const commits = ["결제하기", "결제 하기", "결제완료", "입금하기", "구매하기", "주문완료", "결제진행"];
     for (const label of commits) {
       assert.ok(COMMIT_BUTTON.test(label), `should be recognised as commit: ${label}`);
@@ -1041,7 +1041,7 @@ const tests = {
       assert.ok(ADVANCE_BUTTON.test(label), `should advance: ${label}`);
       assert.ok(!COMMIT_BUTTON.test(label), `should not be a commit: ${label}`);
     }
-    const { isBookingNoticeConfirm, isBookingNoticeCopy } = sandbox.window.PureClick.guards;
+    const { isBookingNoticeConfirm, isBookingNoticeCopy } = sandbox.window.NOLSniper.guards;
     assert.equal(isBookingNoticeConfirm("확인하고 예매하기"), true);
     assert.equal(isBookingNoticeConfirm("확인하고예매하기"), true);
     assert.equal(isBookingNoticeConfirm("확인"), false);
@@ -1063,7 +1063,7 @@ const tests = {
   // NOT 보안문자, because the sniper's own toast contains that word and would
   // otherwise make the page look permanently blocked by its own status line.
   "the captcha modal is detected without matching our own toast"() {
-    const { isCaptchaPageCopy } = sandbox.window.PureClick.captcha;
+    const { isCaptchaPageCopy } = sandbox.window.NOLSniper.captcha;
 
     assert.equal(isCaptchaPageCopy("화면의 문자를 입력해주세요"), true);
     assert.equal(isCaptchaPageCopy("문자를 입력해주세요"), true);
@@ -1180,7 +1180,7 @@ const tests = {
   // far-left seat sits level with the front row while being right out at the
   // wall. Depth alone scored it identically to a centre seat in that row.
   "a seat level with the front row loses to one actually nearer the stage"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const seats = [];
     const add = (block, x0, x1, y0, y1) => {
       for (let x = x0; x <= x1; x += 6)
@@ -1235,7 +1235,7 @@ const tests = {
   // free, it would drift as the house sells and reorder the seats underneath
   // itself — the ranking would change without a single seat moving.
   "the stage does not move as seats sell"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const seats = [];
     for (let x = 0; x <= 100; x += 10)
       for (let y = 0; y <= 60; y += 10)
@@ -1268,7 +1268,7 @@ const tests = {
   // down one side only — those are different places, and using the whole-house
   // middle aims the macro at the middle of the back block.
   "the stage sits over the front rows, not the middle of the house"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const seats = [];
     const add = (x0, x1, y0, y1) => {
       for (let x = x0; x <= x1; x += 10)
@@ -1297,7 +1297,7 @@ const tests = {
   },
 
   "a plain venue still takes front centre"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const seats = [];
     for (let x = 0; x <= 100; x += 10)
       for (let y = 0; y <= 60; y += 10)
@@ -1347,7 +1347,7 @@ const tests = {
   // pre-wait loop was always already past and the first request went out *at*
   // the open, never before it.
   "the entry scheduler stops short of the open by the retry loop's lead"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const target = 1_800_000_000;
     const start = race.armEntryStartUnix({ target_server_unix: target });
 
@@ -1367,7 +1367,7 @@ const tests = {
   // lockout, at the one moment a lockout cannot be recovered from. So the
   // density goes only where it buys something.
   "the queue poll is dense only across the open, not for the whole window"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const at = (ms) => race.waitingIntervalAt(ms);
 
     // Before the open the answer cannot be yes; these requests only keep the
@@ -1396,11 +1396,11 @@ const tests = {
   // queue URL early then arriving at the open is already too late. The log is
   // what settles that.
   "every queue attempt is recorded with its offset from the open"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const state = race.state;
-    const arm = sandbox.window.PureClick.race;
+    const arm = sandbox.window.NOLSniper.race;
     // armState is reachable through the published status.
-    const armState = sandbox.window.PureClick.status().arm;
+    const armState = sandbox.window.NOLSniper.status().arm;
     assert.ok("waitingLog" in armState, "the log crosses the bridge with the arm");
 
     assert.equal(race.describeWaitingAnswer(""), "(빈 응답)");
@@ -1416,18 +1416,18 @@ const tests = {
     // A 15-second window at 20ms would push the entries around the flip off the
     // end of any fixed-size buffer read from the front. The flip is the only
     // part worth keeping.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const state = race.state;
-    const armState = sandbox.window.PureClick.status().arm;
+    const armState = sandbox.window.NOLSniper.status().arm;
     void armState;
     // Drive the recorder directly; it writes into the live arm state.
-    sandbox.window.PureClick.race.noteWaitingAttempt(-400, "(빈 응답)", 11);
+    sandbox.window.NOLSniper.race.noteWaitingAttempt(-400, "(빈 응답)", 11);
     const limit = race.WAITING_LOG_LIMIT;
     for (let i = 0; i < limit + 25; i += 1) {
       race.noteWaitingAttempt(i * 20 - 100, "(빈 응답)", 11);
     }
     race.noteWaitingAttempt(1234, "대기열 queue.example.com", 12);
-    const log = sandbox.window.PureClick.status().arm.waitingLog;
+    const log = sandbox.window.NOLSniper.status().arm.waitingLog;
     assert.equal(log.length, limit, `capped at ${limit}`);
     assert.equal(log[log.length - 1].outcome, "대기열 queue.example.com",
                  "the newest entry — the flip — must survive");
@@ -1439,7 +1439,7 @@ const tests = {
   // cold at the exact moment it is claiming your place in line. Measured: a
   // cold TCP+TLS handshake to these hosts costs ~37ms.
   "the queue host is learned from a real entry and warmed on the next one"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const store = sandbox.window.localStorage;
     const before = store.getItem(race.QUEUE_HOST_KEY);
     try {
@@ -1470,7 +1470,7 @@ const tests = {
   // runArmScheduler was silent, so an arm that refused looked exactly like one
   // that had never been asked.
   "an arm that refuses says why"() {
-    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     const fn = source.slice(source.indexOf("async function runArmScheduler("));
     const body = fn.slice(0, fn.indexOf("\n  }\n"));
     const head = body.slice(0, body.indexOf("armState.running = true;"));
@@ -1495,7 +1495,7 @@ const tests = {
   },
 
   "an entry is refused where there is nothing to enter"() {
-    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     const fn = source.slice(source.indexOf("async function runArmScheduler("));
     const head = fn.slice(0, fn.indexOf("armState.running = true;"));
     assert.match(head, /isNolProductPage\(\)[^]*isGoodsPage\(\)/,
@@ -1521,7 +1521,7 @@ const tests = {
   },
 
   "an entry with no target time has no start time to compute"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     for (const arm of [{}, { target_server_unix: null }, { target_server_unix: "soon" }]) {
       assert.equal(race.armEntryStartUnix(arm), null, JSON.stringify(arm));
     }
@@ -1697,7 +1697,7 @@ const tests = {
     // was invisible until the run was restarted by hand, so 취켓팅 polled through
     // the whole lockout — and the code's own note says retrying through one can
     // only extend it. Structural: the loop needs a live page to execute.
-    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     const loop = source.slice(source.indexOf("while (seatState.attempts < maxAttempts"));
     const check = loop.search(/gatewayBlockRemainingMs\(\)/);
     assert.ok(check >= 0, "the loop must ask whether it is blocked");
@@ -1717,7 +1717,7 @@ const tests = {
     // the seat path let an arm fire straight into it — and every attempt can
     // push the block past the open, which is the one moment it cannot be
     // recovered from.
-    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     const fn = source.slice(source.indexOf("async function runArmScheduler("));
     const body = fn.slice(0, fn.indexOf("\n  }\n"));
     const check = body.search(/gatewayBlockRemainingMs\(\)/);
@@ -1746,7 +1746,7 @@ const tests = {
   // with in the meantime. The masks have to stay; what resets is which blocks
   // this run has already read.
   "a new run re-baselines without going blind"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const state = race.state;
     const block = {
       blockKey: "001:001",
@@ -1786,7 +1786,7 @@ const tests = {
   },
 
   "the run reset keeps both the venue and its bitmaps"() {
-    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     const fn = source.slice(source.indexOf("async function runSeatAutopilot("));
     const reset = fn.slice(0, fn.indexOf("while (seatState.attempts < maxAttempts"));
 
@@ -1800,7 +1800,7 @@ const tests = {
   },
 
   "a deliberate press clears a stale seat lock"() {
-    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     const fn = source.slice(source.indexOf("async function runSeatAutopilot("));
     const gate = fn.slice(fn.indexOf("if (seatState.locked) {"));
     const body = gate.slice(0, gate.indexOf("\n    if (seatState.running)"));
@@ -1826,7 +1826,7 @@ const tests = {
   "a block from any endpoint stops everything and says which one"() {
     // The question this session could not answer from the repo: which call was
     // blocked, the queue or the seat path. It is recorded now.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const state = race.state;
     const before = { until: state.blockedUntil, endpoint: state.blockedEndpoint };
     try {
@@ -1861,7 +1861,7 @@ const tests = {
         return true;
       },
     };
-    sandbox.window.PureClick.picker.firePointerSelect(node);
+    sandbox.window.NOLSniper.picker.firePointerSelect(node);
 
     const types = fired.map((e) => e.type);
     assert.deepEqual(types, ["pointerdown", "pointerup"]);
@@ -1997,7 +1997,7 @@ const tests = {
     // The mapping used lays each block's position *as a fraction of all the
     // blocks' extent* onto the drawing, which does not care about units. These
     // are the venue's real measured numbers.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const { blockClickPoint } = race;
     const IMAGE = { x: 12, y: 126, width: 877, height: 830 };
 
@@ -2044,7 +2044,7 @@ const tests = {
     // Deriving that from the SVG viewBox would tie us to markup we do not
     // control; seats already drawn carry both coordinate systems at once, so
     // the mapping can simply be measured — and re-measured after every move.
-    const { calibrateVenueToScreen } = sandbox.window.PureClick.race;
+    const { calibrateVenueToScreen } = sandbox.window.NOLSniper.race;
 
     // A venue laid out at 3.5x with a (120, 40) offset on screen.
     const SCALE = 3.5;
@@ -2090,7 +2090,7 @@ const tests = {
   "aiming does nothing for a seat already on screen": async () => {
     // The view must not move when it does not need to; that jumpiness is what
     // made the previous zoom unusable.
-    const { ensureSeatRendered } = sandbox.window.PureClick.race;
+    const { ensureSeatRendered } = sandbox.window.NOLSniper.race;
     const originalQsa = sandbox.document.querySelectorAll;
     const node = {
       __seat: { seatInfoId: "here", posLeft: 10, posTop: 10 },
@@ -2125,7 +2125,7 @@ const tests = {
     //
     // Block keys are `${playSeq}:${block}`, so the seats say which round is up,
     // and unlike initData they cannot be stale.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     // The real shape, measured on a live venue: blockKey sits BESIDE `seat`,
     // not inside it, so returning props.seat alone loses the block entirely.
     const seat = (blockKey, id) => ({
@@ -2179,7 +2179,7 @@ const tests = {
     // browsing was never detected and the panel went on describing the old
     // round. readShowCatalog is polled continuously, which makes it the one
     // place that can notice.
-    const api = sandbox.window.PureClick;
+    const api = sandbox.window.NOLSniper;
     const state = api.race.state;
 
     const seat = (blockKey, id) => {
@@ -2231,7 +2231,7 @@ const tests = {
     // Measured live: the page drew round 022 with 40 selectable seats while the
     // macro polled round 017 and read 0 free, which is indistinguishable from a
     // sold-out show and is why nothing was ever caught.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const state = race.state;
 
     state.blocksKey = "";
@@ -2265,7 +2265,7 @@ const tests = {
     // of circles; walking them four times a second to answer a question a dozen
     // seats already answer would make the poll the most expensive thing on the
     // page.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     let reads = 0;
     const seat = (blockKey, id) => ({
       get __seat() {
@@ -2302,7 +2302,7 @@ const tests = {
   "a drawn seat with no block of its own is looked up in seatMeta": () => {
     // Measured live: all 273 rendered seats came back with blockKey undefined,
     // which silently turned off every "which 구역 am I in" decision downstream.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     race.state.lastBlocks = [
       { blockKey: "022:001", seats: [{ seatInfoId: "S1" }, { seatInfoId: "S2" }] },
       { blockKey: "022:002", seats: [{ seatInfoId: "S9" }] },
@@ -2342,12 +2342,12 @@ const tests = {
     // started a 좌석 잡기 on arriving at the seat map; pressing 감시 시작 added a
     // second loop beside it, and the first one hitting its 80-attempt cap set
     // running = false under the watch. It looked exactly like a stall.
-    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     const start = source.indexOf("async function runSeatAutopilot(");
     const head = source.slice(start, start + 1200);
     assert.match(
       head,
-      /const runGen = \(window\.__pureclickRunGen = \(window\.__pureclickRunGen \|\| 0\) \+ 1\)/,
+      /const runGen = \(window\.__nolsniperRunGen = \(window\.__nolsniperRunGen \|\| 0\) \+ 1\)/,
       "a starting run must claim a new generation so older loops retire",
     );
     // And the loop must actually honour it.
@@ -2359,7 +2359,7 @@ const tests = {
     // 좌석 잡기 on a full venue can never find anything, but it spent all 80
     // attempts discovering that and then reported 선점 실패 (80회) — which reads
     // as a broken macro rather than a full house. 취켓팅 is the thing that waits.
-    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     const branch = source.slice(source.indexOf("if (!candidates.length) {", source.indexOf("while (seatState.attempts < maxAttempts")));
     const head = branch.slice(0, 900);
     assert.match(head, /!isCatch && \(seatState\.lastBlocks \|\| \[\]\)\.length && freeSeatCount\(\) === 0/,
@@ -2374,7 +2374,7 @@ const tests = {
     // false forever and the switch never fired. That is the ordinary case:
     // sitting in one block while a seat frees in another, unreachable. Every
     // rendered seat carries props.blockKey, so the answer is already on screen.
-    const { currentOpenBlock } = sandbox.window.PureClick.race;
+    const { currentOpenBlock } = sandbox.window.NOLSniper.race;
     const seat = (blockKey, id) => ({
       __seat: { seatInfoId: id, blockKey },
       getAttribute: () => "3",
@@ -2417,7 +2417,7 @@ const tests = {
     // 1400 characters of the loop, so adding a comment above the check failed a
     // working change — the same trap test_panel_entry_test.py fell into with a
     // 600-byte slice.
-    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     const loop = source.slice(source.indexOf("while (seatState.attempts < maxAttempts"));
     const clear = loop.search(/blockingOverlayNodes\(\)\.length\s*\)\s*dismissBlockingDialogs\(\)/);
     assert.ok(clear >= 0, "the loop must clear a blocking modal at all");
@@ -2440,7 +2440,7 @@ const tests = {
     // see it because its text is not one of the phrases we know — but an
     // unnamed modal blocks the map exactly as completely as a known one, so
     // the test here is structural: a dialog that owns a dismiss button.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     let pressed = null;
 
     const overlay = {
@@ -2485,7 +2485,7 @@ const tests = {
     // 중단됨 and told the user to close the booking window and start over —
     // throwing away a working session for something that only needed the next
     // seat. A lost race must be a conflict, never a broken session.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const confirmButton = { textContent: "확인", click() {} };
     const modal = {
       innerText: "이미 선점된 좌석입니다.",
@@ -2524,7 +2524,7 @@ const tests = {
     // trip — awaiting it before trying the next seat was the one place this
     // rejection path hadn't caught up to the map-click rejection path's own
     // "No sleep: the next seat is being raced for right now too".
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const confirmButton = { textContent: "확인", click() {} };
     const modal = {
       innerText: "이미 선점된 좌석입니다.",
@@ -2599,7 +2599,7 @@ const tests = {
     // context lands in storage would leave every later call — for the rest of
     // the run — reading an empty object and silently dropping
     // X-Onestop-Session/Channel from every request after it.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     sandbox.localStorage._data.clear();
     race.state.headerContextCache = null;
     try {
@@ -2641,14 +2641,14 @@ const tests = {
     // Reusing it would be exactly the kind of pattern a fraud/abuse system
     // watches for — the memoization above must stop at the context lookup and
     // not spread to this.
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const a = race.onestopHeaders({})["X-OneStop-Trace-ID"];
     const b = race.onestopHeaders({})["X-OneStop-Trace-ID"];
     assert.notEqual(a, b);
   },
 
   "seatMeta and seatStatus build the same query shape from the same helper"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const initData = { goods: { goodsCode: "G1", placeCode: "P1" }, playSeq: { playSeq: "007" }, bizCode: "WEBBR" };
     const params = race.seatQueryParams(initData, ["001:001", "001:002"]);
     assert.equal(params.get("goodsCode"), "G1");
@@ -2663,7 +2663,7 @@ const tests = {
     // went wrong, back off"; this means "that one seat is gone, take the next
     // one now". It matched no pattern at all, so the select wait ran to its 6s
     // timeout while the modal — which is modal — blocked every later click.
-    const { SEAT_TAKEN_DIALOG, SEAT_ERROR_DIALOG } = sandbox.window.PureClick.race;
+    const { SEAT_TAKEN_DIALOG, SEAT_ERROR_DIALOG } = sandbox.window.NOLSniper.race;
     const taken = "이미 선점된 좌석입니다";
 
     assert.ok(SEAT_TAKEN_DIALOG.test(taken), "the lost-race modal must be recognised");
@@ -2684,7 +2684,7 @@ const tests = {
     // The first version of this detector clicked 확인 inside anything whose text
     // contained the phrase, which on a seat map is most of the document once an
     // alert has appeared. The size guard is why that stopped.
-    const { seatTakenDialogVisible } = sandbox.window.PureClick.race;
+    const { seatTakenDialogVisible } = sandbox.window.NOLSniper.race;
     const confirmButton = { textContent: "확인" };
     const dialog = (text, { width = 300, height = 120, buttons = [confirmButton] } = {}) => ({
       innerText: text,
@@ -2731,7 +2731,7 @@ const tests = {
     // genuinely come back — but re-offering it immediately just races the same
     // person again for a seat they are actively holding.
     const { markSeatTaken, seatInCooldown, sweepTakenCooldowns, state, TAKEN_COOLDOWN_MS } =
-      sandbox.window.PureClick.race;
+      sandbox.window.NOLSniper.race;
     state.takenUntil.clear();
 
     markSeatTaken("seat-1");
@@ -2755,7 +2755,7 @@ const tests = {
   "an unrecognised modal is recorded instead of silently blocking": () => {
     // Both of this session's blocking bugs were invisible from outside the
     // browser. An unmatched modal stops the map just as hard as a known one.
-    const { unknownBlockingDialogText } = sandbox.window.PureClick.race;
+    const { unknownBlockingDialogText } = sandbox.window.NOLSniper.race;
     const dialog = (text) => ({
       innerText: text,
       getBoundingClientRect: () => ({ width: 300, height: 120 }),
@@ -2782,7 +2782,7 @@ const tests = {
     // x 33..203. Dropping all three erased two groups the venue displays and
     // reported 1913 seats for a 1935-seat room; keeping all three stretched the
     // frame around empty space. Only the one outside the room goes.
-    const pick = sandbox.window.PureClick.seatingBlocks;
+    const pick = sandbox.window.NOLSniper.seatingBlocks;
     assert.equal(typeof pick, "function", "seatingBlocks must be exported");
 
     const seat = (x, y, exposable) => ({ posLeft: x, posTop: y, isExposable: exposable });
@@ -2802,7 +2802,7 @@ const tests = {
   "a sold-out round still draws its venue": () => {
     // With nothing takeable anywhere there is no room to measure against, and
     // erasing the map would leave nothing to drag over.
-    const pick = sandbox.window.PureClick.seatingBlocks;
+    const pick = sandbox.window.NOLSniper.seatingBlocks;
     const blocks = [
       { blockKey: "a", seats: [{ posLeft: 10, posTop: 10, isExposable: false }] },
       { blockKey: "b", seats: [{ posLeft: 20, posTop: 10, isExposable: false }] },
@@ -2817,7 +2817,7 @@ const tests = {
     // an empty catalog, had show A's sketch injected into it, and the enrich
     // step then saw a non-empty sketch and skipped fetching B entirely. The
     // picker drew A's venue while claiming to be B.
-    const cache = sandbox.window.PureClick.sketchCache;
+    const cache = sandbox.window.NOLSniper.sketchCache;
     assert.ok(cache, "sketch cache must be exported");
 
     const asShow = (code) => {
@@ -2852,7 +2852,7 @@ const tests = {
     // that straddles no multiple of it vanishes. 60000 + 5 seats gives a
     // stride of 11, and the 5-seat block occupies indices 60000..60004 —
     // none divisible by 11. Grid sampling keeps it because it samples space.
-    const down = sandbox.window.PureClick.downsampleSketch;
+    const down = sandbox.window.NOLSniper.downsampleSketch;
     assert.equal(typeof down, "function", "downsampleSketch must be exported");
 
     const points = [];
@@ -2893,7 +2893,7 @@ const tests = {
   // ~50 requests a second against an already-locked account, each able to push
   // the lockout further past the open.
   async "a gateway block ends the queue attempt instead of extending it"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const before = race.state.blockedUntil;
     try {
       race.noteGatewayBlock(race.BLOCK_FALLBACK_MS, "/v1/goods/x/waiting");
@@ -2929,14 +2929,14 @@ const tests = {
   // button and input was judged against a 40x20 minimum meant for alert boxes,
   // with the opacity test silently gone.
   "there is only one isVisible"() {
-    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     const declarations = source.match(/function isVisible\s*\(/g) || [];
     assert.equal(declarations.length, 1,
                  "a second declaration of this name silently replaces the first for the whole file");
   },
 
   "the element test and the dialog test do different jobs"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const node = (w, h, opacity = "1") => ({
       getBoundingClientRect: () => ({ left: 0, top: 0, width: w, height: h }),
       __style: { opacity, visibility: "visible", display: "block" },
@@ -2967,7 +2967,7 @@ const tests = {
   // the overlay-dismissing path knew what a captcha was, and waitForCaptchaClear
   // ran that path every 400ms for up to two minutes while the user typed.
   "the captcha box is never dismissed for the user"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const originalQsa = sandbox.document.querySelectorAll;
     let pressed = 0;
     try {
@@ -2993,7 +2993,7 @@ const tests = {
   // An ordinary unknown modal must still be cleared — the guard has to be about
   // captchas, not about giving up on blocking dialogs.
   "an ordinary blocking modal is still dismissed"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const originalQsa = sandbox.document.querySelectorAll;
     let pressed = 0;
     try {
@@ -3018,7 +3018,7 @@ const tests = {
   // The wait must not run the dismisser on every pass, whatever the dismisser
   // does — leaving the user alone while they type is the whole job.
   "the captcha wait does not run the dismisser on every pass"() {
-    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     const fn = source.slice(source.indexOf("async function waitForCaptchaClear("));
     const body = fn.slice(0, fn.indexOf("function clickFirstMatching"));
     const loop = body.slice(body.indexOf("while (Date.now() < deadline)"));
@@ -3038,7 +3038,7 @@ const tests = {
   // GATEWAY_ABUSE_BLOCKED with a ~165s lockout, at the moment it cannot be
   // recovered from.
   async "re-entry does not fire before the open"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const restore = armFixture({ targetOffsetSeconds: +600 });
     try {
       race.resetReentryState();
@@ -3052,7 +3052,7 @@ const tests = {
   },
 
   async "only one re-entry is ever in flight"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const restore = armFixture({ targetOffsetSeconds: -600 });
     try {
       race.resetReentryState();
@@ -3075,7 +3075,7 @@ const tests = {
   },
 
   async "re-entry keeps a floor on the gap between attempts"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const restore = armFixture({ targetOffsetSeconds: -600 });
     try {
       race.resetReentryState();
@@ -3091,7 +3091,7 @@ const tests = {
   },
 
   async "re-entry stops at its limit"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const restore = armFixture({ targetOffsetSeconds: -600 });
     try {
       race.resetReentryState();
@@ -3105,7 +3105,7 @@ const tests = {
   },
 
   async "an arm already in progress blocks re-entry"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const restore = armFixture({ targetOffsetSeconds: -600 });
     const was = race.armState.running;
     try {
@@ -3121,7 +3121,7 @@ const tests = {
   },
 
   "a seat we are already holding is never offered again"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const state = race.state;
     const blocks = [{
       blockKey: "001:001",
@@ -3160,7 +3160,7 @@ const tests = {
   // here is destructive rather than slow: `held > quantity` hands back seats we
   // are holding. So the scoped node is verified, never simply trusted.
   "the scoped seat count agrees with the full read, modal and all"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const originalQsa = sandbox.document.querySelectorAll;
     const originalText = sandbox.document.body.innerText;
     try {
@@ -3182,7 +3182,7 @@ const tests = {
   },
 
   "the scoped read tracks the tightest box that carries the number"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const originalQsa = sandbox.document.querySelectorAll;
     const originalText = sandbox.document.body.innerText;
     try {
@@ -3211,7 +3211,7 @@ const tests = {
   },
 
   "a scoped box that stops tracking is caught and abandoned"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const originalQsa = sandbox.document.querySelectorAll;
     const originalText = sandbox.document.body.innerText;
     try {
@@ -3239,7 +3239,7 @@ const tests = {
   },
 
   "the rendered-map collector also refuses a seat we hold"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const state = race.state;
     const circle = (id) => ({
       getAttribute: (name) => (name === "r" ? "4" : ""),
@@ -3275,7 +3275,7 @@ const tests = {
   },
 
   "the freed path skips held seats but still catches an abandoned one"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const state = race.state;
     const seats = [
       { seatInfoId: "held", seatGrade: "1", seatGradeName: "R석", rowNo: "A", seatNo: "1",
@@ -3333,7 +3333,7 @@ const tests = {
   // It was never consulted inside the wait, so the one modal it exists for was
   // the one that paid the full ~1.5s timeout on every attempt.
   async "a modal that answers ends the wait with no matching phrase"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const originalQsa = sandbox.document.querySelectorAll;
     const originalText = sandbox.document.body.innerText;
     try {
@@ -3366,7 +3366,7 @@ const tests = {
   // nothing to do with this seat, and none of them may be allowed to discard a
   // selection the page actually registered.
   async "a registered selection is never masked by an overlay"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const originalQsa = sandbox.document.querySelectorAll;
     const originalText = sandbox.document.body.innerText;
     try {
@@ -3389,7 +3389,7 @@ const tests = {
   },
 
   "a decline that is not a lost race still leaves the pool"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const state = race.state;
     const takenBefore = new Map(state.takenUntil);
     // The sandbox is shared, so these counters carry earlier tests' values.
@@ -3419,7 +3419,7 @@ const tests = {
   // every seat that ever declined leaves the pool for good and the watch runs
   // out of candidates without saying why.
   "a parked seat comes back when its cooldown runs out"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const state = race.state;
     const takenBefore = new Map(state.takenUntil);
     try {
@@ -3446,7 +3446,7 @@ const tests = {
   },
 
   "the two kinds of cooldown do not weaken each other"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const state = race.state;
     const takenBefore = new Map(state.takenUntil);
     try {
@@ -3483,7 +3483,7 @@ const tests = {
   // that survives the tick — is written there at all: the local filter beside
   // it is discarded before anything reads it.
   "the decline branch parks the seat, not just the local array"() {
-    const source = readFileSync(resolve(here, "../browser/pureclick_autopilot.js"), "utf8");
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     const loop = source.slice(source.indexOf("async function runSeatAutopilot("));
     const branch = loop.slice(loop.indexOf("if (blocked.length) {", loop.indexOf('reason === "taken"') + 1));
     const body = branch.slice(0, branch.indexOf("await sleep(config.retry_ms)"));
@@ -3494,7 +3494,7 @@ const tests = {
   },
 
   "the live-pool signature moves when its members do"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const pool = (ids) => ids.map((id) => ({ seatInfoId: id }));
     // The brake resets only when this string changes. Length with the two end
     // ids could not see a swap in the middle, so a pool that was genuinely
@@ -3514,7 +3514,7 @@ const tests = {
   // recorded across ticks left catchLiveTries pinned at the cap and the
   // signature unchanged, so the live path never came back.
   "declines shrink the pool, which is what releases the brake"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     const state = race.state;
     const blocks = [{
       blockKey: "001:001",
@@ -3542,7 +3542,7 @@ const tests = {
   },
 
   "the click-confirm ceiling survives the faster first look"() {
-    const { race } = sandbox.window.PureClick;
+    const { race } = sandbox.window.NOLSniper;
     assert.equal(race.settleDelayFor(0), 16, "React settles in about a frame; look then");
     assert.ok(race.settleDelayFor(race.SEAT_MAP_SETTLE_TRIES - 1) > 16,
               "and widen afterwards rather than polling hard for a second and a half");
@@ -3553,7 +3553,7 @@ const tests = {
 
   "a small venue passes through the sampler untouched": () => {
     const points = [{ k: "a", x: 1, y: 1 }, { k: "a", x: 2, y: 2 }];
-    assert.equal(sandbox.window.PureClick.downsampleSketch(points), points, "under the cap, do not copy or thin");
+    assert.equal(sandbox.window.NOLSniper.downsampleSketch(points), points, "under the cap, do not copy or thin");
   },
 };
 

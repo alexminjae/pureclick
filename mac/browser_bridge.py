@@ -145,8 +145,8 @@ class BrowserBridge:
         # to survive a restart there. host_script keeps pointing at mac_dir —
         # it is only read in the non-frozen spawn branch below.
         data_dir = app_platform.user_data_dir() if getattr(sys, "frozen", False) else mac_dir
-        self.state_path = data_dir / ".pureclick_browser_state.json"
-        self.health_path = data_dir / ".pureclick_bridge_health.json"
+        self.state_path = data_dir / ".nolsniper_browser_state.json"
+        self.health_path = data_dir / ".nolsniper_bridge_health.json"
         self.host_script = mac_dir / "browser_host.py"
         self.process: subprocess.Popen[str] | None = None
 

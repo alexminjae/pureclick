@@ -23,12 +23,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.clock import KST, PureClickError  # noqa: E402
+from core.clock import KST, NolSniperError  # noqa: E402
 
-_SRC = (ROOT / "mac" / "pureclick.py").read_text(encoding="utf-8")
+_SRC = (ROOT / "mac" / "nolsniper.py").read_text(encoding="utf-8")
 _CLS = next(
     n for n in ast.parse(_SRC).body
-    if isinstance(n, ast.ClassDef) and n.name == "PureClickMacApp"
+    if isinstance(n, ast.ClassDef) and n.name == "NolSniperApp"
 )
 
 
@@ -38,7 +38,7 @@ def _methods(*names):
     module = ast.Module(body=body, type_ignores=[])
     ast.fix_missing_locations(module)
     ns: dict = {"datetime": datetime, "timedelta": timedelta, "KST": KST,
-                "PureClickError": PureClickError}
+                "NolSniperError": NolSniperError}
     exec(compile(module, "<panel>", "exec"), ns)  # noqa: S102 - our own source
     return ns
 

@@ -20,7 +20,7 @@ if str(MAC_DIR) not in sys.path:
 
 from browser_bridge import BrowserBridge  # noqa: E402
 from core.arm import ArmPayload  # noqa: E402
-from core.clock import KST, PureClickError, ServerClock, parse_target_time  # noqa: E402
+from core.clock import KST, NolSniperError, ServerClock, parse_target_time  # noqa: E402
 import app_platform  # noqa: E402
 import app_update  # noqa: E402
 from core.seat import (  # noqa: E402
@@ -102,7 +102,7 @@ else:
 DANGER = "#ef4444"
 
 
-class PureClickMacApp(tk.Tk):
+class NolSniperApp(tk.Tk):
     # Aiming strategies, in the order they appear in the picker.
     # All three go for the stage first; the label's tail says which side of the
     # house to look at when several seats are equally close.
@@ -701,7 +701,7 @@ class PureClickMacApp(tk.Tk):
         clear_arm: bool = False,
     ) -> None:
         preferences = self._seat_preferences()
-        config_path = DATA_DIR / "pureclick_seat_config.json"
+        config_path = DATA_DIR / "nolsniper_seat_config.json"
         config_path.write_text(serialize_preferences(preferences), encoding="utf-8")
         self.browser.push(
             seat=preferences.to_mapping(),
@@ -711,7 +711,7 @@ class PureClickMacApp(tk.Tk):
         )
 
     def _load_seat_config(self) -> None:
-        path = DATA_DIR / "pureclick_seat_config.json"
+        path = DATA_DIR / "nolsniper_seat_config.json"
         if not path.exists():
             return
         try:
@@ -1570,7 +1570,7 @@ class PureClickMacApp(tk.Tk):
         """
         try:
             when = datetime.strptime(self._test_time_text(), "%Y-%m-%d %H:%M:%S")
-        except (ValueError, PureClickError):
+        except (ValueError, NolSniperError):
             when = datetime.now(KST).replace(tzinfo=None)
         self._set_test_time(when + timedelta(minutes=1))
 
@@ -1643,11 +1643,11 @@ class PureClickMacApp(tk.Tk):
                            (self.test_second, "초")):
             raw = var.get().strip()
             if not raw.isdigit():
-                raise PureClickError(f"{label}는 숫자여야 합니다")
+                raise NolSniperError(f"{label}는 숫자여야 합니다")
             parts.append(int(raw))
         hour, minute, second = parts
         if hour > 23 or minute > 59 or second > 59:
-            raise PureClickError("시각이 올바르지 않습니다")
+            raise NolSniperError("시각이 올바르지 않습니다")
         return f"{date_text} {hour:02d}:{minute:02d}:{second:02d}"
 
     def _start_worker(self, target) -> bool:
@@ -1904,7 +1904,7 @@ class PureClickMacApp(tk.Tk):
         """A press the 예매 창 has shown no sign of receiving.
 
         `browser_host.apply_state` runs every command as
-        `window.PureClick && PureClick.runCatch()` and then drops it from the
+        `window.NOLSniper && NOLSniper.runCatch()` and then drops it from the
         state file whether or not there was anything there to run it. So a
         press against a page the autopilot has not been injected into is
         swallowed in silence — the button depresses, the panel says what it
@@ -2146,7 +2146,7 @@ class PureClickMacApp(tk.Tk):
             if context and context.get("goods_code"):
                 raw = str(context["goods_code"])
         if not raw:
-            raise PureClickError("상품코드가 없습니다. 공연 페이지를 열고 정보를 가져오세요")
+            raise NolSniperError("상품코드가 없습니다. 공연 페이지를 열고 정보를 가져오세요")
         try:
             return parse_goods_code(raw)
         except Exception:
@@ -2157,7 +2157,7 @@ class PureClickMacApp(tk.Tk):
         play_seq = self.play_seq.get().strip() or "001"
         goods_code = self._resolved_goods()
         if not play_date.isdigit() or len(play_date) != 8:
-            raise PureClickError("공연일은 YYYYMMDD 형식이어야 합니다")
+            raise NolSniperError("공연일은 YYYYMMDD 형식이어야 합니다")
         return ArmPayload(
             enabled=True,
             goods_code=goods_code,
@@ -2193,7 +2193,7 @@ class PureClickMacApp(tk.Tk):
             )
             deadline_perf = self.clock.deadline_for_server_time(target_unix)
             if deadline_perf < time.perf_counter() - 0.100:
-                raise PureClickError("이미 지난 시각입니다")
+                raise NolSniperError("이미 지난 시각입니다")
             payload = self._arm_payload(
                 target_unix=target_unix,
                 offset_seconds=result.offset_seconds,
@@ -2223,20 +2223,20 @@ class PureClickMacApp(tk.Tk):
         date_text = self.target_date.get().strip()
         time_text = self.target_time.get().strip()
         if not date_text or not time_text:
-            raise PureClickError("티켓 오픈 날짜와 시각을 입력하세요 (예: 2026-09-05 20:00:00)")
+            raise NolSniperError("티켓 오픈 날짜와 시각을 입력하세요 (예: 2026-09-05 20:00:00)")
         try:
             datetime.strptime(date_text, "%Y-%m-%d")
         except ValueError:
-            raise PureClickError(f"날짜 형식이 올바르지 않습니다: {date_text} (예: 2026-09-05)") from None
+            raise NolSniperError(f"날짜 형식이 올바르지 않습니다: {date_text} (예: 2026-09-05)") from None
         if len(time_text.split(":")) == 2:
             time_text += ":00"
         parts = time_text.split(":")
         if len(parts) != 3:
-            raise PureClickError(f"시각 형식이 올바르지 않습니다: {time_text} (예: 20:00:00)")
+            raise NolSniperError(f"시각 형식이 올바르지 않습니다: {time_text} (예: 20:00:00)")
         hour, minute, second = parts
         for part, label in ((hour, "시"), (minute, "분"), (second, "초")):
             if not part.isdigit():
-                raise PureClickError(f"{label}는 숫자여야 합니다")
+                raise NolSniperError(f"{label}는 숫자여야 합니다")
         return f"{date_text} {int(hour):02d}:{int(minute):02d}:{int(second):02d}.000"
 
     def _start_browser(self) -> None:
@@ -2339,4 +2339,4 @@ class PureClickMacApp(tk.Tk):
 
 
 if __name__ == "__main__":
-    PureClickMacApp().mainloop()
+    NolSniperApp().mainloop()

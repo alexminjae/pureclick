@@ -192,7 +192,7 @@ class NothingBelowATrustedBridge(unittest.TestCase):
 
 
 class AnUnansweredPress(unittest.TestCase):
-    """`apply_state` fires every command as `window.PureClick && …` and drops it
+    """`apply_state` fires every command as `window.NOLSniper && …` and drops it
     either way, so a press against a page with no autopilot on it vanished."""
 
     def test_a_press_the_page_never_answered_is_reported(self) -> None:

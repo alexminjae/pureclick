@@ -1,6 +1,6 @@
 # Interpark / NOL ticketing flow (full sweep)
 
-Live UI, the onestop JS bundles, NOL/gates research, and the PureClick autopilot.
+Live UI, the onestop JS bundles, NOL/gates research, and the NOL Sniper autopilot.
 
 The bundle quotes below were mined from a capture that is no longer in the repo:
 those chunk URLs 404, and every endpoint they named that we had not already
@@ -86,9 +86,9 @@ Target dot sizes: `z = [0, 4, 12, 24, 48]` px.
 3. **선택 완료** → `POST /seats/select`
 4. `/onestop/seat?step=price` → payment
 
-### PureClick vs official UI
+### NOL Sniper vs official UI
 
-| Official | PureClick today |
+| Official | NOL Sniper today |
 |---|---|
 | Zoom → lazy `currentBlocks` → per-block meta | Fetches all blocks via API (UI bypass) |
 | Waits for zoom ≥ `seatVisibleLevelScale` | Looks for DOM circles; empty if not zoomed |
@@ -137,13 +137,13 @@ GraphQL (`POST /onestop/gql`):
 
 Headers: `X-Onestop-Session`, `X-Onestop-Channel`.
 
-## PureClick Mac architecture
+## NOL Sniper Mac architecture
 
 ```
-mac/pureclick.py
-  ↔ .pureclick_browser_state.json
+mac/nolsniper.py
+  ↔ .nolsniper_browser_state.json
 mac/browser_host.py (pywebview) + captcha_ocr
-  → injects browser/pureclick_autopilot.js
+  → injects browser/nolsniper_autopilot.js
   → ticketfront + /onestop/api + /onestop/gql
 ```
 
@@ -153,7 +153,7 @@ Commands: `run_entry`, `run_seats`, `run_catch`, `probe_seats`, `sync_grades`.
 
 Public post claims: timed entry, zone + instant preemption, grade sync / catch, captcha/puzzle auto, multi-OS, old popup + “whac-a-mole” + Yanolja. It does **not** document `/onestop/seat` UI or APIs. Treat it as a feature checklist, not a technical source.
 
-## PureClick coverage after full sweep
+## NOL Sniper coverage after full sweep
 
 | Step | Status |
 |------|--------|

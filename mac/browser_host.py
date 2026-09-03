@@ -38,7 +38,7 @@ PLATFORM_STATE: dict[str, Any] = {
 # quietly point somewhere that gets erased.
 _DATA_DIR = app_platform.user_data_dir() if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 
-STATE_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else _DATA_DIR / ".pureclick_browser_state.json"
+STATE_PATH = Path(sys.argv[1]) if len(sys.argv) > 1 else _DATA_DIR / ".nolsniper_browser_state.json"
 
 
 def _bundled_script_path() -> Path:
@@ -49,15 +49,15 @@ def _bundled_script_path() -> Path:
     """
     base = getattr(sys, "_MEIPASS", None)
     if base:
-        return Path(base) / "browser" / "pureclick_autopilot.js"
-    return ROOT_DIR / "browser" / "pureclick_autopilot.js"
+        return Path(base) / "browser" / "nolsniper_autopilot.js"
+    return ROOT_DIR / "browser" / "nolsniper_autopilot.js"
 
 
 SCRIPT_PATH = _bundled_script_path()
 # Not argv-threaded like STATE_PATH: both processes are the same exe re-invoked
 # with a flag, sys.frozen and sys.platform agree between them, so computing
 # this independently on each side lands on the identical path.
-COOKIE_PATH = _DATA_DIR / ".pureclick_cookies.json"
+COOKIE_PATH = _DATA_DIR / ".nolsniper_cookies.json"
 START_URL = "https://nol.yanolja.com/ticket"
 
 
@@ -75,16 +75,16 @@ WINDOW_GEOMETRY = _window_geometry()
 COOKIE_SAVE_EVERY = 25
 
 _COMMAND_JS = {
-    "run_entry": "window.PureClick && PureClick.runEntry()",
-    "run_seats": "window.PureClick && PureClick.runSeats()",
-    "run_catch": "window.PureClick && PureClick.runCatch()",
-    "probe_seats": "window.PureClick && PureClick.probeSeats()",
-    "sync_grades": "window.PureClick && PureClick.syncGrades()",
-    "fetch_show": "window.PureClick && PureClick.fetchShowCatalog()",
-    "stop_all": "window.PureClick && PureClick.stopAll()",
+    "run_entry": "window.NOLSniper && NOLSniper.runEntry()",
+    "run_seats": "window.NOLSniper && NOLSniper.runSeats()",
+    "run_catch": "window.NOLSniper && NOLSniper.runCatch()",
+    "probe_seats": "window.NOLSniper && NOLSniper.probeSeats()",
+    "sync_grades": "window.NOLSniper && NOLSniper.syncGrades()",
+    "fetch_show": "window.NOLSniper && NOLSniper.fetchShowCatalog()",
+    "stop_all": "window.NOLSniper && NOLSniper.stopAll()",
     # One instrumented click, then stop. Reports into the persistent trace.
-    "diagnose": "window.PureClick && PureClick.diagnose()",
-    "clear_trace": "window.PureClick && PureClick.clearTrace()",
+    "diagnose": "window.NOLSniper && NOLSniper.diagnose()",
+    "clear_trace": "window.NOLSniper && NOLSniper.clearTrace()",
 }
 
 
@@ -96,7 +96,7 @@ def autopilot_cache_path() -> Path:
     included — unlike STATE_PATH/COOKIE_PATH this was never repo-relative, so
     there is no dev-mode behaviour to preserve by keeping it local.
     """
-    return app_platform.user_data_dir() / "pureclick_autopilot.js"
+    return app_platform.user_data_dir() / "nolsniper_autopilot.js"
 
 
 def load_script() -> str:
@@ -150,7 +150,7 @@ def install_document_start_script(window: webview.Window) -> bool:
     except Exception as exc:  # noqa: BLE001 - fall back to on-load injection
         PLATFORM_STATE["document_start"] = "failed"
         PLATFORM_STATE["document_start_error"] = str(exc)[:160]
-        print(f"[pureclick] document-start injection unavailable: {exc}", file=sys.stderr)
+        print(f"[nolsniper] document-start injection unavailable: {exc}", file=sys.stderr)
         return False
 
 
@@ -247,11 +247,11 @@ def apply_state(window: webview.Window) -> None:
 
     scripts: list[str] = []
     if "arm" not in state:
-        scripts.append(_storage_js("localStorage.removeItem('pureclick_arm_v1');"))
+        scripts.append(_storage_js("localStorage.removeItem('nolsniper_arm_v1');"))
     elif state.get("arm") is not None:
-        scripts.append(_storage_set_js("pureclick_arm_v1", state["arm"]))
+        scripts.append(_storage_set_js("nolsniper_arm_v1", state["arm"]))
     if state.get("seat") is not None:
-        scripts.append(_storage_set_js("pureclick_seat_v1", state["seat"]))
+        scripts.append(_storage_set_js("nolsniper_seat_v1", state["seat"]))
     if state.get("reload_autopilot"):
         # Refresh the WKUserScript snapshot first — otherwise the next seat-map
         # navigation re-injects the launch-time (often pre-fix) autopilot and
@@ -263,13 +263,13 @@ def apply_state(window: webview.Window) -> None:
     # data, not as a command: it must not reload the autopilot or restart a run.
     trigger = state.get("watch_trigger")
     if isinstance(trigger, dict):
-        scripts.append(f"window.PureClick?.setWatchTrigger?.({json.dumps(trigger)});")
+        scripts.append(f"window.NOLSniper?.setWatchTrigger?.({json.dumps(trigger)});")
 
     # Config that lands after the script has booted is invisible until something
     # re-decides the route. This asks it to, and the page ignores the request
     # when it is mid-run or already holding a seat.
     if state.get("arm") is not None or state.get("seat") is not None:
-        scripts.append("window.PureClick?.configApplied?.();")
+        scripts.append("window.NOLSniper?.configApplied?.();")
 
     command = state.get("command")
     if command and command in _COMMAND_JS:
@@ -339,17 +339,17 @@ def watch_state(window: webview.Window, stop_event: threading.Event) -> None:
 # actually delivers the panel's commands.
 _SNAPSHOT_JS = """
 (function () {
-  if (!window.PureClick) return null;
+  if (!window.NOLSniper) return null;
   return {
-    context: PureClick.readShowContext(),
-    catalog: PureClick.readShowCatalog(),
-    status: PureClick.status(),
+    context: NOLSniper.readShowContext(),
+    catalog: NOLSniper.readShowCatalog(),
+    status: NOLSniper.status(),
   };
 })()
 """
 
 
-HEALTH_PATH = STATE_PATH.with_name(".pureclick_bridge_health.json")
+HEALTH_PATH = STATE_PATH.with_name(".nolsniper_bridge_health.json")
 
 
 def write_bridge_health(health: dict[str, Any]) -> None:
@@ -499,9 +499,9 @@ def main() -> None:
             jar = browser_session.load_jar(COOKIE_PATH)
             if jar:
                 restored = browser_session.restore(window, jar)
-                print(f"[pureclick] restored {restored} cookies", file=sys.stderr)
+                print(f"[nolsniper] restored {restored} cookies", file=sys.stderr)
         except Exception as exc:  # noqa: BLE001 - a lost session beats a blank window
-            print(f"[pureclick] cookie restore skipped: {exc}", file=sys.stderr)
+            print(f"[nolsniper] cookie restore skipped: {exc}", file=sys.stderr)
         finally:
             window.load_url(START_URL)
 

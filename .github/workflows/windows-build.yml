@@ -1,6 +1,6 @@
 name: Windows build
 
-# Produces the single PureClick.exe to hand to a Windows machine, plus the
+# Produces the single NOLSniper.exe to hand to a Windows machine, plus the
 # manifest the running app checks for updates. Both are attached to a Release on
 # a tag, so the download link is stable.
 on:
@@ -50,29 +50,29 @@ jobs:
         run: python tools/make_ico.py
 
       - name: Build
-        run: pyinstaller pureclick.spec --noconfirm
+        run: pyinstaller nolsniper.spec --noconfirm
 
       - name: Write the update manifest
         shell: pwsh
         run: |
           $version = Get-Content VERSION -Raw
-          $sha = (Get-FileHash -Algorithm SHA256 browser/pureclick_autopilot.js).Hash.ToLower()
+          $sha = (Get-FileHash -Algorithm SHA256 browser/nolsniper_autopilot.js).Hash.ToLower()
           $base = "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
           @{
             app_version      = $version
             releases_url     = "https://github.com/$env:GITHUB_REPOSITORY/releases"
             autopilot_sha256 = $sha
-            autopilot_url    = "$base/pureclick_autopilot.js"
+            autopilot_url    = "$base/nolsniper_autopilot.js"
           } | ConvertTo-Json | Set-Content -Encoding utf8 dist/manifest.json
-          Copy-Item browser/pureclick_autopilot.js dist/pureclick_autopilot.js
+          Copy-Item browser/nolsniper_autopilot.js dist/nolsniper_autopilot.js
 
       - uses: actions/upload-artifact@v4
         with:
-          name: PureClick-windows
+          name: NOLSniper-windows
           path: |
-            dist/PureClick.exe
+            dist/NOLSniper.exe
             dist/manifest.json
-            dist/pureclick_autopilot.js
+            dist/nolsniper_autopilot.js
 
       # On a tag these become the stable download links the app checks against.
       - name: Release
@@ -80,6 +80,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/PureClick.exe
+            dist/NOLSniper.exe
             dist/manifest.json
-            dist/pureclick_autopilot.js
+            dist/nolsniper_autopilot.js
