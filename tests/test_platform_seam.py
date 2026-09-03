@@ -325,17 +325,17 @@ class SameThreadCallTests(unittest.TestCase):
 
 
 class DebugModeTests(unittest.TestCase):
-    """Every diagnostic added so far only sees the Python side. A page that
-    draws nothing, with nothing crashing or hanging on the Python side, is
-    exactly the case where the real answer is in the browser's own console or
-    network tab — invisible without this.
+    """DevTools is reachable, but opt-in. On Windows debug=True pops its own
+    second window unbidden — which to the user just looked like another bug —
+    and the Desktop 진단.txt now carries the page state it was there to expose.
     """
 
-    def test_webview_start_runs_with_debug_enabled(self) -> None:
+    def test_devtools_is_opt_in_via_env(self) -> None:
         source = (ROOT / "mac" / "browser_host.py").read_text(encoding="utf-8")
-        self.assertIn("webview.start(debug=True)", source,
-                     "DevTools must actually be reachable (F12 / right-click → 검사), "
-                     "not just theoretically available")
+        self.assertIn("NOLSNIPER_DEVTOOLS", source,
+                      "DevTools must be reachable when asked for (NOLSNIPER_DEVTOOLS=1)")
+        self.assertNotIn("webview.start(debug=True)", source,
+                         "debug must not be forced on — it spawns a second window on Windows")
 
 
 class DisableGpuRenderingTests(unittest.TestCase):
@@ -883,32 +883,50 @@ class BrowserHostStartupTests(unittest.TestCase):
     before it navigates — the window then sits on about:blank forever.
     """
 
-    def _main_and_on_shown(self) -> tuple[ast.FunctionDef, ast.FunctionDef]:
+    def _startup_fn(self) -> ast.FunctionDef:
         tree = ast.parse((ROOT / "mac" / "browser_host.py").read_text(encoding="utf-8"))
-        main = next(n for n in ast.walk(tree)
-                    if isinstance(n, ast.FunctionDef) and n.name == "main")
-        on_shown = next(n for n in ast.walk(main)
-                        if isinstance(n, ast.FunctionDef) and n.name == "on_shown")
-        return main, on_shown
+        return next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef) and n.name == "_run_startup")
 
     def test_the_page_still_loads_when_cookie_restore_fails(self) -> None:
-        _main, on_shown = self._main_and_on_shown()
+        """load_url(START_URL) must not sit inside the try that restores cookies
+        — a restore that raises (or hangs and is abandoned) would then leave the
+        window on about:blank, which is one shape of the blank 예매 창.
+        """
+        startup = self._startup_fn()
 
         def _calls(node: ast.AST, dotted: str) -> bool:
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.Call):
-                    if ast.unparse(sub.func).endswith(dotted):
-                        return True
-            return False
+            return any(
+                isinstance(sub, ast.Call) and ast.unparse(sub.func).endswith(dotted)
+                for sub in ast.walk(node)
+            )
 
-        tries = [n for n in ast.walk(on_shown) if isinstance(n, ast.Try)]
-        self.assertTrue(
-            any(_calls(t, "browser_session.restore") and
-                any(_calls(stmt, "load_url") for stmt in t.finalbody)
-                for t in tries),
-            "on_shown must call load_url(START_URL) from a finally: so a failing "
-            "cookie restore cannot leave the window on about:blank",
-        )
+        restore_tries = [
+            t for t in ast.walk(startup)
+            if isinstance(t, ast.Try) and _calls(t, "browser_session.restore")
+        ]
+        self.assertTrue(restore_tries, "_run_startup should attempt browser_session.restore")
+        for t in restore_tries:
+            self.assertFalse(
+                _calls(ast.Module(body=t.body, type_ignores=[]), "load_url"),
+                "load_url must be outside the cookie-restore try block",
+            )
+        self.assertTrue(_calls(startup, "load_url"), "_run_startup must call load_url")
+
+    def test_on_shown_hands_startup_to_a_thread(self) -> None:
+        """`shown` fires on WebView2's UI thread; the startup sequence blocks on
+        WebView2 calls and would deadlock it. It must run on a worker thread.
+        """
+        tree = ast.parse((ROOT / "mac" / "browser_host.py").read_text(encoding="utf-8"))
+        on_shown = next(n for n in ast.walk(tree)
+                        if isinstance(n, ast.FunctionDef) and n.name == "on_shown")
+        body = ast.unparse(on_shown)
+        self.assertIn("Thread(", body)
+        self.assertIn("_run_startup", body)
+        for stmt in on_shown.body:
+            if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                self.assertNotEqual(ast.unparse(stmt.value.func), "_run_startup",
+                                    "_run_startup must not be called inline in on_shown")
 
     def test_main_readies_the_platform_before_creating_the_window(self) -> None:
         body = (ROOT / "mac" / "browser_host.py").read_text(encoding="utf-8")
@@ -925,7 +943,6 @@ class BrowserHostStartupTests(unittest.TestCase):
         WebView2 calls and waits on them, which deadlocks that thread on
         Windows. It must be handed to a worker thread, not called inline.
         """
-        _main, _on_shown = self._main_and_on_shown()
         tree = ast.parse((ROOT / "mac" / "browser_host.py").read_text(encoding="utf-8"))
         on_loaded = next(n for n in ast.walk(tree)
                          if isinstance(n, ast.FunctionDef) and n.name == "on_loaded")

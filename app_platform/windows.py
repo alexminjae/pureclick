@@ -161,6 +161,30 @@ def _await_on_ui(browser: Any, start_task: Any, timeout: float = _CALL_TIMEOUT_S
     return box.get("result")
 
 
+def _run_on_ui_thread(browser: Any, fn: Any) -> None:
+    """Run a synchronous, void WebView2 call on the thread that owns the control.
+
+    `_await_on_ui` is for calls that hand back a Task to await. CreateCookie and
+    AddOrUpdateCookie return void and just have to happen on the UI thread —
+    called from a background thread (which is where the startup sequence now
+    runs, so it cannot wedge the UI thread) they otherwise throw or hang. From
+    the UI thread itself this is a direct call; from anywhere else it is a
+    blocking Control.Invoke, which the UI thread's own message loop services.
+    """
+    if _message_loop_running():
+        fn()
+        return
+    _Action, Func, Object, _String, _Task, _TaskScheduler = _clr()
+
+    def _wrapped() -> Any:
+        fn()
+        return None
+
+    # Func[Object], not Action — matches _await_on_ui's idiom and what pywebview
+    # itself hands Invoke, so the same fakes exercise it.
+    browser.webview.Invoke(Func[Object](_wrapped))
+
+
 def prepare_display() -> None:
     """Tell Windows this process scales itself, before any window exists.
 
@@ -358,7 +382,11 @@ class _CookieStore:
         return [cookie_row_from(c) for c in (cookies or [])]
 
     def set_cookie(self, row: dict[str, Any]) -> None:
-        self._manager.AddOrUpdateCookie(cookie_from_row(self._manager, row))
+        manager = self._manager
+        _run_on_ui_thread(
+            self._browser,
+            lambda: manager.AddOrUpdateCookie(cookie_from_row(manager, row)),
+        )
 
 
 def cookie_store(window: Any) -> Any | None:

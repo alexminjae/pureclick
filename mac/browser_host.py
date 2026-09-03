@@ -654,23 +654,27 @@ def main() -> None:
 
     started = threading.Event()
 
-    def on_shown() -> None:
-        if started.is_set():
-            return
-        started.set()
+    def _run_startup(window: webview.Window) -> None:
+        """Register the script, restore the login, then load the page.
+
+        Runs on its own thread, not inside the `shown` handler. pywebview fires
+        `shown` synchronously on WebView2's UI thread, and everything below makes
+        WebView2 calls and waits on them — done from that thread on Windows it
+        deadlocked it, and because it deadlocked *before* the load_url in the old
+        `finally`, the window sat on about:blank, "(응답 없음)", forever (measured
+        at 1566s). Off-thread, each call marshals in against a UI thread that is
+        still pumping, which is the shape they are built for. The document-start
+        script re-registers on every navigation regardless, so a fast redirect
+        beating this thread costs nothing.
+        """
         PLATFORM_STATE["on_shown"] = "started"
         t0 = time.monotonic()
         try:
             install_document_start_script(window)
-        finally:
-            PLATFORM_STATE["doc_start_ms"] = int((time.monotonic() - t0) * 1000)
+        except Exception as exc:  # noqa: BLE001 - the on-load fallback still covers this
+            print(f"[nolsniper] doc-start: {exc}", file=sys.stderr)
+        PLATFORM_STATE["doc_start_ms"] = int((time.monotonic() - t0) * 1000)
         PLATFORM_STATE["on_shown"] = "doc-start done"
-        # Carrying the login forward is worth trying, but it must never decide
-        # whether the page loads at all. On Windows restore goes through a
-        # WebView2 call that raises TimeoutError if its message loop stalls, and
-        # an exception here used to mean load_url(START_URL) below never ran —
-        # the window sat on about:blank forever and rendered as a pure blank
-        # 예매 창, with nothing crashing or hanging on the Python side.
         try:
             jar = browser_session.load_jar(COOKIE_PATH)
             PLATFORM_STATE["cookies_in_jar"] = len(jar)
@@ -688,21 +692,32 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001 - a lost session beats a blank window
             PLATFORM_STATE["cookie_restore"] = f"실패: {type(exc).__name__}: {exc}"[:160]
             print(f"[nolsniper] cookie restore skipped: {exc}", file=sys.stderr)
-        finally:
-            PLATFORM_STATE["on_shown"] = "load_url 호출"
+        PLATFORM_STATE["on_shown"] = "load_url 호출"
+        try:
             window.load_url(START_URL)
             PLATFORM_STATE["on_shown"] = "완료"
+        except Exception as exc:  # noqa: BLE001
+            PLATFORM_STATE["on_shown"] = f"load_url 실패: {exc}"[:160]
+            print(f"[nolsniper] load_url: {exc}", file=sys.stderr)
+
+    def on_shown() -> None:
+        if started.is_set():
+            return
+        started.set()
+        threading.Thread(
+            target=_run_startup, args=(window,), name="browser-startup", daemon=True,
+        ).start()
 
     window.events.shown += on_shown
 
     threading.Thread(target=watch_state, args=(window, stop_event), daemon=True).start()
     threading.Thread(target=poll_context, args=(window, stop_event), daemon=True).start()
-    # debug=True turns on DevTools (right-click → 검사, or F12) inside the 예매
-    # 창 itself. Every diagnostic added so far only sees the Python side — a
-    # page that draws nothing, with nothing crashing or hanging on the Python
-    # side, is exactly the case where the real answer is in the browser's own
-    # console or network tab, which nothing here has ever been able to see.
-    webview.start(debug=True)
+    # DevTools (a second window on Windows) only when asked for with
+    # NOLSNIPER_DEVTOOLS=1. It was on by default while the blank 예매 창 was
+    # being chased, but it pops its own window unbidden — which just looked like
+    # another bug to the user — and the Desktop 진단.txt now carries the page
+    # state it was there to expose.
+    webview.start(debug=bool(os.environ.get("NOLSNIPER_DEVTOOLS")))
 
 
 if __name__ == "__main__":
