@@ -680,7 +680,10 @@ class PersistentDataTests(unittest.TestCase):
             self.assertNotIn("_MEI", str(bridge.health_path))
             # host_script is unaffected — it is only read in the non-frozen
             # spawn branch, and must keep pointing at the real bundle layout.
-            self.assertEqual(bridge.host_script, Path("/tmp/_MEIxxxxxx/mac/browser_host.py"))
+            # Which host it names is the platform's choice (Chrome/CDP on
+            # Windows, WKWebView on macOS), so assert the layout, not the name.
+            self.assertEqual(bridge.host_script.parent, Path("/tmp/_MEIxxxxxx/mac"))
+            self.assertIn(bridge.host_script.name, {"browser_host.py", "chrome_host.py"})
         finally:
             del sys.frozen
 
