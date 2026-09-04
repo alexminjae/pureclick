@@ -121,7 +121,12 @@ jobs:
             '   %LOCALAPPDATA%\\NOLSniper\\crash.log',
             '   %LOCALAPPDATA%\\NOLSniper\\startup.log'
           ) -join "`r`n"
-          Set-Content -Encoding utf8 -NoNewline "$stage/README_윈도우_실행방법.txt" $readme
+          # Not Set-Content: its -Encoding is a FileSystem-provider dynamic
+          # parameter, and pwsh failed to resolve it for this path on the runner
+          # ("A parameter cannot be found that matches parameter name 'Encoding'").
+          # .NET writes UTF-8 without a BOM and needs nothing resolved.
+          $readmePath = Join-Path (Get-Location) $stage 'README_윈도우_실행방법.txt'
+          [IO.File]::WriteAllText($readmePath, $readme, [Text.UTF8Encoding]::new($false))
           Compress-Archive -Path $stage -DestinationPath dist/NOLSniper_Windows.zip -Force
           Get-Item dist/NOLSniper_Windows.zip | Select-Object Name, Length
 
