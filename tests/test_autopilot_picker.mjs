@@ -1435,6 +1435,53 @@ const tests = {
     const centre = picker.venueCenterX([{ blockKey: "b", seats }]);
     assert.equal(centre, 50, `extent midpoint (0..100) is 50, got ${centre}`);
   },
+  // Stage-center default: with no target box, 1F front-centre (Block B) is #1,
+  // beating both a front-row wing seat and a deep-centre seat.
+  "the stage-centre default ranks front-centre Block B first"() {
+    const { race } = sandbox.window.NOLSniper;
+    const seats = [];
+    const add = (block, x, y) => seats.push({
+      seatInfoId: `${block}-${x}-${y}`, seatGrade: "1", seatGradeName: "VIP석",
+      rowNo: `${block} ${y}열`, seatNo: String(x), blockKey: block, seatGroupId: null,
+      posLeft: x, posTop: y,
+    });
+    // A 1F: left wing (A), centre (B), right wing (C); front row y=0.
+    for (let y = 0; y <= 40; y += 4) {
+      for (let x = 10; x <= 30; x += 5) add("A", x, y);   // left wing
+      for (let x = 40; x <= 60; x += 5) add("B", x, y);   // centre block
+      for (let x = 70; x <= 90; x += 5) add("C", x, y);   // right wing
+    }
+    const stage = race.stagePoint([{ blockKey: "b", seats }]);
+    assert.ok(Math.abs(stage.x - 50) <= 1, `stage over the middle, got ${stage.x}`);
+    const best = picker.rankCandidates(seats, [], [], {
+      strategy: "center", centerX: stage.x, stage,
+    })[0];
+    assert.equal(best.blockKey, "B", `#1 must be the centre block, got ${best.blockKey}`);
+    assert.equal(best.posTop, 0, "and the front row");
+    assert.ok(Math.abs(best.posLeft - 50) <= 5, `and dead centre, got x=${best.posLeft}`);
+  },
+  // The virtual seat map's box is a hard filter on the grab, not only 취켓팅:
+  // only seats whose position is inside the drawn rect become candidates.
+  "a target box confines the grab to seats inside it"() {
+    const { race } = sandbox.window.NOLSniper;
+    const seat = (id, x, y) => ({
+      seatInfoId: id, seatGrade: "1", seatGradeName: "VIP석", seatNo: id, rowNo: "1",
+      isExposable: true, posLeft: x, posTop: y, seatStatus: undefined,
+    });
+    const block = {
+      blockKey: "B", seats: [seat("in1", 50, 30), seat("in2", 55, 32), seat("out", 200, 30)],
+      // seatIsFree reads block.mask (1 = free) by seat index.
+      mask: [1, 1, 1],
+    };
+    const inside = race.collectFromBlocks([block], {
+      watch_rect: { left: 40, top: 20, right: 70, bottom: 40 },
+    });
+    const ids = inside.map((s) => s.seatInfoId).sort();
+    assert.deepEqual(ids, ["in1", "in2"], `only in-box seats are candidates, got ${ids}`);
+    // No box → every free seat is a candidate.
+    const all = race.collectFromBlocks([block], {}).map((s) => s.seatInfoId).sort();
+    assert.deepEqual(all, ["in1", "in2", "out"], "with no box the whole block is eligible");
+  },
   "a plain venue still takes front centre"() {
     const { race } = sandbox.window.NOLSniper;
     const seats = [];

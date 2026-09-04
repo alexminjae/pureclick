@@ -670,6 +670,21 @@ class NolSniperApp(tk.Tk):
                        font=(UI_FONT, 12), anchor="w").pack(anchor="w", pady=(12, 0))
         tk.Label(openq, text="보안문자만 직접 입력하면 됩니다.", bg=PANEL, fg=FAINT,
                  font=(UI_FONT, 11), anchor="w").pack(anchor="w", pady=(2, 0))
+        # The virtual seat map, on the entry card too — it targets 지금 진입's
+        # grab, not only 취켓팅. Drawing a box here makes the autopilot strike
+        # inside it the instant the seat map opens; with no box it takes the
+        # seat nearest the stage centre. Reachable before the show opens as long
+        # as the venue has been seen once (its layout is cached).
+        vrow = tk.Frame(openq, bg=PANEL)
+        vrow.pack(fill="x", pady=(12, 0))
+        vrow.columnconfigure(0, weight=1)
+        tk.Label(vrow, textvariable=self.zone_summary, bg=PANEL, fg=FG, anchor="nw", height=2,
+                 wraplength=wrap - 150, justify="left", font=(UI_FONT, 11)).grid(row=0, column=0, sticky="w")
+        ttk.Button(vrow, text="가상 좌석판", style="CardGhost.TButton",
+                   command=self.open_zone_picker).grid(row=0, column=1)
+        tk.Label(openq, text="가상 좌석판에서 목표 구역을 드래그하면 그 안에서만 잡습니다. 비워 두면 무대 중앙 최우선.",
+                 bg=PANEL, fg=FAINT, anchor="nw", height=2, justify="left", wraplength=wrap - 40,
+                 font=(UI_FONT, 11)).pack(fill="x", pady=(2, 0))
 
         # --- 고급 ---------------------------------------------------------------
         # Everything below is a rehearsal or a tuning knob. None of it is needed
@@ -1302,14 +1317,14 @@ class NolSniperApp(tk.Tk):
             return
 
         window = tk.Toplevel(self)
-        window.title("감시 구역")
+        window.title("가상 좌석판 — 목표 구역")
         window.geometry(self._zone_window_size())
         window.configure(bg=BG)
         self._zones = window
 
         ttk.Label(
             window,
-            text="드래그해서 감시할 범위를 정하세요. 그 안에서 나오는 자리는 등급과 무관하게 잡습니다.",
+            text="드래그해서 목표 구역을 정하세요. [지금 진입]의 좌석 잡기와 취켓팅 모두 그 안에서만, 등급과 무관하게 잡습니다. 비워 두면 무대 중앙에 가장 가까운 자리부터.",
             style="Muted.TLabel",
             wraplength=720,
             justify="left",
@@ -1605,16 +1620,71 @@ class NolSniperApp(tk.Tk):
             sketch = catalog.get("sketch")
             if isinstance(sketch, list) and sketch:
                 self._zone_sketch = [row for row in sketch if isinstance(row, dict)]
+                self._cache_sketch(new_code, self._zone_sketch, self._block_rows)
             self._schedule_zone_map()
         elif target_changed:
             self._watch_rect = None
             self._apply_blocks([])
+            # No live blocks yet — the show is not open, or the map is not up.
+            # The virtual seat map still needs a venue to draw, so fall back to
+            # the layout cached the last time this show's seat map was seen.
+            self._load_cached_sketch(new_code)
         else:
             sketch = catalog.get("sketch")
             if isinstance(sketch, list) and sketch:
                 self._zone_sketch = [row for row in sketch if isinstance(row, dict)]
+                self._cache_sketch(new_code, self._zone_sketch, self._block_rows)
                 self._schedule_zone_map()
+            elif not self._zone_sketch:
+                self._load_cached_sketch(new_code)
             self._refresh_zone_picker()
+
+    def _sketch_cache_path(self, goods: str):
+        """Where a venue layout is kept so the virtual map works before open.
+
+        Keyed by goods code, panel-side (not the browser): the seat map is on
+        tickets.interpark.com and its parked sketch lives in that origin's
+        localStorage, unreachable from the nol.yanolja.com product page. Caching
+        here makes the layout available for pre-open targeting from any page.
+        """
+        code = re.sub(r"[^A-Za-z0-9]", "", str(goods or ""))
+        if not code:
+            return None
+        return self.browser.state_path.with_name(f".nolsniper_sketch_{code}.json")
+
+    def _cache_sketch(self, goods: str, sketch: list, blocks: list) -> None:
+        path = self._sketch_cache_path(goods)
+        if path is None or not sketch:
+            return
+        try:
+            payload = {"goods_code": str(goods), "sketch": sketch, "blocks": blocks,
+                       "at": time.time()}
+            if payload != getattr(self, "_sketch_cache_last", None):
+                self._sketch_cache_last = payload
+                path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        except Exception:  # noqa: BLE001 - a cache write must never break the poll
+            pass
+
+    def _load_cached_sketch(self, goods: str) -> bool:
+        """Draw the virtual map from the cached layout when none is live yet."""
+        if self._zone_sketch:
+            return False
+        path = self._sketch_cache_path(goods)
+        if path is None or not path.exists():
+            return False
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - a bad cache is simply no cache
+            return False
+        sketch = [row for row in (data.get("sketch") or []) if isinstance(row, dict)]
+        if not sketch:
+            return False
+        self._zone_sketch = sketch
+        blocks = data.get("blocks") or []
+        if blocks and not self._block_rows:
+            self._block_rows = [row for row in blocks if isinstance(row, dict)]
+        self._schedule_zone_map()
+        return True
 
     def _apply_blocks(self, blocks: list) -> None:
         """Fill the zone list from the show's own blocks."""
@@ -2121,6 +2191,8 @@ class NolSniperApp(tk.Tk):
                 "scroll": scroll,
                 "show": self.show_title.get(),
                 "rounds": len(getattr(self, "rounds", None) or []),
+                "virtual_map_seats": len(getattr(self, "_zone_sketch", None) or []),
+                "target_rect": self._watch_rect,
             }
             if snapshot != getattr(self, "_panel_state_last", None):
                 self._panel_state_last = snapshot

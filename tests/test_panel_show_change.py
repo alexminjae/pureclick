@@ -80,6 +80,12 @@ class FakePanel:
         self.redrew = True
 
     def _refresh_zone_picker(self) -> None: ...
+    def _cache_sketch(self, goods, sketch, blocks) -> None:
+        self.cached = (goods, list(sketch), list(blocks))
+
+    def _load_cached_sketch(self, goods) -> bool:
+        return False
+
     def _apply_blocks(self, blocks: list) -> None:
         self._block_rows = list(blocks)
 
