@@ -21,6 +21,7 @@ mac/nolsniper_seat_config.json
 mac/nolsniper_arm_config.json
 mac/.nolsniper_cookies.json
 mac/.nolsniper_bridge_health.json
+mac/.nolsniper_panel_state.json
 
 # Built by mac/make_app.sh — regenerate, do not commit
 mac/NOLSniper.icns
