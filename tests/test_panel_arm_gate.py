@@ -110,6 +110,7 @@ class _Panel:
         self._browser_goods_code = lambda ctx: (ctx or {}).get("goods_code")
         self._set_enabled = staticmethod(NS["_set_enabled"])
         self._style_button = staticmethod(NS["_style_button"])
+        self._latch_enable = lambda key, want: want  # pass-through in tests
         self._show_guidance = lambda visible: NS["_show_guidance"](self, visible)
         self.update(page, seat, url)
 

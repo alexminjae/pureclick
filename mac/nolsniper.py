@@ -1316,6 +1316,21 @@ class NolSniperApp(tk.Tk):
             self._zones.lift()
             return
 
+        # Fill the map before the window is drawn: on a goods/product page there
+        # is no live seat map, so load the venue layout cached for this show —
+        # and if none was ever cached, fall back to a default block layout so
+        # the user can always drag a target instead of seeing a black screen.
+        if not self._zone_sketch:
+            code = ""
+            try:
+                code = self.goods_code.get().strip() or self._resolved_goods()
+            except Exception:  # noqa: BLE001 - no code yet is fine; default map covers it
+                code = ""
+            if not (code and self._load_cached_sketch(code)):
+                self._zone_sketch = self._default_venue_sketch()
+                if not self._block_rows:
+                    self._apply_blocks(self._default_venue_blocks())
+
         window = tk.Toplevel(self)
         window.title("가상 좌석판 — 목표 구역")
         window.geometry(self._zone_window_size())
@@ -1404,15 +1419,21 @@ class NolSniperApp(tk.Tk):
         height = max(canvas.winfo_height(), 240)
 
         if not self._zone_sketch:
+            # Never a blank screen: fall back to the generic venue so the user
+            # can always drag a target. The real layout replaces it the moment
+            # this show's seat map is seen (or its cache loads).
+            self._zone_sketch = self._default_venue_sketch()
+            if not self._block_rows:
+                self._block_rows = [
+                    {"key": b["key"], "name": b["name"],
+                     "left": b["left"], "top": b["top"], "right": b["right"], "bottom": b["bottom"]}
+                    for b in self._default_venue_blocks()
+                ]
             canvas.create_text(
-                width / 2,
-                height / 2,
-                text="예매 창에서 좌석맵에 들어가면\n여기에 좌석 배치가 그려집니다",
-                fill=MUTED,
-                justify="center",
+                width / 2, height * 0.06,
+                text="기본 배치입니다 — 예매 창에서 좌석맵을 한 번 열면 실제 배치로 채워집니다",
+                fill=MUTED, justify="center",
             )
-            self._zone_view = None
-            return
 
         # Only blocks that are selling this round.
         #
@@ -1638,6 +1659,38 @@ class NolSniperApp(tk.Tk):
             elif not self._zone_sketch:
                 self._load_cached_sketch(new_code)
             self._refresh_zone_picker()
+
+    @staticmethod
+    def _default_venue_blocks() -> list[dict]:
+        """A generic 1F A/B/C + 2F frame, so the picker is never empty.
+
+        Coordinates are in the same venue space the real sketch uses (small
+        arbitrary units); they exist only to give the user something to drag a
+        target over before this show's real layout has been seen.
+        """
+        return [
+            {"key": "A", "name": "1F A블록", "left": 8, "top": 30, "right": 34, "bottom": 78},
+            {"key": "B", "name": "1F B블록(중앙)", "left": 37, "top": 26, "right": 63, "bottom": 82},
+            {"key": "C", "name": "1F C블록", "left": 66, "top": 30, "right": 92, "bottom": 78},
+            {"key": "2F", "name": "2F", "left": 20, "top": 88, "right": 80, "bottom": 104},
+        ]
+
+    @classmethod
+    def _default_venue_sketch(cls) -> list[dict]:
+        """Seat dots filling the default blocks, for project_venue to draw."""
+        sketch: list[dict] = []
+        for block in cls._default_venue_blocks():
+            x0, y0, x1, y1 = block["left"], block["top"], block["right"], block["bottom"]
+            step_x = max(2, (x1 - x0) / 9)
+            step_y = max(2, (y1 - y0) / 7)
+            y = y0
+            while y <= y1:
+                x = x0
+                while x <= x1:
+                    sketch.append({"k": block["key"], "x": round(x, 1), "y": round(y, 1)})
+                    x += step_x
+                y += step_y
+        return sketch
 
     def _sketch_cache_path(self, goods: str):
         """Where a venue layout is kept so the virtual map works before open.
@@ -2608,6 +2661,28 @@ class NolSniperApp(tk.Tk):
             self._set_open_time(str(context["ticket_open"]))
         self._refresh_show_where()
 
+    def _latch_enable(self, key: str, want: bool) -> bool:
+        """Debounce a button's enabled state.
+
+        The show state arrives on a 500ms poll that occasionally drops a frame,
+        and enabling straight off it made [오픈에 자동 진입] flicker. This keeps
+        the current value until the opposite has been asked for on two
+        consecutive polls, so a lone glitch is absorbed.
+        """
+        latch = getattr(self, "_enable_latch", None)
+        if latch is None:
+            latch = self._enable_latch = {}
+        state, streak = latch.get(key, (want, 0))
+        if want == state:
+            latch[key] = (state, 0)
+            return state
+        streak += 1
+        if streak >= 2:
+            latch[key] = (want, 0)
+            return want
+        latch[key] = (state, streak)
+        return state
+
     def _update_guidance(self, context: dict | None, seat: dict | None = None) -> None:
         """Say what to do next, and only enable the buttons that can work.
 
@@ -2641,20 +2716,34 @@ class NolSniperApp(tk.Tk):
         except Exception:  # noqa: BLE001 - no bridge yet is "not live", not a crash
             bridge_live = False
         mode = derive_mode(page=page, url=url, seat=seat, arm=arm, bridge_live=bridge_live)
-        # Hysteresis on the way *down*: the quiet modes (nothing is happening)
-        # must hold for two polls before they replace an active one, so a
-        # document swap mid-entry does not flash 공연 없음 for 500ms. Active
-        # modes are drawn at once — a held seat must never wait.
+        # A glitchy 500ms poll — page momentarily "other", context with no
+        # goods — must not drop a detected show. If we have a loaded show and
+        # the bridge is live, an incoming no_show/offline is treated as noise
+        # and the last real mode is kept until the drop is confirmed.
+        loaded_now = bool(self._show_info_data) or bool(goods_on_page) or bool(getattr(self, "_auto_loaded_code", ""))
+        if mode in {"no_show", "offline"} and loaded_now and bridge_live:
+            mode = getattr(self, "_mode", mode)
+        # Hysteresis on the way *down*: a quiet mode (nothing is happening) must
+        # be seen on MODE_CONFIRM_POLLS consecutive polls before it replaces an
+        # active one, so a document swap mid-entry never flashes 공연 없음.
+        # Active modes are drawn at once — a held seat must never wait.
         quiet = {"no_show", "ready", "offline", "on_seat"}
         previous = getattr(self, "_mode", "no_show")
+        MODE_CONFIRM_POLLS = 3
         if mode in quiet and mode != previous and previous not in quiet:
-            if getattr(self, "_mode_candidate", None) != mode:
+            if getattr(self, "_mode_candidate", None) == mode:
+                self._mode_candidate_n = getattr(self, "_mode_candidate_n", 1) + 1
+            else:
                 self._mode_candidate = mode
+                self._mode_candidate_n = 1
+            if self._mode_candidate_n < MODE_CONFIRM_POLLS:
                 mode = previous
             else:
                 self._mode_candidate = None
+                self._mode_candidate_n = 0
         else:
             self._mode_candidate = None
+            self._mode_candidate_n = 0
         opens = self._open_time()
         phase = sale_phase(opens, datetime.now(KST))
         open_text = opens.strftime("%m-%d %H:%M") if opens else ""
@@ -2689,8 +2778,12 @@ class NolSniperApp(tk.Tk):
         idle = mode in {"ready", "halted", "error"} and bool(loaded) and primary != ""
         arm_on = idle and not told.arm_reason
         enter_on = idle and not told.enter_reason
-        self._set_enabled(self.btn_arm, arm_on)
-        self._set_enabled(getattr(self, "btn_enter_now", None), enter_on)
+        # Latch each button: it changes state only after the new value has held
+        # for two consecutive polls, so a single dropped poll cannot make
+        # [오픈에 자동 진입] flicker enabled↔disabled twice a second.
+        self._set_enabled(self.btn_arm, self._latch_enable("arm", arm_on))
+        self._set_enabled(getattr(self, "btn_enter_now", None),
+                          self._latch_enable("enter", enter_on))
         self._style_button(self.btn_arm, primary == "arm")
         self._style_button(getattr(self, "btn_enter_now", None), primary == "enter")
         notes = []
