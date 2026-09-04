@@ -23,7 +23,11 @@ embedded, and no WebView2 runtime is involved.
 
 To run from source on Windows instead — which is what you want when the exe
 misbehaves and you need to see the error — double-click `NOLSniper.bat`. That
-one needs Python installed.
+one needs Python installed; if it is missing, or `pip install` fails, or the
+app exits with an error, the window stays open, says which of those happened
+in Korean, and shows the tail of `nolsniper_setup.log` / `crash.log` before
+pausing. It is saved CRLF (`.gitattributes` enforces it) because an LF-only
+batch file can make `cmd.exe` lose a `goto` label and close instantly.
 
 Two windows open: the 조작판 (control panel) and the 예매 창. You log in and
 type any 보안문자 yourself in the 예매 창; everything else is driven from inside
@@ -93,5 +97,7 @@ truncated download; it does not protect against whoever can publish to this
 repo, which is the trust root for anyone you hand the exe to.
 
 Builds come from `.github/workflows/windows-build.yml`, which runs the test
-suite on a Windows runner before it packages anything. Tag `v*` to publish a
-Release.
+suite on a Windows runner before it packages anything. Every push uploads an
+`NOLSniper-windows` artifact; tag `v*` to publish a Release. Both carry
+`NOLSniper_Windows.zip` — the exe plus a Korean one-page README — which is the
+file to send over KakaoTalk.

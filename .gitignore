@@ -34,3 +34,4 @@ VERSION
 UPDATE_URL
 build/
 dist/
+dist_win/

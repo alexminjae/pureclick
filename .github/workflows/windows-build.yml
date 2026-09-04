@@ -96,11 +96,41 @@ jobs:
           } | ConvertTo-Json | Set-Content -Encoding utf8 dist/manifest.json
           Copy-Item browser/nolsniper_autopilot.js dist/nolsniper_autopilot.js
 
+      # The thing to hand to a Windows user over KakaoTalk: the exe plus a
+      # one-screen Korean README, in a zip named so it is obvious which is which.
+      # A bare exe attached to a chat is what gets "is this a virus?" replies;
+      # the README says what the SmartScreen prompt looks like and what to press.
+      - name: Package the hand-off zip
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          $stage = 'NOLSniper_Windows'
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item dist/NOLSniper.exe $stage/
+          $readme = @(
+            '[NOL 스나이퍼 - 윈도우 실행 방법]',
+            "버전: $version",
+            '',
+            '1. 압축을 완전히 풉니다. (마우스 오른쪽 버튼 - "압축 풀기")',
+            '2. 풀린 폴더 안의 NOLSniper.exe 를 더블클릭하여 실행합니다.',
+            '   (Python 설치가 필요 없습니다.)',
+            '3. "Windows의 PC 보호" 파란 창이 뜨면 "추가 정보" 를 누른 뒤 "실행" 을 누릅니다.',
+            '4. 예매 창은 이 PC 에 설치된 Chrome (없으면 Edge) 으로 열립니다.',
+            '',
+            '문제가 생기면 다음 파일을 함께 보내주세요:',
+            '   %LOCALAPPDATA%\\NOLSniper\\crash.log',
+            '   %LOCALAPPDATA%\\NOLSniper\\startup.log'
+          ) -join "`r`n"
+          Set-Content -Encoding utf8 -NoNewline "$stage/README_윈도우_실행방법.txt" $readme
+          Compress-Archive -Path $stage -DestinationPath dist/NOLSniper_Windows.zip -Force
+          Get-Item dist/NOLSniper_Windows.zip | Select-Object Name, Length
+
       - uses: actions/upload-artifact@v4
         with:
           name: NOLSniper-windows
           path: |
             dist/NOLSniper.exe
+            dist/NOLSniper_Windows.zip
             dist/manifest.json
             dist/nolsniper_autopilot.js
 
@@ -111,5 +141,6 @@ jobs:
         with:
           files: |
             dist/NOLSniper.exe
+            dist/NOLSniper_Windows.zip
             dist/manifest.json
             dist/nolsniper_autopilot.js

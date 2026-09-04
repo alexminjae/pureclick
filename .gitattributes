@@ -1,0 +1,3 @@
+# cmd.exe can fail to find a goto label in an LF-only batch file — the window
+# then closes instantly with "cannot find the batch label". Keep CRLF everywhere.
+*.bat text eol=crlf
