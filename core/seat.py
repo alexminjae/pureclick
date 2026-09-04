@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
+from .arm import clamp_entry_offset_ms
+
 
 class SeatAutopilotError(Exception):
     """Raised when seat autopilot configuration or compatibility checks fail."""
@@ -56,6 +58,10 @@ class SeatPreferences:
     catch_grade_strict: bool = True
     allow_group_seats: bool = True
     auto_assign: bool = False
+    # Carried here only so the panel's 진입 보정 field survives a restart —
+    # the config file is the one thing on disk that already does that. What
+    # actually fires reads it off ArmPayload, which is published per arm.
+    entry_offset_ms: int = 0
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> SeatPreferences:
@@ -151,6 +157,9 @@ class SeatPreferences:
             catch_grade_strict=bool(data.get("catch_grade_strict", True)),
             allow_group_seats=bool(data.get("allow_group_seats", True)),
             auto_assign=bool(data.get("auto_assign", False)),
+            entry_offset_ms=clamp_entry_offset_ms(
+                data.get("entry_offset_ms", data.get("entryOffsetMs", 0))
+            ),
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -186,6 +195,7 @@ class SeatPreferences:
             "catch_grade_strict": self.catch_grade_strict,
             "allow_group_seats": self.allow_group_seats,
             "auto_assign": self.auto_assign,
+            "entry_offset_ms": self.entry_offset_ms,
         }
 
 
@@ -735,6 +745,46 @@ def waiting_log_lines(arm: dict[str, Any], limit: int = 12) -> list[str]:
         outcome = str(row.get("outcome") or "")
         mark = "  ← 열림" if outcome.startswith("대기열") or outcome.startswith("N (") else ""
         lines.append(f"  {stamp:>7}  {outcome}{mark}")
+    return lines
+
+
+# What each look at the 예매하기 button found, in words. The JS records a state
+# per poll; these are the only values it emits.
+CLICK_STATES = {
+    "missing": "버튼 없음",
+    "hidden": "버튼 숨김",
+    "disabled": "버튼 비활성",
+    "clicked": "버튼 활성 → 클릭",
+    "forced": "강제 활성화 → 클릭",
+}
+
+
+def click_log_lines(arm: dict[str, Any], limit: int = 8) -> list[str]:
+    """When the 예매하기 button actually became pressable, relative to the open.
+
+    This is the reading the DOM route never had. The queue API leaves a trail of
+    answers you can argue from; a single click at T left nothing at all, so
+    "the show does not open exactly on time" could only ever be a feeling. Each
+    row is one poll, signed milliseconds from the target, and the last row is
+    what got in.
+    """
+    entries = arm.get("clickLog")
+    if not isinstance(entries, list) or not entries:
+        return []
+
+    rows = [row for row in entries if isinstance(row, dict)]
+    if not rows:
+        return []
+
+    # The end, not the start: the rows worth reading are the ones around the
+    # moment the button flipped, and that is always the last thing recorded.
+    shown = rows[-limit:]
+    lines = [f"예매하기 확인 {len(rows)}회"]
+    for row in shown:
+        offset = row.get("offsetMs")
+        stamp = f"{offset:+.0f}ms" if isinstance(offset, (int, float)) else "  ?  "
+        state = str(row.get("state") or "")
+        lines.append(f"  {stamp:>8}  {CLICK_STATES.get(state, state)}")
     return lines
 
 

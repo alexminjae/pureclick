@@ -178,6 +178,10 @@ class CDPError(RuntimeError):
     """A command came back with an error, or the connection went away."""
 
 
+class PageGone(CDPError):
+    """The attached tab is closed. Waiting will not bring it back; re-attach."""
+
+
 class Connection:
     """One DevTools WebSocket, with a reader thread and real timeouts.
 
@@ -294,12 +298,29 @@ class Page:
         self._frame_ctx: dict[str, int] = {}
         self._root_frame: str | None = None
         self._lock = threading.Lock()
+        # Cleared when Chrome says this tab is gone. Without it, closing the
+        # 예매 창 tab left every evaluate failing against a dead session with
+        # nothing able to tell that apart from a page that was merely slow —
+        # so the host sat there reporting errors forever and never re-attached.
+        self.alive = True
         conn.on_event(self._absorb)
 
     def _absorb(self, msg: dict[str, Any]) -> None:
+        method = msg.get("method")
+        # Target lifecycle events are addressed to the browser, not to this
+        # session, so they have to be matched on targetId before the sessionId
+        # filter below discards them.
+        if method in ("Target.targetDestroyed", "Target.targetCrashed"):
+            if (msg.get("params") or {}).get("targetId") == self.target_id:
+                self.alive = False
+            return
+        if method == "Target.detachedFromTarget":
+            params = msg.get("params") or {}
+            if params.get("sessionId") == self.session or params.get("targetId") == self.target_id:
+                self.alive = False
+            return
         if msg.get("sessionId") != self.session:
             return
-        method = msg.get("method")
         if method == "Runtime.executionContextCreated":
             ctx = msg["params"]["context"]
             aux = ctx.get("auxData") or {}
@@ -391,6 +412,11 @@ class Page:
         back to an unpinned evaluate would silently start answering from a
         tracking iframe, which is worse than failing.
         """
+        if not self.alive:
+            # A distinct, checkable failure. Everything else here is "the page
+            # would not answer", which is recoverable by waiting; this one never
+            # recovers and the caller has to attach somewhere else instead.
+            raise PageGone("the attached tab was closed")
         ctx = self.main_context()
         if ctx is None:
             self.refresh_root_frame()

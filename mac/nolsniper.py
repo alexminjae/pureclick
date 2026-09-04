@@ -19,7 +19,11 @@ if str(MAC_DIR) not in sys.path:
     sys.path.insert(0, str(MAC_DIR))
 
 from browser_bridge import BrowserBridge  # noqa: E402
-from core.arm import ArmPayload  # noqa: E402
+from core.arm import ArmPayload, clamp_entry_offset_ms  # noqa: E402
+from core.entry import needs_parking, park_url  # noqa: E402
+from core.mode import (  # noqa: E402
+    BEFORE_OPEN, MODE_LABELS, OPEN, derive_mode, guidance as mode_guidance, sale_phase,
+)
 from core.clock import KST, NolSniperError, ServerClock, parse_target_time  # noqa: E402
 import app_platform  # noqa: E402
 import app_update  # noqa: E402
@@ -27,8 +31,10 @@ from core.seat import (  # noqa: E402
     SeatPreferences,
     parse_goods_code,
     bridge_line,
+    bridge_status,
     live_state,
     waiting_log_lines,
+    click_log_lines,
     serialize_preferences,
 )
 from core.showinfo import seat_table_lines, fetch_round_remains, fetch_show_catalog  # noqa: E402
@@ -49,6 +55,12 @@ from core.zone_map import (  # noqa: E402
 # MAC_DIR resolves inside sys._MEIPASS and is wiped every time the app starts;
 # a source checkout keeps writing next to the script, as before.
 DATA_DIR = app_platform.user_data_dir() if getattr(sys, "frozen", False) else MAC_DIR
+
+# How long an auto-park may take before the arm goes out anyway. A park that has
+# not landed by then is still worth arming behind — the page may arrive during
+# the countdown — but blocking the arm indefinitely on a slow navigation would
+# lose the open outright.
+PARK_SETTLE_SECONDS = 6.0
 
 # One instrument, not a cockpit.
 #
@@ -208,6 +220,15 @@ class NolSniperApp(tk.Tk):
         self.show_title = tk.StringVar(value="공연을 선택하세요")
         self.show_where = tk.StringVar(value="예매 창에서 공연을 열면 자동으로 채워집니다")
         self.countdown = tk.StringVar(value="")
+        # The user's own ms correction on the fire moment. Negative fires early.
+        #
+        # NOL's backend does not flip at exactly 티켓 오픈 and the page needs a
+        # beat after that, so the moment worth aiming at is not the published
+        # one — and it differs per show. This is the number you tune between
+        # rehearsals; it applies to 대기 시작 and 테스트 실행 alike, so what you
+        # measured in a rehearsal is what runs on the day.
+        self.entry_offset_ms = tk.StringVar(value="0")
+        self.fire_preview = tk.StringVar(value="")
         self.zone_summary = tk.StringVar(value="감시 구역: 전체")
         self.clock_info = tk.StringVar(value="서버 시각 동기화 중…")
         self.bridge = tk.StringVar(value="예매 창 연결 대기 중…")
@@ -222,6 +243,13 @@ class NolSniperApp(tk.Tk):
         self.btn_catch = None
         self.status = tk.StringVar(value="준비")
         self.reason = tk.StringVar(value="")
+        self.mode_banner = tk.StringVar(value="")
+        self.mode_text = tk.StringVar(value="")
+        self.action_note = tk.StringVar(value="")
+        self._mode = "no_show"
+        self._last_arm_status: dict = {}
+        self._band_candidate: tuple | None = None
+        self._band_drawn: tuple | None = None
         # A button press, and what the 예매 창 looked like when it was made, so
         # a command nothing was there to receive can be told from one that was.
         self._asked: tuple[str, float, tuple] | None = None
@@ -245,7 +273,14 @@ class NolSniperApp(tk.Tk):
         self.auto_start_on = tk.BooleanVar(value=False)
         self.reentry_on = tk.BooleanVar(value=True)
         self.auto_assign_on = tk.BooleanVar(value=False)
+        # The re-sync runs on its own thread, never the shared worker slot —
+        # see _resync_now(). This is only the "one at a time" latch.
         self._resyncing = False
+        self._resync_thread: threading.Thread | None = None
+        # 진입 점검: set when the press goes out, cleared when its report is
+        # drawn, so a stale entry result cannot overwrite it a tick later.
+        self._entry_probe_pending = False
+        self._entry_probe_at: str | None = None
         # The watch's pace is the autopilot's to decide: it holds a request
         # budget (requests per second) that keeps the gateway quiet, and a
         # number typed here can only make it slower. This was 400 and floored
@@ -268,6 +303,17 @@ class NolSniperApp(tk.Tk):
         self.place_code = tk.StringVar(value="")
         self.play_date = tk.StringVar(value="")
         self.play_seq = tk.StringVar(value="001")
+        # The 일정 picker. `rounds` is goods-info's playSeqList as the page
+        # published it; `round_choice` is the label currently shown. The pair
+        # exists because a combobox can only hold strings, and the thing the
+        # entry actually needs is the playSeq behind the label.
+        self.rounds: list[dict[str, str]] = []
+        self.round_choice = tk.StringVar(value="")
+        self.round_note = tk.StringVar(value="공연을 열면 날짜·회차가 여기에 나옵니다.")
+        # 고급 knobs are off the main surface by default: none of them is needed
+        # to enter a show, and every one of them was a question the panel could
+        # not answer for someone who just wants a ticket.
+        self.advanced_open = tk.BooleanVar(value=False)
         self.play_time = tk.StringVar(value="")
         self._remain_refresh_key: tuple | None = None
         self._remain_refreshing = False
@@ -417,7 +463,19 @@ class NolSniperApp(tk.Tk):
 
         body = ttk.Frame(canvas, padding=16)
         holder = canvas.create_window((0, 0), window=body, anchor="nw")
-        body.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        # Hold the top edge still while the column changes height. Tk keeps the
+        # *fraction* scrolled when the scrollregion changes, so every label that
+        # grew or shrank by a line shifted everything under the pointer — the
+        # "scroll jumps while I read" the panel was known for. Re-anchor to the
+        # pixel that was at the top before the change.
+        def on_body_resize(_e: tk.Event) -> None:
+            top = canvas.canvasy(0)
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            box = canvas.bbox("all")
+            height = max(1, (box[3] - box[1]) if box else 1)
+            canvas.yview_moveto(max(0.0, min(1.0, top / height)))
+        body.bind("<Configure>", on_body_resize)
+        self._scroll_canvas = canvas
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(holder, width=e.width))
 
         # Scoped to the pointer, so the 오픈 예정 목록 window keeps its own wheel.
@@ -455,9 +513,9 @@ class NolSniperApp(tk.Tk):
         tk.Label(head, text=label, bg=PANEL, fg=FG, anchor="w",
                  font=(UI_FONT, 14, "bold")).pack(anchor="w")
         if note is not None:
-            tk.Label(head, textvariable=note, bg=PANEL, fg=MUTED, anchor="w",
+            tk.Label(head, textvariable=note, bg=PANEL, fg=MUTED, anchor="nw", height=2,
                      wraplength=self.panel_geometry[2] - 110, justify="left",
-                     font=(UI_FONT, 11)).pack(anchor="w", pady=(3, 0))
+                     font=(UI_FONT, 11)).pack(fill="x", pady=(3, 0))
         body = tk.Frame(shell, bg=PANEL)
         body.pack(fill="x", padx=18, pady=(12, 18))
         return body
@@ -486,19 +544,22 @@ class NolSniperApp(tk.Tk):
         # Directly under the masthead, because it says whether anything below it
         # can be trusted. The panel had no way to tell a live browser from one it
         # had stopped hearing from, and every failure looks the same from here.
-        ttk.Label(root, textvariable=self.bridge, style="Muted.TLabel",
-                  wraplength=wrap, justify="left").pack(anchor="w", pady=(6, 0))
+        # Every live label in the column reserves its worst case (height=N
+        # lines), so text that changes on the 500ms poll never resizes the
+        # column. See on_body_resize for why that mattered.
+        tk.Label(root, textvariable=self.bridge, bg=BG, fg=MUTED, anchor="nw", height=2,
+                 font=(UI_FONT, 11), wraplength=wrap, justify="left").pack(fill="x", pady=(6, 0))
 
         # --- What we are aiming at -------------------------------------------
         show = self._card(root, "공연")
-        ttk.Label(show, textvariable=self.show_title, style="CardTitle.TLabel",
-                  wraplength=wrap - 40, justify="left").pack(anchor="w")
-        ttk.Label(show, textvariable=self.show_where, style="CardMuted.TLabel",
-                  wraplength=wrap - 40, justify="left").pack(anchor="w", pady=(3, 0))
+        tk.Label(show, textvariable=self.show_title, bg=PANEL, fg=FG, anchor="nw", height=2,
+                 font=(UI_FONT, 15, "bold"), wraplength=wrap - 40, justify="left").pack(fill="x")
+        tk.Label(show, textvariable=self.show_where, bg=PANEL, fg=MUTED, anchor="nw", height=1,
+                 font=(UI_FONT, 11), wraplength=wrap - 40, justify="left").pack(fill="x", pady=(3, 0))
         # The 회차 belongs on screen: it changes underneath everything else and
         # every seat the macro targets is keyed to it.
-        ttk.Label(show, textvariable=self.show_round, style="CardFaint.TLabel",
-                  wraplength=wrap - 40, justify="left").pack(anchor="w", pady=(2, 0))
+        tk.Label(show, textvariable=self.show_round, bg=PANEL, fg=FAINT, anchor="nw", height=1,
+                 font=(UI_FONT, 11), wraplength=wrap - 40, justify="left").pack(fill="x", pady=(2, 0))
         self.seat_table = tk.Text(show, height=3, bg=PANEL, fg=MUTED, insertbackground=FG,
                                   highlightthickness=0, borderwidth=0, wrap="none",
                                   font=(MONO_FONT, 11), spacing1=2)
@@ -516,9 +577,14 @@ class NolSniperApp(tk.Tk):
         self.tip_edge.pack(fill="x", pady=(16, 0))
         tip = tk.Frame(self.tip_edge, bg=PANEL_2)
         tip.pack(fill="both", expand=True, padx=1, pady=1)
-        tk.Label(tip, textvariable=self.guidance, bg=PANEL_2, fg=FG, anchor="w",
+        # The mode, as one word, and the one thing to do about it. Both come
+        # from core.mode and nothing else, so they cannot contradict each other
+        # or the live band below.
+        tk.Label(tip, textvariable=self.mode_banner, bg=PANEL_2, fg=ACCENT, anchor="w",
+                 font=(UI_FONT, 12, "bold"), height=1).pack(fill="x", padx=14, pady=(12, 0))
+        tk.Label(tip, textvariable=self.guidance, bg=PANEL_2, fg=FG, anchor="nw", height=3,
                  font=(UI_FONT, 12), wraplength=wrap - 24,
-                 justify="left").pack(fill="x", padx=14, pady=12)
+                 justify="left").pack(fill="x", padx=14, pady=(2, 12))
 
         # --- How it chooses ---------------------------------------------------
         # Kept because the tip box above is packed and unpacked as the macro
@@ -547,24 +613,94 @@ class NolSniperApp(tk.Tk):
 
         # --- Open 대기 ---------------------------------------------------------
         openq = self._card(root, "오픈 대기", self.open_note)
+
+        # --- 1. Which round -----------------------------------------------------
+        # First, because it is the only thing the user has to decide, and because
+        # entering without it is what put people on the 일정 선택 page mid-flow.
+        tk.Label(openq, text="① 날짜·회차", bg=PANEL, fg=FG,
+                 font=(UI_FONT, 12, "bold"), anchor="w").pack(anchor="w")
+        self.round_box = ttk.Combobox(openq, textvariable=self.round_choice,
+                                      state="readonly", values=[])
+        self.round_box.pack(fill="x", pady=(6, 0))
+        self.round_box.bind("<<ComboboxSelected>>", self._on_round_pick)
+        tk.Label(openq, textvariable=self.round_note, bg=PANEL, fg=FAINT, anchor="nw", height=2,
+                 justify="left", wraplength=wrap - 40,
+                 font=(UI_FONT, 11)).pack(fill="x", pady=(4, 0))
+
+        # --- 2. When ------------------------------------------------------------
+        tk.Frame(openq, bg=BORDER, height=1).pack(fill="x", pady=(14, 12))
         when = tk.Frame(openq, bg=PANEL)
         when.pack(fill="x")
-        tk.Label(when, text="티켓 오픈", bg=PANEL, fg=MUTED, font=(UI_FONT, 11)).pack(side="left", padx=(0, 8))
+        tk.Label(when, text="② 티켓 오픈", bg=PANEL, fg=FG,
+                 font=(UI_FONT, 12, "bold")).pack(side="left", padx=(0, 10))
         ttk.Entry(when, textvariable=self.target_date, width=11).pack(side="left")
         ttk.Entry(when, textvariable=self.target_time, width=9).pack(side="left", padx=(6, 0))
+        tk.Label(openq, text="회차를 고르면 자동으로 채워집니다.", bg=PANEL, fg=FAINT,
+                 anchor="w", font=(UI_FONT, 11)).pack(anchor="w", pady=(4, 0))
 
-        self.countdown_label = ttk.Label(openq, textvariable=self.countdown, style="CardHero.TLabel")
-        self.btn_arm = ttk.Button(openq, text="대기 시작", style="Primary.TButton", command=self.arm)
-        self.btn_arm.pack(fill="x", pady=(12, 0))
+        # --- 3. The one action --------------------------------------------------
+        tk.Frame(openq, bg=BORDER, height=1).pack(fill="x", pady=(14, 12))
+        tk.Label(openq, text="③ 실행", bg=PANEL, fg=FG,
+                 font=(UI_FONT, 12, "bold"), anchor="w").pack(anchor="w", pady=(0, 8))
+
+        # Always packed, blank when there is nothing to count: packing and
+        # unpacking it moved every card below by a hero line.
+        self.countdown_label = tk.Label(openq, textvariable=self.countdown, bg=PANEL, fg=FG,
+                                        anchor="w", height=1, font=(MONO_FONT, 34))
+        self.countdown_label.pack(fill="x", pady=(8, 0))
+        self.btn_arm = ttk.Button(openq, text="오픈에 자동 진입", style="Primary.TButton", command=self.arm)
+        self.btn_arm.pack(fill="x", pady=(8, 0))
         self.btn_arm_stop = ttk.Button(openq, text="대기 중지", style="CardGhost.TButton",
                                        command=self.stop_arm)
         self.btn_arm_stop.pack(fill="x", pady=(4, 0))
-        tk.Checkbutton(openq, text="들어가면 곧바로 좌석까지 잡기", variable=self.auto_start_on,
+        # A show that is already open has nothing to count down to, and 대기 시작
+        # against a past 티켓 오픈 answered 이미 지난 시각입니다 — leaving the one
+        # case where entry is instant with no button that does anything.
+        self.btn_enter_now = ttk.Button(openq, text="지금 진입", style="CardGhost.TButton",
+                                        command=self.enter_now)
+        self.btn_enter_now.pack(fill="x", pady=(4, 0))
+        # Which of the two is off right now, and why. Fixed height: it changes
+        # with the mode and must not move the checkbox under the pointer.
+        tk.Label(openq, textvariable=self.action_note, bg=PANEL, fg=FAINT, anchor="nw", height=2,
+                 justify="left", wraplength=wrap - 40,
+                 font=(UI_FONT, 11)).pack(fill="x", pady=(2, 0))
+        tk.Checkbutton(openq, text="들어가면 좌석까지 잡기", variable=self.auto_start_on,
                        command=self._push_seat_config, bg=PANEL, fg=FG, selectcolor=PANEL_2,
                        activebackground=PANEL, activeforeground=FG, highlightthickness=0,
                        font=(UI_FONT, 12), anchor="w").pack(anchor="w", pady=(12, 0))
         tk.Label(openq, text="보안문자만 직접 입력하면 됩니다.", bg=PANEL, fg=FAINT,
                  font=(UI_FONT, 11), anchor="w").pack(anchor="w", pady=(2, 0))
+
+        # --- 고급 ---------------------------------------------------------------
+        # Everything below is a rehearsal or a tuning knob. None of it is needed
+        # to get a ticket, and having it on the main surface made the panel read
+        # as five competing actions instead of one.
+        tk.Frame(openq, bg=BORDER, height=1).pack(fill="x", pady=(16, 10))
+        self.btn_advanced = ttk.Button(openq, text="고급 설정 ▸", style="CardGhost.TButton",
+                                       command=self._toggle_advanced)
+        self.btn_advanced.pack(fill="x")
+        self.advanced_box = tk.Frame(openq, bg=PANEL)
+
+        # The ms correction. Off the main surface: entry is a single API call
+        # the server timestamps itself, so there is nothing here for a normal
+        # open to correct.
+        offset_row = tk.Frame(self.advanced_box, bg=PANEL)
+        offset_row.pack(fill="x", pady=(12, 0))
+        tk.Label(offset_row, text="진입 보정", bg=PANEL, fg=MUTED,
+                 font=(UI_FONT, 11)).pack(side="left", padx=(0, 8))
+        ttk.Entry(offset_row, textvariable=self.entry_offset_ms, width=7).pack(side="left")
+        tk.Label(offset_row, text="ms · 음수면 더 일찍", bg=PANEL, fg=FAINT,
+                 font=(UI_FONT, 11)).pack(side="left", padx=(6, 0))
+        tk.Label(self.advanced_box, text="오픈 시각보다 이만큼 일찍/늦게 요청합니다. 보통은 0으로 둡니다.",
+                 bg=PANEL, fg=FAINT, anchor="w", justify="left", wraplength=wrap - 40,
+                 font=(UI_FONT, 11)).pack(anchor="w", pady=(2, 0))
+        tk.Label(self.advanced_box, textvariable=self.fire_preview, bg=PANEL, fg=FAINT,
+                 anchor="w", font=(MONO_FONT, 11)).pack(anchor="w", pady=(2, 0))
+        for var in (self.entry_offset_ms, self.target_date, self.target_time):
+            var.trace_add("write", lambda *_: self._refresh_fire_preview())
+        self._refresh_fire_preview()
+
+        openq = self.advanced_box
 
         # --- Rehearsal ---------------------------------------------------------
         # The open is one instant that either works or is lost, and it could only
@@ -597,15 +733,26 @@ class NolSniperApp(tk.Tk):
                    command=self._test_time_from_show).grid(row=0, column=1, padx=(6, 0))
         tk.Label(openq, text="정한 시각에 실제로 이 공연에 들어가 봅니다.", bg=PANEL, fg=FAINT,
                  font=(UI_FONT, 11), anchor="w").pack(anchor="w", pady=(2, 0))
-        tk.Label(openq, textvariable=self.test_result, bg=PANEL, fg=GREEN, anchor="w",
-                 justify="left", font=(MONO_FONT, 11)).pack(anchor="w", pady=(8, 0))
+
+        # The safe half of the rehearsal, and the reason the device clock never
+        # needs touching. 테스트 실행 enters for real, so on a show that has not
+        # opened the only way to see anything was to shift the system clock
+        # forward — which froze this panel's own clock, stranded 취켓팅's
+        # cooldowns, and proved nothing about the button anyway, because a
+        # forward-shifted clock does not open somebody else's backend.
+        ttk.Button(openq, text="진입 점검", style="CardGhost.TButton",
+                   command=self.run_entry_probe).pack(fill="x", pady=(10, 0))
+        tk.Label(openq, text="아무것도 누르지 않고, 지금 무엇으로 어떻게 들어갈지만 확인합니다.",
+                 bg=PANEL, fg=FAINT, font=(UI_FONT, 11), anchor="w").pack(anchor="w", pady=(2, 0))
+        tk.Label(openq, textvariable=self.test_result, bg=PANEL, fg=GREEN, anchor="nw", height=8,
+                 justify="left", font=(MONO_FONT, 11)).pack(fill="x", pady=(8, 0))
 
         # --- 취켓팅 -------------------------------------------------------------
         catch = self._card(root, "취켓팅", self.catch_note)
         zone = tk.Frame(catch, bg=PANEL)
         zone.pack(fill="x")
         zone.columnconfigure(0, weight=1)
-        tk.Label(zone, textvariable=self.zone_summary, bg=PANEL, fg=FG, anchor="w",
+        tk.Label(zone, textvariable=self.zone_summary, bg=PANEL, fg=FG, anchor="nw", height=2,
                  wraplength=wrap - 130, justify="left",
                  font=(UI_FONT, 12)).grid(row=0, column=0, sticky="w")
         ttk.Button(zone, text="범위 정하기", style="CardGhost.TButton",
@@ -636,9 +783,14 @@ class NolSniperApp(tk.Tk):
         live_edge.pack(fill="x")
         live = tk.Frame(live_edge, bg=PANEL_2)
         live.pack(fill="both", expand=True, padx=1, pady=1)
-        self.status_dot = tk.Label(live, text="●", bg=PANEL_2, fg=self._state_colour,
+        dot_row = tk.Frame(live, bg=PANEL_2)
+        dot_row.pack(fill="x", padx=16, pady=(14, 0))
+        self.status_dot = tk.Label(dot_row, text="●", bg=PANEL_2, fg=self._state_colour,
                                    font=(UI_FONT, 11))
-        self.status_dot.pack(anchor="w", padx=16, pady=(14, 0))
+        self.status_dot.pack(side="left")
+        # The mode word, beside the dot: the same enum the tip box shows.
+        tk.Label(dot_row, textvariable=self.mode_text, bg=PANEL_2, fg=MUTED, anchor="w",
+                 height=1, font=(UI_FONT, 11, "bold")).pack(side="left", padx=(8, 0))
         # Every line reserves its worst case, so the band never changes size.
         # It used to: the headline and the reason both changed on the same
         # 500ms tick, and a reason that grew from one wrapped line to two moved
@@ -657,6 +809,11 @@ class NolSniperApp(tk.Tk):
 
         ttk.Button(holder, text="전부 정지", style="Ghost.TButton",
                    command=self.stop_all).pack(fill="x", pady=(10, 0))
+        # Outside the scroll, beside 전부 정지, because it is needed at exactly
+        # the moment nothing else is working. The 조작판 does not die with the
+        # 예매 창 and never should have needed a full relaunch to recover.
+        ttk.Button(holder, text="예매 창 다시 열기", style="Ghost.TButton",
+                   command=self.reopen_browser).pack(fill="x", pady=(6, 0))
 
 
 
@@ -696,6 +853,9 @@ class NolSniperApp(tk.Tk):
                 "reentry": self.reentry_on.get(),
                 "adjacent": True,
                 "auto_seats_after_entry": self.auto_start_on.get(),
+                # Carried here only so it survives a restart; the fire reads it
+                # off the arm payload.
+                "entry_offset_ms": self._entry_offset_ms(),
             }
         )
 
@@ -742,6 +902,7 @@ class NolSniperApp(tk.Tk):
             )
             self.auto_assign_on.set(preferences.auto_assign)
             self.reentry_on.set(preferences.reentry)
+            self.entry_offset_ms.set(str(preferences.entry_offset_ms))
             self.auto_start_on.set(preferences.auto_seats_after_entry)
         except Exception as exc:  # noqa: BLE001 - a bad file must not stop startup
             # Silently falling back to defaults meant settings you had chosen
@@ -787,12 +948,41 @@ class NolSniperApp(tk.Tk):
     def _set_update_note(self, note: str) -> None:
         self._update_note = note.strip()
 
+    def _resync_now(self) -> None:
+        """Re-measure the server clock, on a thread of its own.
+
+        Deliberately not `_start_worker`. That shares one slot with 대기 시작 and
+        테스트 실행 and *returns False* when something else is running — and the
+        caller set `_resyncing = True` before asking. So a re-sync that arrived
+        while any other work was in flight never started, its `finally` never
+        ran, and the latch stayed True for the rest of the session: the panel
+        silently stopped re-syncing forever.
+
+        That is the "서버 시각이 멈췄다" report. Shifting the device clock
+        forward and back is exactly the thing that triggers a re-sync, and doing
+        it while the panel was busy was enough to freeze the clock permanently.
+        A re-sync competes with nothing, so it gets its own thread and cannot be
+        refused.
+        """
+        if self._resyncing:
+            return
+        self._resyncing = True
+        self._resync_thread = threading.Thread(
+            target=self._resync_worker, name="nolsniper-resync", daemon=True
+        )
+        self._resync_thread.start()
+
     def _resync_worker(self) -> None:
-        """Re-measure after a sleep, and let the next tick try again if it fails."""
+        """Re-measure after a sleep or a clock change; the next tick retries."""
         try:
-            self._sync_now()
+            result = self._sync_now()
         except Exception as exc:  # noqa: BLE001 - a failed re-sync must not be silent
             self._ui(self._note, f"서버 시각을 다시 맞추지 못했습니다: {exc}", error=True)
+        else:
+            self._ui(
+                self._note,
+                f"서버 시각을 다시 맞췄습니다 (보정 {result.offset_seconds * 1000:+.0f}ms)",
+            )
         finally:
             self._resyncing = False
 
@@ -1352,13 +1542,21 @@ class NolSniperApp(tk.Tk):
         for key, var in (("goods_code", self.goods_code), ("place_code", self.place_code)):
             if catalog.get(key) and not var.get().strip():
                 var.set(str(catalog[key]))
-        # Always follow the 예매판 round — these are what the user is looking at.
-        if catalog.get("play_date"):
-            self.play_date.set(str(catalog["play_date"]))
-        if catalog.get("play_seq"):
-            self.play_seq.set(str(catalog["play_seq"]))
+        # Follow the 예매판 round only while the user has not chosen one. Once
+        # they pick from the 일정 list, that choice is the entry's round and the
+        # poll must not walk it back — the catalog republishes four times a
+        # second, and letting it win made the picker unusable.
+        if show_changed_code := (new_code and old_code and new_code != old_code):
+            self._round_user_picked = False
+            self.rounds = []
+        if not getattr(self, "_round_user_picked", False):
+            if catalog.get("play_date"):
+                self.play_date.set(str(catalog["play_date"]))
+            if catalog.get("play_seq"):
+                self.play_seq.set(str(catalog["play_seq"]))
         if catalog.get("play_time"):
             self.play_time.set(str(catalog["play_time"]))
+        self._apply_rounds(catalog)
         self._refresh_round_line()
 
         grades = catalog.get("grades") or []
@@ -1633,6 +1831,105 @@ class NolSniperApp(tk.Tk):
         }.get(page)
         return where or "예매 창에서 공연 페이지를 먼저 여세요."
 
+    def run_entry_probe(self) -> None:
+        """Ask the 예매 창 what the entry would do, without doing any of it.
+
+        Deliberately not gated on `_entry_page_problem`: "you are on the wrong
+        page" is one of the answers this is for, and refusing to look would be
+        the same shrug the panel already gave before an open.
+
+        Publishes the arm first so the probe has a target and a 진입 보정 to
+        report — with dry_run set, so nothing can fire even if the moment has
+        already passed. The report itself comes back through the ordinary
+        status poll and is drawn by `_render_entry_probe`.
+        """
+        self._entry_probe_pending = True
+        self.test_result.set("진입 점검 중…")
+        try:
+            target_unix = parse_target_time(self._target_time_text(), target_tz=KST)
+        except Exception:  # noqa: BLE001 - a probe must work with no open time set
+            target_unix = time.time()
+        try:
+            payload = self._arm_payload(
+                target_unix=target_unix,
+                offset_seconds=(self.clock.sync_result.offset_seconds if self.clock.sync_result else 0.0),
+                dry_run=True,
+            )
+            # push, not _publish_arm: that also moves the countdown onto this
+            # target, and a probe must not repoint the clock you are watching.
+            self.browser.push(arm=payload.to_mapping())
+        except Exception as exc:  # noqa: BLE001 - report what is missing, then still look
+            self._note(f"공연 정보가 아직 부족합니다: {exc}", error=True)
+        self.browser.send_command("probe_entry")
+
+    def _render_entry_probe(self, report: dict) -> None:
+        """What 진입 점검 found, in plain Korean.
+
+        Every line answers a question that previously had no answer short of
+        arming a real entry and watching: which route, whether the button is
+        there, whether it is live yet, and when the corrected fire lands.
+        """
+        route = str(report.get("route") or "")
+        page = {
+            "nol": "NOL 상품 페이지",
+            "goods": "인터파크 상품 페이지",
+            "seat": "좌석맵",
+            "gates": "게이트",
+            "waiting": "대기열",
+        }.get(str(report.get("page") or ""), "알 수 없는 페이지")
+        button = report.get("button") or {}
+        clock = report.get("clock") or {}
+        arm = report.get("arm") or {}
+        queue = report.get("queue") or {}
+
+        lines = [f"현재 페이지  {report.get('origin', '')} ({page})"]
+
+        if route == "waiting-api":
+            lines.append("진입 방식    대기열 API 호출")
+            if queue:
+                lines.append(
+                    "             API 읽기 가능 · " + str(queue.get("answer") or "")
+                    if queue.get("readable")
+                    else "             API 읽기 실패 · " + str(queue.get("error") or "")[:60]
+                )
+        else:
+            lines.append("진입 방식    예매하기 버튼 클릭")
+            lines.append("             대기열 API는 이 주소에서 막혀 있습니다")
+
+        if not button.get("found"):
+            lines.append("예매하기     버튼 없음 — 로그인·본인인증을 확인하세요")
+        elif button.get("pressable"):
+            lines.append("예매하기     버튼 있음 · 지금 바로 누를 수 있음")
+        elif not button.get("visible"):
+            lines.append("예매하기     버튼 있음 · 화면에 보이지 않음")
+        else:
+            lines.append("예매하기     버튼 있음 · 지금은 비활성 (오픈 전이면 정상)")
+
+        quality = {
+            "boundary": "예매 서버에서 직접 측정",
+            "host": "조작판이 측정한 보정 사용",
+            "fallback": "보정 실패 — 기기 시계 그대로",
+            "none": "아직 동기화 안 됨",
+        }.get(str(clock.get("quality") or ""), str(clock.get("quality") or "?"))
+        row = f"시계         {quality} ({clock.get('offsetMs', 0):+d}ms)"
+        if abs(int(clock.get("jumpMs") or 0)) > 2000:
+            row += f" · 기기 시계 {int(clock['jumpMs']) / 1000:+.0f}초 변경됨"
+        lines.append(row)
+
+        fire_at = arm.get("fireAtServerUnix") or 0
+        if fire_at:
+            when = datetime.fromtimestamp(float(fire_at), KST)
+            lines.append(
+                f"진입 보정    {int(arm.get('entryOffsetMs') or 0):+d} ms → "
+                f"{when:%H:%M:%S}.{when.microsecond // 1000:03d}부터 시도"
+            )
+
+        blocked = int(report.get("blockedMs") or 0)
+        if blocked > 0:
+            lines.append(f"주의         접속 차단 중 — {blocked // 1000}초 남음")
+
+        self.test_result.set("\n".join(lines))
+
     def run_entry_test(self) -> None:
         """Rehearse the open at a moment you choose.
 
@@ -1734,6 +2031,7 @@ class NolSniperApp(tk.Tk):
 
     def _poll_show(self) -> None:
         try:
+            self._keep_browser_alive()
             snapshot = self.browser.read_snapshot()
             health = self.browser.read_bridge_health()
             context = snapshot["context"] or None
@@ -1742,11 +2040,16 @@ class NolSniperApp(tk.Tk):
 
             line = bridge_line(health, context, seat)
             self.bridge.set(f"{line} · {self._update_note}" if self._update_note else line)
+            self._last_arm_status = status.get("arm") or {}
+            self._last_arm_cfg = snapshot.get("arm") or {}
+            self._last_context = context or {}
             if context:
                 self._follow_browser_show(context)
             self._update_guidance(context, seat)
 
             catalog = snapshot["catalog"] or None
+            if not catalog:
+                self._forget_show_off_page(context)
             if catalog:
                 prev = self._catalog or {}
                 new_blocks = catalog.get("blocks") or []
@@ -1778,9 +2081,78 @@ class NolSniperApp(tk.Tk):
                 ):
                     self._apply_catalog(catalog)
             self._apply_autopilot_status(status, health)
+            self._publish_panel_state()
         except Exception as exc:  # noqa: BLE001 - keep the poll alive
             self._note(f"브라우저 동기화 오류: {exc}", error=True)
         self.after(500, self._poll_show)
+
+    def _publish_panel_state(self) -> None:
+        """What the panel is showing, as a file — for support and for tests.
+
+        The panel's own words (mode, banner, instruction, which button is on,
+        the band, the scroll position) were only ever on screen. Written next
+        to the bridge state whenever any of it changes, so a live run can be
+        checked against what the user actually saw.
+        """
+        try:
+            canvas = getattr(self, "_scroll_canvas", None)
+            scroll = round(float(canvas.yview()[0]), 4) if canvas is not None else None
+            snapshot = {
+                "mode": getattr(self, "_mode", ""),
+                "banner": self.mode_banner.get(),
+                "guidance": self.guidance.get(),
+                "action_note": self.action_note.get(),
+                "status": self.status.get(),
+                "reason": self.reason.get(),
+                "open_note": self.open_note.get(),
+                "round_note": self.round_note.get(),
+                "countdown": self.countdown.get(),
+                "buttons": {
+                    "arm": "disabled" not in self.btn_arm.state(),
+                    "enter": "disabled" not in self.btn_enter_now.state(),
+                    "catch": "disabled" not in self.btn_catch.state(),
+                },
+                "primary": (
+                    "arm" if str(self.btn_arm.cget("style")) == "Primary.TButton"
+                    else "enter" if str(self.btn_enter_now.cget("style")) == "Primary.TButton"
+                    else "catch" if str(self.btn_catch.cget("style")) == "Primary.TButton"
+                    else ""
+                ),
+                "scroll": scroll,
+                "show": self.show_title.get(),
+                "rounds": len(getattr(self, "rounds", None) or []),
+            }
+            if snapshot != getattr(self, "_panel_state_last", None):
+                self._panel_state_last = snapshot
+                snapshot = {**snapshot, "at": time.time()}
+                path = self.browser.state_path.with_name(".nolsniper_panel_state.json")
+                path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+        except Exception:  # noqa: BLE001 - a diagnostic must never break the poll
+            pass
+
+    def _forget_show_off_page(self, context: dict | None) -> None:
+        """Let go of the previous show once the 예매 창 has left it.
+
+        The page publishes no catalog on NOL home, 오픈 예정 or the ticket home
+        (see onShowPage in the autopilot). Keeping the old rounds in the picker
+        there meant 지금 진입 could fire for a show the window was no longer on.
+        Only the round list and the pinned pick are dropped; the code fields
+        stay so the show can be reopened by URL.
+        """
+        if not context or not self.rounds:
+            return
+        url = str(context.get("url") or "")
+        if context.get("goods_code") or "/onestop/" in url or context.get("page") != "other":
+            return
+        self.rounds = []
+        self._round_user_picked = False
+        self._catalog = None
+        try:
+            self.round_box.configure(values=[])
+            self.round_box.set("")
+        except Exception:  # noqa: BLE001 - a widget that is not built yet
+            pass
+        self.round_note.set("공연을 열면 날짜·회차가 여기에 나옵니다.")
 
     def _render_entry_result(self, arm: dict) -> None:
         """What the last entry actually did.
@@ -1809,7 +2181,20 @@ class NolSniperApp(tk.Tk):
         lateness = arm.get("latenessMs")
         lines = []
         error = str(arm.get("lastError") or "").strip()
+        # `route` first. `enteredVia` collapsed a BookSession POST and a DOM
+        # click into one value, "book", rendered as "예매 창으로 진입" — which
+        # is the one question this panel is asked most often ("what did it
+        # actually press?") answered with a shrug. Kept as the fallback for a
+        # 예매 창 running an older automation that publishes no route.
         via = {
+            "waiting-api": "대기열 API로 진입",
+            "book-session": "BookSession 폼으로 진입",
+            "dom-click": "페이지의 예매하기 버튼을 눌러 진입",
+            "dom-click-forced": "예매하기 버튼을 강제로 활성화해 진입",
+            "sso-gate": "SSO 게이트 주소로 진입",
+            "gates": "게이트 세션으로 진입",
+            "dry-run": "발사만 확인 (요청 없음)",
+        }.get(str(arm.get("route") or ""), "") or {
             "waiting": "대기열로 진입",
             "book": "예매 창으로 진입",
             "dry-run": "발사만 확인 (요청 없음)",
@@ -1834,7 +2219,25 @@ class NolSniperApp(tk.Tk):
                 row += f" · 대기열 확보 {acquired:+.0f}ms"
             if attempts:
                 row += f" · 요청 {attempts}회"
+            # The click's own lateness, which is the number the DOM route is
+            # tuned by — the fire above it is deliberately early and barely
+            # moves, so on its own it says nothing about how the open went.
+            click_late = arm.get("clickLatenessMs")
+            if isinstance(click_late, (int, float)):
+                row += f" · 클릭 {click_late:+.0f}ms"
+                if arm.get("clickTries"):
+                    row += f" ({arm['clickTries']}회 확인)"
             lines.append(row)
+
+        offset_ms = arm.get("entryOffsetMs") or 0
+        if offset_ms:
+            lines.append(f"진입 보정 {offset_ms:+d}ms 적용됨")
+
+        jump_ms = arm.get("clockJumpMs") or 0
+        if jump_ms:
+            lines.append(
+                f"대기 중 기기 시계가 {jump_ms / 1000:+.0f}초 바뀌었습니다 — 발사 시각은 유지됨"
+            )
 
         # Where the time actually went. "It takes too long" is otherwise a
         # feeling; these are the three numbers that make it a measurement.
@@ -1874,6 +2277,10 @@ class NolSniperApp(tk.Tk):
         # the record that decides whether polling across the boundary is even
         # the right method.
         lines.extend(waiting_log_lines(arm))
+        # And what the 예매하기 button was doing either side of the open. On a
+        # NOL product page this is the only record there is — the queue burst
+        # never runs from that origin.
+        lines.extend(click_log_lines(arm))
 
         self.test_result.set("\n".join(lines))
 
@@ -1897,8 +2304,19 @@ class NolSniperApp(tk.Tk):
             status = self.browser.read_autopilot_status() or {}
         if health is None:
             health = self.browser.read_bridge_health()
-        self._render_entry_result(status.get("arm") or {})
         seat = status.get("seat") or {}
+        # A probe answer wins over the last entry result: the probe is what the
+        # user just pressed, and letting a stale entry line overwrite it on the
+        # next 500ms poll would make the button look broken. Latched on the
+        # report's own timestamp so it is drawn once and then released.
+        probe = seat.get("entryProbe")
+        if isinstance(probe, dict) and getattr(self, "_entry_probe_pending", False):
+            if probe.get("at") != getattr(self, "_entry_probe_at", None):
+                self._entry_probe_at = probe.get("at")
+                self._entry_probe_pending = False
+                self._render_entry_probe(probe)
+        else:
+            self._render_entry_result(status.get("arm") or {})
 
         # Once a seat session exists the bitmap is the truthful count, so the
         # show table switches from the API's `remain` to what is actually free.
@@ -1916,12 +2334,37 @@ class NolSniperApp(tk.Tk):
 
 
         tone, headline, why = live_state(seat, health, asked=self._pending_press(seat))
+        # A read that failed once or twice is a document swap in progress, not
+        # news: keep the band on what it said until the page answers again.
+        if int((health or {}).get("failures") or 0) in (1, 2) and bridge_status(health or {})[0] == "failing":
+            return
         # A flash is a message about something the user just did, and the band
         # is repainted twice a second — so it has to be held or it is not shown
         # at all. A caught seat is the one thing nothing may sit on top of.
         colour = TONES.get(tone, FAINT)
         if colour != GREEN and time.monotonic() < self._flash_until:
             return
+        self._draw_band(colour, headline, why)
+
+    def _draw_band(self, colour: str, headline: str, why: str) -> None:
+        """Draw the band without flapping.
+
+        A text-only change has to be seen on two consecutive polls (≈1s)
+        before it is drawn; a mode change, a held seat or a fault is drawn at
+        once. The seat page republishes its message four times a second and
+        two consecutive polls rarely agreed word for word, which is what made
+        the band flicker between 좌석 잡음 and 대기 중.
+        """
+        key = (colour, headline, why)
+        mode = getattr(self, "_mode", "")
+        mode_changed = mode != getattr(self, "_band_mode", None)
+        urgent = colour in (GREEN, AMBER) or mode_changed
+        if key != self._band_drawn and not urgent and key != self._band_candidate:
+            self._band_candidate = key
+            return
+        self._band_candidate = key
+        self._band_drawn = key
+        self._band_mode = mode
         self._set_state(colour, headline, why)
 
     @staticmethod
@@ -2098,60 +2541,113 @@ class NolSniperApp(tk.Tk):
         press a button you had already pressed. A step you have taken is not
         guidance, so once the macro is working this gets out of the way.
         """
-        page = (context or {}).get("page") or ""
+        page = str((context or {}).get("page") or "")
+        url = str((context or {}).get("url") or "")
         seat = seat or {}
-        macro_working = bool(seat.get("running") or seat.get("locked"))
+        arm = getattr(self, "_last_arm_status", None) or {}
         loaded = self._show_info_data
-        on_seat_map = page == "seat"
         goods_on_page = self._browser_goods_code(context)
-
-        if not loaded:
-            if goods_on_page:
-                step, hint = 1, f"예매 창에서 {goods_on_page}를 감지했습니다. 공연 정보를 가져오는 중…"
+        try:
+            health = self.browser.read_bridge_health() or {}
+            bridge_state = bridge_status(health)[0]
+            # One failed read during a navigation is not "offline": the page
+            # is between documents for a poll or two. Lost or never-started is.
+            bridge_live = bridge_state == "live" or (
+                bridge_state == "failing" and int(health.get("failures") or 0) < 3
+            )
+        except Exception:  # noqa: BLE001 - no bridge yet is "not live", not a crash
+            bridge_live = False
+        mode = derive_mode(page=page, url=url, seat=seat, arm=arm, bridge_live=bridge_live)
+        # Hysteresis on the way *down*: the quiet modes (nothing is happening)
+        # must hold for two polls before they replace an active one, so a
+        # document swap mid-entry does not flash 공연 없음 for 500ms. Active
+        # modes are drawn at once — a held seat must never wait.
+        quiet = {"no_show", "ready", "offline", "on_seat"}
+        previous = getattr(self, "_mode", "no_show")
+        if mode in quiet and mode != previous and previous not in quiet:
+            if getattr(self, "_mode_candidate", None) != mode:
+                self._mode_candidate = mode
+                mode = previous
             else:
-                step, hint = 1, "다른 창(NOL 예매)에서 공연을 클릭하세요. 조작판이 자동으로 채워집니다."
-        elif loaded.get("flow") == "legacy-poticket":
-            step, hint = 0, "이 공연은 구형 예매 엔진이라 자동화를 지원하지 않습니다."
-        elif page in {"waiting", "gates"}:
-            step, hint = 3, "대기열 진입 중입니다. 그대로 기다리세요."
-        elif on_seat_map:
-            step, hint = 4, "좌석맵 도착 — [감시 시작]을 누르면 고른 범위를 지켜봅니다."
-        elif self._sale_open():
-            step, hint = 3, "예매 창에서 로그인 후 [예매하기]를 눌러 좌석맵으로 이동하세요."
-        elif self._open_time() is None:
-            step, hint = 2, "티켓 오픈 시각을 알 수 없습니다 — 위에 직접 입력하고 [대기 시작]을 누르세요."
+                self._mode_candidate = None
         else:
-            step, hint = 2, "판매 전입니다. 예매 창에서 로그인해 두고 [대기 시작]을 누르세요."
-
-        self.guidance.set(f"지금 할 일 — {hint}" if step else f"안내 — {hint}")
-        self._show_guidance(not macro_working)
-
-        self._set_enabled(self.btn_arm, step == 2)
-        # The rehearsal arms the real scheduler, so it belongs on the same pages
-        # a real entry does. It had no reference kept, so nothing could disable
-        # it: pressed on the seat map it armed a scheduler with nothing to enter
-        # and reported nothing at all.
+            self._mode_candidate = None
+        opens = self._open_time()
+        phase = sale_phase(opens, datetime.now(KST))
+        open_text = opens.strftime("%m-%d %H:%M") if opens else ""
+        armed_at = getattr(self, "_armed_target_unix", None)
+        if not armed_at:
+            armed_at = (getattr(self, "_last_arm_cfg", None) or {}).get("target_server_unix")
+        if mode == "armed" and armed_at:
+            # The moment this arm fires, not the show's own open: a rehearsal
+            # a minute out must not be labelled with a date months ago.
+            open_text = datetime.fromtimestamp(float(armed_at), KST).strftime("%m-%d %H:%M:%S")
+        rounds = getattr(self, "rounds", None) or []
+        round_picked = bool(rounds) and bool(str(self.play_seq.get() or "").strip())
+        reason = str(seat.get("lastError") or arm.get("lastError") or "")
+        auto_seats = bool(self.auto_start_on.get()) if hasattr(self, "auto_start_on") else True
+        told = mode_guidance(mode, phase, round_picked=round_picked, auto_seats=auto_seats,
+                             open_text=open_text, reason=reason)
+        instruction = told.instruction
+        primary = told.primary
+        if mode == "ready" and not loaded:
+            instruction = (f"예매 창에서 {goods_on_page}를 감지했습니다. 공연 정보를 가져오는 중…"
+                           if goods_on_page else instruction)
+            primary = ""
+        elif loaded and loaded.get("flow") == "legacy-poticket":
+            instruction = "이 공연은 구형 예매 엔진이라 자동화를 지원하지 않습니다."
+            primary = ""
+        self._mode = mode
+        self.mode_banner.set(told.banner)
+        self.mode_text.set(MODE_LABELS.get(mode, mode))
+        self.guidance.set(f"지금 할 일 — {instruction}")
+        # Buttons read the same answer. Exactly one of the two entry buttons is
+        # the primary, and the other says why it is off.
+        idle = mode in {"ready", "halted", "error"} and bool(loaded) and primary != ""
+        arm_on = idle and not told.arm_reason
+        enter_on = idle and not told.enter_reason
+        self._set_enabled(self.btn_arm, arm_on)
+        self._set_enabled(getattr(self, "btn_enter_now", None), enter_on)
+        self._style_button(self.btn_arm, primary == "arm")
+        self._style_button(getattr(self, "btn_enter_now", None), primary == "enter")
+        notes = []
+        if told.arm_reason:
+            notes.append(f"오픈에 자동 진입 — {told.arm_reason}")
+        if told.enter_reason:
+            notes.append(f"지금 진입 — {told.enter_reason}")
+        self.action_note.set("\n".join(notes))
         can_enter = page in {"nol", "goods"}
         self._set_enabled(getattr(self, "btn_test", None), can_enter)
-        self._set_enabled(self.btn_catch, on_seat_map)
-        # Say when a function cannot apply, rather than hiding it. Both stay on
-        # screen; only the explanation changes.
-        if self._show_info_data and self._sale_open():
-            self.open_note.set("판매 중 — 이미 열린 공연이라 대기가 필요 없습니다.")
+        self._set_enabled(self.btn_catch, mode in {"on_seat", "halted"} or (page == "seat" and mode == "error"))
+        self._style_button(self.btn_catch, primary == "catch")
+        if mode in {"no_show", "offline"} or not loaded:
+            self.open_note.set("공연을 열면 오픈 예정인지, 판매 중인지 여기에 표시됩니다.")
+        elif phase == OPEN:
+            self.open_note.set("판매 중 — 이미 열린 공연이라 기다릴 것이 없습니다. [지금 진입]으로 들어갑니다.")
+        elif phase == BEFORE_OPEN:
+            self.open_note.set(f"오픈 예정 {open_text} — [오픈에 자동 진입]을 누르면 오픈 순간 자동으로 들어갑니다.")
         else:
-            self.open_note.set("아직 안 열린 공연 — 열리는 순간 대기열을 먼저 잡습니다.")
+            self.open_note.set("오픈 시각 미확인 — ②에 시각을 넣거나, 이미 열렸으면 [지금 진입]을 누르세요.")
+        self._show_guidance(True)
+
+    @staticmethod
+    def _style_button(widget, primary: bool) -> None:
+        """Filled for the one thing to press, ghost for everything else."""
+        if widget is None:
+            return
+        try:
+            widget.configure(style="Primary.TButton" if primary else "CardGhost.TButton")
+        except Exception:  # noqa: BLE001 - a stand-in without styles
+            pass
 
 
     def _show_guidance(self, visible: bool) -> None:
         """Take the whole tip box away, not just its text — an empty bordered
         panel is louder than no panel."""
-        box = getattr(self, "tip_edge", None)
-        if box is None or not box.winfo_exists():
-            return
-        if visible and not box.winfo_manager():
-            box.pack(fill="x", pady=(16, 0), before=self.aim_card)
-        elif not visible and box.winfo_manager():
-            box.pack_forget()
+        # Kept for its callers; the box stays where it is. Packing it away
+        # while the macro ran shoved every card up by its height, and the mode
+        # banner now says what the macro is doing instead.
+        del visible
 
     def _open_time(self) -> datetime | None:
         """When this show goes on sale, or None if we do not know."""
@@ -2198,7 +2694,22 @@ class NolSniperApp(tk.Tk):
     def _arm_payload(self, *, target_unix: float, offset_seconds: float, dry_run: bool) -> ArmPayload:
         play_date = self.play_date.get().strip().replace("-", "")
         play_seq = self.play_seq.get().strip() or "001"
+        play_time = re.sub(r"\D", "", self.play_time.get().strip())
         goods_code = self._resolved_goods()
+        # The picked round is the one statement of date and time. play_date has
+        # other writers (the API's first date, a remain refresh, the page), and
+        # at the 2026-09-04 12:00 open the arm carried the *open* date with the
+        # round's seq — so the seat map was asked to change to a day that had
+        # no performance. Resolve both from the round list by seq instead.
+        for row in getattr(self, "rounds", None) or []:
+            if str(row.get("play_seq") or "") == play_seq:
+                row_date = re.sub(r"\D", "", str(row.get("play_date") or ""))
+                row_time = re.sub(r"\D", "", str(row.get("play_time") or ""))
+                if len(row_date) == 8:
+                    play_date = row_date
+                if row_time:
+                    play_time = row_time
+                break
         if not play_date.isdigit() or len(play_date) != 8:
             raise NolSniperError("공연일은 YYYYMMDD 형식이어야 합니다")
         return ArmPayload(
@@ -2215,7 +2726,158 @@ class NolSniperApp(tk.Tk):
             channel_code="pc",
             pre_sales="N",
             auto_seats_after_entry=self.auto_start_on.get(),
+            entry_offset_ms=self._entry_offset_ms(),
+            play_time=play_time,
         )
+
+    def _toggle_advanced(self) -> None:
+        opening = not self.advanced_open.get()
+        self.advanced_open.set(opening)
+        self.btn_advanced.configure(text="고급 설정 ▾" if opening else "고급 설정 ▸")
+        if opening:
+            self.advanced_box.pack(fill="x")
+        else:
+            self.advanced_box.pack_forget()
+
+    @staticmethod
+    def _round_label(row: dict[str, str]) -> str:
+        """One round, written the way a ticket buyer reads one.
+
+        `1회차` on its own is the app's word, not the user's — the date and the
+        clock time are what someone is actually choosing between.
+        """
+        date = re.sub(r"\D", "", str(row.get("play_date") or ""))
+        clock = re.sub(r"\D", "", str(row.get("play_time") or ""))
+        seq = str(row.get("play_seq") or "")
+        when = f"{int(date[4:6])}월 {int(date[6:8])}일" if len(date) == 8 else date
+        day = str(row.get("day_of_week") or "")
+        korean_day = {
+            "Mon": "월", "Tue": "화", "Wed": "수", "Thu": "목",
+            "Fri": "금", "Sat": "토", "Sun": "일",
+        }.get(day, "")
+        if korean_day:
+            when += f" ({korean_day})"
+        if len(clock) >= 4:
+            when += f" {clock[:2]}:{clock[2:4]}"
+        return f"{when}  ·  {seq}회차" if seq else when
+
+    def _apply_rounds(self, catalog: dict) -> None:
+        """Fill the picker from what the page published, without fighting the user.
+
+        A selection already made is kept across polls: the catalog is republished
+        four times a second and resetting the box on each one would make the
+        picker impossible to use.
+        """
+        rounds = [row for row in (catalog.get("rounds") or []) if row.get("play_seq")]
+        if not rounds:
+            if not self.rounds:
+                self.round_note.set("공연을 열면 날짜·회차가 여기에 나옵니다.")
+            return
+        labels = [self._round_label(row) for row in rounds]
+        if labels == [self._round_label(row) for row in self.rounds]:
+            return  # unchanged; leave the current selection alone
+        self.rounds = rounds
+        self.round_box.configure(values=labels)
+        self.round_note.set(f"{len(rounds)}개 회차 · 하나를 고르세요.")
+
+        # Pre-select whatever the panel already had, so a show reopened with the
+        # same round does not silently move to a different one.
+        wanted = str(self.play_seq.get() or "").strip()
+        chosen = next((i for i, row in enumerate(rounds)
+                       if str(row.get("play_seq")) == wanted), 0)
+        self.round_box.current(chosen)
+        self._on_round_pick()
+
+        open_date = re.sub(r"\D", "", str(catalog.get("ticket_open_date") or ""))
+        if len(open_date) == 14:
+            self.target_date.set(f"{open_date[:4]}-{open_date[4:6]}-{open_date[6:8]}")
+            self.target_time.set(f"{open_date[8:10]}:{open_date[10:12]}:{open_date[12:14]}")
+
+    def _on_round_pick(self, event=None) -> None:
+        """The picked round becomes the one the entry uses. Nothing else does."""
+        index = self.round_box.current()
+        if index < 0 or index >= len(self.rounds):
+            return
+        row = self.rounds[index]
+        self.play_seq.set(str(row.get("play_seq") or ""))
+        self.play_date.set(re.sub(r"\D", "", str(row.get("play_date") or "")))
+        if row.get("play_time"):
+            self.play_time.set(re.sub(r"\D", "", str(row.get("play_time") or "")))
+        self.round_note.set(f"선택: {self._round_label(row)}")
+        # Only a real click pins the round. `_apply_rounds` calls this too, to
+        # seed the box, and that must not count as the user having decided.
+        if event is not None:
+            self._round_user_picked = True
+
+    def _selected_round_label(self) -> str:
+        index = self.round_box.current() if hasattr(self, "round_box") else -1
+        if 0 <= index < len(self.rounds):
+            return self._round_label(self.rounds[index])
+        return f"{self._pretty_play_date()} · {self.play_seq.get()}회차"
+
+    def enter_now(self) -> None:
+        """지금 진입 — enter an already-open show without waiting for anything.
+
+        The scheduled path counts down to 티켓 오픈, so a show that opened
+        yesterday could only be armed against a moment already gone, which
+        answered 이미 지난 시각입니다 and left no working action at all. This runs
+        the same two entry calls immediately.
+        """
+        try:
+            payload = self._arm_payload(target_unix=time.time(), offset_seconds=0.0, dry_run=False)
+        except Exception as exc:
+            self._note(f"오류: {exc}", error=True)
+            return
+        self._start_worker(lambda: self._enter_now_worker(payload))
+
+    def _enter_now_worker(self, payload: ArmPayload) -> None:
+        try:
+            self._ui(self.status.set, "지금 진입…")
+            if self._park_for_entry(payload.goods_code):
+                self._wait_for_entry_origin(PARK_SETTLE_SECONDS)
+            # enabled=False so publishing the arm cannot also start a scheduled
+            # run beside this one — the command below is the only thing firing.
+            arm = {**payload.to_mapping(), "enabled": False, "fired": False}
+            self.browser.push(arm=arm, reload_autopilot=False, command="enter_now")
+            self._ui(self.status.set, "지금 진입 요청 보냄")
+            self._ui(self._note, "대기열 진입을 시도했습니다 — 예매 창을 확인하세요.")
+        except Exception as exc:
+            self._ui(self.status.set, str(exc))
+            self._ui(self._note, f"오류: {exc}", error=True)
+
+    def _wait_for_entry_origin(self, budget_seconds: float) -> bool:
+        """Block until the 예매 창 reports the entry origin, or the budget runs out.
+
+        Polls the context the bridge already writes rather than sleeping a fixed
+        amount: a fast park should not cost the same as a slow one.
+        """
+        deadline = time.perf_counter() + max(0.0, budget_seconds)
+        while time.perf_counter() < deadline:
+            context = self.browser.read_page_context() or {}
+            if not needs_parking(str(context.get("url") or "")):
+                return True
+            time.sleep(0.2)
+        return False
+
+    def _park_for_entry(self, goods_code: str) -> bool:
+        """Move the 예매 창 onto the origin the entry calls need, if it is not there.
+
+        The credential the fire spends is minted from
+        tickets.interpark.com/api/ticket/v2/reserve-gate/member-info, and that
+        call is 401 from nol.yanolja.com — the browser sends no .interpark.com
+        cookie on a cross-site request, so the session simply is not there.
+        Measured, both origins, on a live login.
+
+        Returns whether it moved, so the caller can give the page time to land
+        before arming against it.
+        """
+        context = self.browser.read_page_context() or {}
+        current = str(context.get("url") or "")
+        if not needs_parking(current):
+            return False
+        self.browser.navigate(park_url(goods_code))
+        self._ui(self.status.set, "예매 창을 예매 출처로 이동…")
+        return True
 
     def _publish_arm(self, payload: ArmPayload) -> None:
         # What the countdown should be counting to. The clock beside it used to
@@ -2223,7 +2885,10 @@ class NolSniperApp(tk.Tk):
         # at all — the one minute you most want a clock for. Counting to the
         # moment that will actually fire is the only reading that cannot
         # disagree with what the macro does.
-        self._armed_target_unix = float(payload.target_server_unix)
+        # The corrected moment, not 티켓 오픈. Counting to the published open
+        # while the macro aims 250ms earlier is two clocks disagreeing on the
+        # one screen you watch during a race.
+        self._armed_target_unix = float(payload.target_server_unix) + payload.entry_offset_ms / 1000
         self._armed_is_test = bool(payload.dry_run) or self._arming_test
         self._push_seat_config(reload_autopilot=True)
         self.browser.push(arm=payload.to_mapping(), reload_autopilot=True, command="run_entry")
@@ -2250,6 +2915,14 @@ class NolSniperApp(tk.Tk):
                 offset_seconds=result.offset_seconds,
                 dry_run=dry_run,
             )
+            # Park before publishing, never after: the arm is what the page acts
+            # on, and pushing it at a page that is about to be navigated away
+            # from arms the document that is leaving.
+            if self._park_for_entry(payload.goods_code):
+                # Long enough for the new document to boot the autopilot, capped
+                # so a park requested seconds before the open cannot eat it.
+                budget = max(0.0, deadline_perf - time.perf_counter() - 0.5)
+                self._wait_for_entry_origin(min(PARK_SETTLE_SECONDS, budget))
             self._publish_arm(payload)
             remaining = max(0.0, deadline_perf - time.perf_counter())
             label = "테스트 예약" if test or dry_run else "정시 예약"
@@ -2260,6 +2933,43 @@ class NolSniperApp(tk.Tk):
         except Exception as exc:
             self._ui(self.status.set, str(exc))
             self._ui(self._note, f"오류: {exc}", error=True)
+
+    def _entry_offset_ms(self) -> int:
+        """The 진입 보정 field, clamped, never raising.
+
+        Read on the way into a race, where refusing to arm over a stray
+        character is worse than ignoring it. The preview line beside the field
+        is what tells you the value did not take.
+        """
+        return clamp_entry_offset_ms(self.entry_offset_ms.get())
+
+    def _refresh_fire_preview(self) -> None:
+        """티켓 오픈 and the moment the correction actually fires at, together.
+
+        Rendered from the same clamp the arm uses, so a value the arm would
+        refuse cannot look accepted here.
+        """
+        raw = self.entry_offset_ms.get().strip()
+        offset = self._entry_offset_ms()
+        try:
+            opens = datetime.strptime(
+                f"{self.target_date.get().strip()} {self.target_time.get().strip()}",
+                "%Y-%m-%d %H:%M:%S",
+            )
+        except ValueError:
+            self.fire_preview.set("")
+            return
+        if not offset:
+            # Say nothing rather than showing the same time twice — the line
+            # exists to make a *difference* visible.
+            self.fire_preview.set(
+                "" if raw in ("", "0", "-0", "+0") else f"'{raw[:8]}'은(는) 숫자가 아닙니다 — 보정 0ms"
+            )
+            return
+        fires = opens + timedelta(milliseconds=offset)
+        self.fire_preview.set(
+            f"티켓 오픈 {opens:%H:%M:%S}.000 → 실제 발사 {fires:%H:%M:%S}.{fires.microsecond // 1000:03d}"
+        )
 
     def _target_time_text(self) -> str:
         """The 티켓 오픈 fields, in the shape parse_target_time accepts.
@@ -2298,6 +3008,56 @@ class NolSniperApp(tk.Tk):
         except Exception as exc:
             self.status.set(f"브라우저 실패: {exc}")
 
+    # How long to leave between attempts at bringing the 예매 창 back, and how
+    # many in a row before giving up and saying so. Relaunching a browser that
+    # cannot start, twice a second, forever, is worse than one clear message.
+    REOPEN_COOLDOWN_S = 3.0
+    REOPEN_MAX_TRIES = 5
+
+    def reopen_browser(self) -> None:
+        """Close whatever is left of the 예매 창 and open a fresh one.
+
+        The login is not at risk: on Windows it lives in Chrome's own profile
+        directory, and on macOS in the session store — neither is touched here.
+
+        This exists because closing the 예매 창 used to mean quitting and
+        relaunching the whole app: the panel kept running against a host that
+        was gone, reported 예매 창 응답 없음 forever, and offered nothing to do
+        about it.
+        """
+        self._reopen_tries = 0
+        self._note("예매 창을 다시 여는 중…")
+        try:
+            self.browser.stop()
+        except Exception as exc:  # noqa: BLE001 - a corpse that will not die is still replaceable
+            self._note(f"이전 예매 창을 정리하지 못했습니다: {exc}", error=True)
+        self._start_browser()
+
+    def _keep_browser_alive(self) -> None:
+        """Bring the 예매 창 back on its own when it goes away.
+
+        Closing the last Chrome window ends the host process, and nothing used
+        to notice. Polled from `_poll_show`, which already runs every 500ms.
+        """
+        if self.browser.running:
+            self._reopen_tries = 0
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_reopen_at", 0.0) < self.REOPEN_COOLDOWN_S:
+            return
+        self._reopen_at = now
+        tries = getattr(self, "_reopen_tries", 0)
+        if tries >= self.REOPEN_MAX_TRIES:
+            # Say it once, then stop trying. The button is still there.
+            if tries == self.REOPEN_MAX_TRIES:
+                self._reopen_tries = tries + 1
+                self._note("예매 창을 다시 열지 못했습니다 — [예매 창 다시 열기]를 눌러 주세요.",
+                           error=True)
+            return
+        self._reopen_tries = tries + 1
+        self._note("예매 창이 닫혔습니다 — 다시 여는 중…")
+        self._start_browser()
+
     def _on_close(self) -> None:
         self.browser.stop()
         self.destroy()
@@ -2325,10 +3085,21 @@ class NolSniperApp(tk.Tk):
         # open overnight kept counting down to an open that had already passed —
         # while the note beside it, which reads datetime.now(), correctly said
         # 판매 중. Re-sync once rather than rendering either of them as truth.
+        #
+        # This catches a manually changed device clock as well as a sleep — the
+        # test is wall-clock against monotonic, and both move them apart. Worth
+        # naming separately, because someone who has just shifted their clock to
+        # make a 예매하기 button appear needs to be told which of the two
+        # readings in front of them the app is going to believe.
+        synced = self.clock.sync_result
+        drift = synced.anchor_drift_seconds if synced else 0.0
         if self.clock.anchor_is_stale() and not self._resyncing:
-            self._resyncing = True
-            self.clock_info.set("기기가 절전에서 깨어났습니다 — 서버 시각 다시 맞추는 중…")
-            self._start_worker(self._resync_worker)
+            self.clock_info.set(
+                "기기 시계가 바뀌었습니다 — 서버 시각 다시 맞추는 중…"
+                if abs(drift) < 600
+                else "기기가 절전에서 깨어났습니다 — 서버 시각 다시 맞추는 중…"
+            )
+            self._resync_now()
 
         result = self.clock.sync_result
         if result is None:
@@ -2378,8 +3149,10 @@ class NolSniperApp(tk.Tk):
             self._show_countdown(None)
             return
 
-        # parse_target_time already returns a unix timestamp.
-        remaining = float(target) - self.clock.server_time_unix()
+        # parse_target_time already returns a unix timestamp. The correction is
+        # applied here too, so the number on screen before you arm is the same
+        # one you will be counting down after.
+        remaining = float(target) + self._entry_offset_ms() / 1000 - self.clock.server_time_unix()
         if remaining <= 0:
             self._show_countdown(None)
             return
@@ -2399,14 +3172,9 @@ class NolSniperApp(tk.Tk):
         label = getattr(self, "countdown_label", None)
         if label is None:
             return
-        if text is None:
-            if label.winfo_manager():
-                label.pack_forget()
-            self.countdown.set("")
-            return
-        self.countdown.set(text)
-        if not label.winfo_manager():
-            label.pack(anchor="w", pady=(14, 0), before=self.btn_arm)
+        # Never packed or unpacked: the label keeps its line and only the text
+        # changes, so nothing below it moves.
+        self.countdown.set("" if text is None else text)
 
     def _ui(self, fn, /, *args, **kwargs) -> None:
         self.after(0, lambda: fn(*args, **kwargs))

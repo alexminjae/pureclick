@@ -24,6 +24,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.clock import KST, NolSniperError  # noqa: E402
+from core.mode import BEFORE_OPEN, MODE_LABELS, OPEN, derive_mode, sale_phase  # noqa: E402
+from core.mode import guidance as mode_guidance  # noqa: E402
+from core.seat import bridge_status  # noqa: E402
 
 _SRC = (ROOT / "mac" / "nolsniper.py").read_text(encoding="utf-8")
 _CLS = next(
@@ -38,20 +41,24 @@ def _methods(*names):
     module = ast.Module(body=body, type_ignores=[])
     ast.fix_missing_locations(module)
     ns: dict = {"datetime": datetime, "timedelta": timedelta, "KST": KST,
-                "NolSniperError": NolSniperError}
+                "NolSniperError": NolSniperError, "derive_mode": derive_mode,
+                "sale_phase": sale_phase, "mode_guidance": mode_guidance,
+                "MODE_LABELS": MODE_LABELS, "OPEN": OPEN, "BEFORE_OPEN": BEFORE_OPEN,
+                "bridge_status": bridge_status}
     exec(compile(module, "<panel>", "exec"), ns)  # noqa: S102 - our own source
     return ns
 
 
 NS = _methods("_update_guidance", "_show_guidance", "_sale_open", "_open_time",
-              "_set_enabled")
+              "_set_enabled", "_style_button")
+
 FUTURE = (datetime.now(KST) + timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
 PAST = (datetime.now(KST) - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 class _Var:
-    def __init__(self) -> None:
-        self.value = ""
+    def __init__(self, value: str = "") -> None:
+        self.value = value
 
     def set(self, value) -> None:
         self.value = str(value)
@@ -63,112 +70,126 @@ class _Var:
 class _Button:
     def __init__(self) -> None:
         self.enabled: bool | None = None
+        self.style = ""
 
     def state(self, flags) -> None:
         self.enabled = "!disabled" in flags
 
+    def configure(self, **kwargs) -> None:
+        self.style = kwargs.get("style", self.style)
 
-class _Box:
-    """Stands in for the tip box, which is packed and unpacked."""
 
-    def __init__(self) -> None:
-        self.shown = True
-
-    def winfo_exists(self) -> bool:
-        return True
-
-    def winfo_manager(self) -> str:
-        return "pack" if self.shown else ""
-
-    def pack(self, **_kwargs) -> None:
-        self.shown = True
-
-    def pack_forget(self) -> None:
-        self.shown = False
+class _Bridge:
+    def read_bridge_health(self) -> dict:
+        return {"seen_at": __import__("time").time(), "failures": 0}
 
 
 class _Panel:
     """Enough of the panel to run _update_guidance without a display."""
 
     def __init__(self, info: dict | None, page: str = "nol",
-                 seat: dict | None = None) -> None:
+                 seat: dict | None = None, arm: dict | None = None,
+                 rounds: bool = True, url: str = "") -> None:
         self._show_info_data = info
         self.guidance = _Var()
         self.open_note = _Var()
+        self.mode_banner = _Var()
+        self.mode_text = _Var()
+        self.action_note = _Var()
+        self.play_seq = _Var("043")
+        self.auto_start_on = _Var("1")
+        self.rounds = [{"play_seq": "043"}] if rounds else []
         self.btn_arm = _Button()
+        self.btn_enter_now = _Button()
         self.btn_catch = _Button()
         self.btn_test = _Button()
-        self.tip_edge = _Box()
-        self.aim_card = None
+        self.browser = _Bridge()
+        self._last_arm_status = arm or {}
         self._open_time = lambda: NS["_open_time"](self)
         self._sale_open = lambda: NS["_sale_open"](self)
         self._browser_goods_code = lambda ctx: (ctx or {}).get("goods_code")
         self._set_enabled = staticmethod(NS["_set_enabled"])
+        self._style_button = staticmethod(NS["_style_button"])
         self._show_guidance = lambda visible: NS["_show_guidance"](self, visible)
-        NS["_update_guidance"](self, {"page": page, "goods_code": "26099999"}, seat)
+        self.update(page, seat, url)
+
+    def update(self, page: str, seat: dict | None = None, url: str = "") -> None:
+        NS["_update_guidance"](self, {"page": page, "goods_code": "26099999", "url": url}, seat)
 
 
 class ArmGateTest(unittest.TestCase):
-    def test_a_show_that_has_not_opened_offers_the_button(self) -> None:
+    def test_a_show_that_has_not_opened_offers_the_arm_only(self) -> None:
         panel = _Panel({"ticket_open_kst": FUTURE})
         self.assertTrue(panel.btn_arm.enabled)
-        self.assertIn("판매 전", panel.guidance.get())
+        self.assertFalse(panel.btn_enter_now.enabled)
+        self.assertEqual(panel.btn_arm.style, "Primary.TButton")
+        self.assertIn("오픈에 자동 진입", panel.guidance.get())
+        self.assertIn("오픈 예정", panel.mode_banner.get())
+        self.assertNotIn("판매 중", panel.mode_banner.get() + panel.guidance.get())
+        self.assertIn("지금 진입", panel.action_note.get())
 
     def test_an_unknown_open_time_is_not_read_as_already_open(self) -> None:
         """The bug. Unknown is not open, and the panel takes a typed time."""
         for unknown in ("", None, "곧 오픈", "미정"):
             panel = _Panel({"ticket_open_kst": unknown})
-            self.assertTrue(
-                panel.btn_arm.enabled, f"locked out by ticket_open_kst={unknown!r}"
-            )
-            self.assertIn("직접 입력", panel.guidance.get())
+            self.assertTrue(panel.btn_arm.enabled, f"locked out by ticket_open_kst={unknown!r}")
+            self.assertTrue(panel.btn_enter_now.enabled)
+            self.assertIn("오픈 시각", panel.guidance.get())
 
-    def test_a_show_already_on_sale_does_not_offer_it(self) -> None:
-        # Deliberate: there is no queue to be first into once the sale is open.
+    def test_a_show_already_on_sale_enters_now(self) -> None:
         panel = _Panel({"ticket_open_kst": PAST})
         self.assertFalse(panel.btn_arm.enabled)
-        self.assertIn("예매하기", panel.guidance.get())
+        self.assertTrue(panel.btn_enter_now.enabled)
+        self.assertEqual(panel.btn_enter_now.style, "Primary.TButton")
+        self.assertIn("지금 진입", panel.guidance.get())
+        self.assertIn("판매 중", panel.mode_banner.get())
+        self.assertIn("오픈에 자동 진입", panel.action_note.get())
+
+    def test_no_round_picked_says_so_first(self) -> None:
+        panel = _Panel({"ticket_open_kst": PAST}, rounds=False)
+        self.assertIn("회차", panel.guidance.get())
 
     def test_the_seat_map_offers_the_watch_instead(self) -> None:
         panel = _Panel({"ticket_open_kst": FUTURE}, page="seat")
         self.assertFalse(panel.btn_arm.enabled)
+        self.assertFalse(panel.btn_enter_now.enabled)
+        self.assertTrue(panel.btn_catch.enabled)
+        self.assertEqual(panel.mode_text.get(), "좌석맵")
+
+
+class ModeBannerTest(unittest.TestCase):
+    """The banner, the instruction and the buttons come from one mode."""
+
+    ON_MAP = {"ticket_open_kst": PAST}
+
+    def test_a_running_watch_is_watching(self) -> None:
+        panel = _Panel(self.ON_MAP, page="seat", seat={"running": True, "runMode": "catch"})
+        self.assertEqual(panel.mode_text.get(), "취켓팅 중")
+        self.assertFalse(panel.btn_enter_now.enabled)
+        self.assertFalse(panel.btn_catch.enabled)
+
+    def test_a_held_seat_is_held_and_never_waiting(self) -> None:
+        panel = _Panel(self.ON_MAP, page="seat", seat={"locked": True, "pageSelected": 1})
+        self.assertEqual(panel.mode_text.get(), "좌석 잡음")
+        self.assertNotIn("대기 중", panel.guidance.get())
+        self.assertIn("결제", panel.guidance.get())
+
+    def test_armed_waits_and_offers_nothing_else(self) -> None:
+        panel = _Panel({"ticket_open_kst": FUTURE}, page="goods", arm={"running": True, "fired": False})
+        self.assertEqual(panel.mode_text.get(), "오픈 대기 중")
+        self.assertFalse(panel.btn_arm.enabled)
+        self.assertFalse(panel.btn_enter_now.enabled)
+
+    def test_stopping_brings_the_actions_back(self) -> None:
+        panel = _Panel(self.ON_MAP, page="seat", seat={"running": True, "runMode": "catch"})
+        panel.update("seat", {"running": False, "haltedByUser": True})
+        self.assertEqual(panel.mode_text.get(), "중지됨")
         self.assertTrue(panel.btn_catch.enabled)
 
-    def test_the_rehearsal_follows_the_same_pages_as_a_real_entry(self) -> None:
-        # It arms the real scheduler, so it can only work where one can run.
-        self.assertTrue(_Panel({"ticket_open_kst": FUTURE}, page="nol").btn_test.enabled)
-        self.assertFalse(_Panel({"ticket_open_kst": FUTURE}, page="seat").btn_test.enabled)
-
-
-class GuidanceStandsDownTest(unittest.TestCase):
-    """지금 할 일 is the only thing on screen addressed to the user, and the live
-    band reports the macro. That division held until the macro started working:
-    `_update_guidance` read `page` and nothing else, so arriving at a seat map
-    pinned it to "[감시 시작]을 누르면…" and it said that while the watch ran and
-    while a seat was held. Two boxes described the same moment, and one of them
-    named a button you had already pressed."""
-
-    ON_MAP = {"ticket_open_kst": FUTURE}
-
-    def test_it_is_there_while_there_is_something_to_press(self) -> None:
-        panel = _Panel(self.ON_MAP, page="seat")
-        self.assertTrue(panel.tip_edge.shown)
-        self.assertIn("감시 시작", panel.guidance.get())
-
-    def test_a_running_watch_takes_it_away(self) -> None:
-        panel = _Panel(self.ON_MAP, page="seat", seat={"running": True})
-        self.assertFalse(panel.tip_edge.shown)
-
-    def test_so_does_a_held_seat(self) -> None:
-        panel = _Panel(self.ON_MAP, page="seat", seat={"locked": True})
-        self.assertFalse(panel.tip_edge.shown)
-
-    def test_and_it_comes_back_when_the_macro_stops(self) -> None:
-        panel = _Panel(self.ON_MAP, page="seat", seat={"running": True})
-        self.assertFalse(panel.tip_edge.shown)
-        NS["_update_guidance"](panel, {"page": "seat", "goods_code": "26099999"},
-                               {"running": False, "haltedByUser": True})
-        self.assertTrue(panel.tip_edge.shown)
+    def test_home_forgets_the_show(self) -> None:
+        panel = _Panel(self.ON_MAP, page="other", url="https://nol.yanolja.com/ticket")
+        self.assertEqual(panel.mode_text.get(), "공연 없음")
+        self.assertFalse(panel.btn_enter_now.enabled)
 
 
 class LookupRetryTest(unittest.TestCase):

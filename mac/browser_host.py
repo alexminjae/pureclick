@@ -86,6 +86,10 @@ COOKIE_SAVE_EVERY = 25
 
 _COMMAND_JS = {
     "run_entry": "window.NOLSniper && NOLSniper.runEntry()",
+    # 지금 진입 — enter immediately rather than waiting for 티켓 오픈. For a show
+    # that is already open there is nothing to count down to, and a greyed
+    # 대기 시작 leaves the user with no action at all.
+    "enter_now": "window.NOLSniper && NOLSniper.enterNow()",
     "run_seats": "window.NOLSniper && NOLSniper.runSeats()",
     "run_catch": "window.NOLSniper && NOLSniper.runCatch()",
     "probe_seats": "window.NOLSniper && NOLSniper.probeSeats()",
@@ -96,9 +100,15 @@ _COMMAND_JS = {
     # One /waiting request from wherever the 예매 창 is, to settle whether entry
     # can be done over the API from this page. Never enters, never navigates.
     "probe_queue_origin": "window.NOLSniper && NOLSniper.probeQueueOrigin()",
+    # 진입 점검 — what the entry would do from wherever the 예매 창 is,
+    # reported without pressing or navigating anything. Safe before an
+    # open, which is the whole point: it replaces shifting the clock.
+    "probe_entry": "window.NOLSniper && NOLSniper.probeEntry()",
     "sync_grades": "window.NOLSniper && NOLSniper.syncGrades()",
     "fetch_show": "window.NOLSniper && NOLSniper.fetchShowCatalog()",
     "stop_all": "window.NOLSniper && NOLSniper.stopAll()",
+    # Give back every held seat and unlock, without stopping the rest.
+    "release_seats": "window.NOLSniper && NOLSniper.releaseHeld()",
     # One instrumented click, then stop. Reports into the persistent trace.
     "diagnose": "window.NOLSniper && NOLSniper.diagnose()",
     "clear_trace": "window.NOLSniper && NOLSniper.clearTrace()",
@@ -576,6 +586,12 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
                     value = snapshot.get(field)
                     if isinstance(value, dict):
                         merge_if_changed(STATE_PATH, key, value)
+                    elif value is None and key == "show_catalog":
+                        # The page says "no show here" (NOL home, 오픈 예정…).
+                        # Only dicts used to be merged, so the previous show's
+                        # catalog outlived the page it came from and the panel
+                        # kept its rounds under a page that had none.
+                        merge_if_changed(STATE_PATH, key, {})
                 failures = 0
                 last_ok = time.time()
                 last_error = ""

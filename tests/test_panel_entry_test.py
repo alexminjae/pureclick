@@ -39,11 +39,12 @@ def _load(name: str):
     from datetime import datetime, timedelta
 
     from core.clock import KST, NolSniperError
-    from core.seat import waiting_log_lines
+    from core.seat import waiting_log_lines, click_log_lines
 
     # A function lifted out of its module has none of that module's globals.
     ns: dict = {
         "waiting_log_lines": waiting_log_lines,
+        "click_log_lines": click_log_lines,
         "datetime": datetime, "timedelta": timedelta,
         "KST": KST, "NolSniperError": NolSniperError,
     }

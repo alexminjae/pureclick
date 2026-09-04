@@ -177,6 +177,13 @@ class BrowserBridge:
         self.health_path = data_dir / ".nolsniper_bridge_health.json"
         self.host_script = mac_dir / f"{_host_module()}.py"
         self.process: subprocess.Popen[str] | None = None
+        # Remembered from the first start so a respawn still tiles.
+        #
+        # push() and navigate() relaunch a dead host without passing any, so a
+        # 예매 창 that came back after being closed opened wherever Chrome felt
+        # like — on top of the panel, usually — which reads as a different bug
+        # entirely from the one that was fixed.
+        self.geometry: tuple[int, int, int, int] | None = None
 
     @property
     def running(self) -> bool:
@@ -184,6 +191,10 @@ class BrowserBridge:
 
     def start(self, *, geometry: tuple[int, int, int, int] | None = None) -> None:
         """Launch the 예매 창. `geometry` tiles it beside the panel."""
+        if geometry is not None:
+            self.geometry = geometry
+        else:
+            geometry = self.geometry
         if self.running:
             return
         # Frozen builds have no interpreter to invoke: sys.executable is the app
@@ -259,6 +270,7 @@ class BrowserBridge:
             "context": as_dict("page_context"),
             "catalog": as_dict("show_catalog"),
             "status": as_dict("autopilot_status"),
+            "arm": as_dict("arm"),
         }
 
     def push(

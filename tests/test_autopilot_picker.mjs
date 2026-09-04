@@ -114,7 +114,16 @@ const sandbox = {
     addEventListener: noop,
   },
   navigator: { userAgent: "node" },
-  performance: { now: () => Date.now() },
+  // Genuinely monotonic, because the difference between this and Date.now() is
+  // now load-bearing: every deadline in the autopilot is measured against
+  // performance.now() precisely so moving the device clock cannot strand one.
+  // Backed by Date.now(), the two were the same clock and no test could tell
+  // them apart — which is exactly the bug being guarded against.
+  performance: { now: () => globalThis.performance.now() },
+  // The host realm's Date, so a test can stub Date.now and have the code under
+  // test see it. The vm realm's own Date is a different object and cannot be
+  // reached from out here.
+  Date,
 };
 sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
@@ -163,6 +172,56 @@ function armFixture({ targetOffsetSeconds }) {
     sandbox.localStorage.removeItem("nolsniper_arm_v1");
     sandbox.localStorage.removeItem("nolsniper_seat_v1");
     sandbox.window.NOLSniper.race.resetReentryState();
+  };
+}
+
+// A stand-in for NOL's own 예매하기, which is rendered disabled and enabled
+// later by the page's own script. Counts its clicks so "did we actually press
+// it" is a fact rather than an inference.
+function bookButton({ disabled = false, text = "예매하기" } = {}) {
+  const attrs = {};
+  return {
+    tagName: "BUTTON",
+    textContent: text,
+    disabled,
+    clicks: 0,
+    style: {},
+    attributes: attrs,
+    getAttribute: (name) => attrs[name] ?? null,
+    setAttribute(name, value) { attrs[name] = String(value); },
+    removeAttribute(name) { delete attrs[name]; },
+    closest: () => null,
+    focus: noop,
+    click() { this.clicks += 1; },
+    dispatchEvent(event) { if (event.type === "click") this.clicks += 1; return true; },
+  };
+}
+
+// Puts `button` behind document.querySelectorAll for the duration. With
+// `enableAfterMs` it flips from disabled to enabled partway through, which is
+// what NOL's page does a beat after the backend opens.
+function withBookButton(button, { enableAfterMs = null } = {}) {
+  const before = sandbox.document.querySelectorAll;
+  const startedAt = Date.now();
+  sandbox.document.querySelectorAll = (selector) => {
+    if (!String(selector).includes("button")) return before(selector);
+    if (enableAfterMs !== null && Date.now() - startedAt >= enableAfterMs) button.disabled = false;
+    return [button];
+  };
+  return () => { sandbox.document.querySelectorAll = before; };
+}
+
+// The smallest arm the click loop reads: a fire moment, `inMs` from now.
+// `windowClosed` shortens the give-up window so the "no button at all" case
+// fails fast instead of spending its full eight seconds.
+function armWithTarget({ inMs, windowClosed = false }) {
+  return {
+    goods_code: "26012515",
+    play_date: "20260901",
+    play_seq: "001",
+    target_server_unix: Date.now() / 1000 + inMs / 1000,
+    entry_offset_ms: 0,
+    ...(windowClosed ? { place_code: "" } : {}),
   };
 }
 
@@ -1852,7 +1911,7 @@ const tests = {
       state.blockedUntil = 0;
       state.blockedEndpoint = "";
       const error = race.noteGatewayBlock(165470, "/onestop/api/seatStatus");
-      assert.ok(state.blockedUntil > Date.now() + 160000, "the cooldown is recorded");
+      assert.ok(state.blockedUntil > race.nowMs() + 160000, "the cooldown is recorded");
       assert.equal(state.blockedEndpoint, "/onestop/api/seatStatus");
       assert.equal(error.gatewayBlockedMs, 165470);
       assert.equal(error.blockedEndpoint, "/onestop/api/seatStatus");
@@ -2797,8 +2856,9 @@ const tests = {
     // Holds expire and carts are abandoned, so a seat taken from under us can
     // genuinely come back — but re-offering it immediately just races the same
     // person again for a seat they are actively holding.
-    const { markSeatTaken, seatInCooldown, sweepTakenCooldowns, state, TAKEN_COOLDOWN_MS } =
+    const { markSeatTaken, seatInCooldown, sweepTakenCooldowns, state, TAKEN_COOLDOWN_MS, nowMs } =
       sandbox.window.NOLSniper.race;
+    const race = { nowMs };
     state.takenUntil.clear();
 
     markSeatTaken("seat-1");
@@ -2807,12 +2867,12 @@ const tests = {
     assert.ok(TAKEN_COOLDOWN_MS >= 10000, "a cooldown shorter than a hold is pointless");
 
     // Expired: it must come back, not stay blacklisted for the run.
-    state.takenUntil.set("seat-1", Date.now() - 1);
+    state.takenUntil.set("seat-1", race.nowMs() - 1);
     assert.equal(seatInCooldown("seat-1"), false, "an expired hold rejoins the pool");
 
     // 취켓팅 runs unbounded, so the map must not grow for the whole sitting.
-    state.takenUntil.set("old", Date.now() - 1);
-    state.takenUntil.set("live", Date.now() + TAKEN_COOLDOWN_MS);
+    state.takenUntil.set("old", race.nowMs() - 1);
+    state.takenUntil.set("live", race.nowMs() + TAKEN_COOLDOWN_MS);
     sweepTakenCooldowns();
     assert.equal(state.takenUntil.has("old"), false, "expired entries are swept");
     assert.equal(state.takenUntil.has("live"), true, "live ones are kept");
@@ -3495,13 +3555,13 @@ const tests = {
 
       race.markSeatUnreachable("s1");
       assert.equal(race.seatUnreachableNow("s1"), true, "parked to begin with");
-      state.unreachableUntil.set("s1", Date.now() - 1);
+      state.unreachableUntil.set("s1", race.nowMs() - 1);
       assert.equal(race.seatUnreachableNow("s1"), false, "and released once it expires");
       assert.equal(state.unreachableUntil.has("s1"), false,
                    "an expired entry is dropped, not left to grow for the sitting");
 
       race.markSeatTaken("s2");
-      state.takenUntil.set("s2", Date.now() - 1);
+      state.takenUntil.set("s2", race.nowMs() - 1);
       assert.equal(race.seatInCooldown("s2"), false, "the lost-race map releases too");
     } finally {
       state.takenUntil.clear();
@@ -3989,6 +4049,183 @@ const tests = {
     );
   },
 
+  // --- the 예매하기 click, which is the route a NOL product page actually uses.
+  //
+  // It used to be one click at exactly T through a finder that skipped disabled
+  // nodes. NOL renders that button disabled until its own client code enables
+  // it, some unpredictable moment after the published open, so the usual
+  // outcome was finding nothing and reporting a missing button — and the only
+  // way to rehearse it was to shift the device clock, which broke the server
+  // clock and taught nothing about the button anyway.
+
+  async "the click loop waits out a disabled 예매하기 instead of giving up"() {
+    const { race } = sandbox.window.NOLSniper;
+    const button = bookButton({ disabled: true });
+    // Enabled a beat after the open, which is the ordinary case.
+    const restore = withBookButton(button, { enableAfterMs: 120 });
+    try {
+      const result = await race.enterFromNolPage(armWithTarget({ inMs: 40 }));
+      assert.equal(result.clicked, true, "it must keep looking until the button goes live");
+      assert.equal(result.route, "dom-click", "and get in by pressing it, not by forcing it");
+      assert.ok(button.clicks > 0, "the real button was clicked");
+      assert.ok(result.tries > 1, "one look is not a loop");
+      assert.ok(
+        race.armState.clickLog.some((row) => row.state === "disabled"),
+        "the wait must be recorded — this is the log that answers 'did it open on time?'",
+      );
+      assert.equal(race.armState.clickLog.at(-1).state, "clicked");
+    } finally {
+      restore();
+    }
+  },
+
+  async "a button that never enables is forced, and the log says so"() {
+    const { race } = sandbox.window.NOLSniper;
+    const button = bookButton({ disabled: true });
+    const restore = withBookButton(button);
+    try {
+      // Target already passed, so the force threshold is behind us: this is the
+      // last resort firing on the first disabled look.
+      const result = await race.enterFromNolPage(armWithTarget({ inMs: -5000 }));
+      assert.equal(result.forced, true);
+      assert.equal(result.route, "dom-click-forced",
+                   "forcing must never be reported as an ordinary click");
+      assert.equal(button.disabled, false, "the attribute is stripped, not worked around");
+      assert.ok(button.clicks > 0);
+      assert.equal(race.armState.clickLog.at(-1).state, "forced");
+    } finally {
+      restore();
+    }
+  },
+
+  async "a missing button and a disabled one are different diagnoses"() {
+    const { race } = sandbox.window.NOLSniper;
+    // No button at all: the login or 본인인증 is wrong, and saying "it never
+    // enabled" would send you looking in the wrong place entirely.
+    await assert.rejects(
+      race.enterFromNolPage(armWithTarget({ inMs: -60000, windowClosed: true })),
+      /찾지 못했습니다/,
+    );
+  },
+
+  "the click log keeps one row per change, not one per poll"() {
+    const { race } = sandbox.window.NOLSniper;
+    race.armState.clickLog = [];
+    for (let i = 0; i < 200; i += 1) race.noteClickAttempt(i, "disabled");
+    race.noteClickAttempt(201, "clicked");
+    assert.equal(race.armState.clickLog.length, 2,
+                 "500 identical rows would bury the only one that matters");
+    assert.equal(race.armState.clickLog[0].repeats, 200);
+  },
+
+  // --- the ms correction
+
+  "the entry offset moves the fire, and every route reads it from one place"() {
+    const { race } = sandbox.window.NOLSniper;
+    const base = { target_server_unix: 1_000_000 };
+    assert.equal(race.armTargetUnix(base), 1_000_000, "no correction means no change");
+    assert.equal(race.armTargetUnix({ ...base, entry_offset_ms: -250 }), 999_999.75);
+    assert.equal(race.armTargetUnix({ ...base, entry_offset_ms: 400 }), 1_000_000.4);
+    assert.equal(race.armTargetUnix({ ...base, entry_offset_ms: "junk" }), 1_000_000,
+                 "an unparseable field must not move the open");
+
+    // A correction applied on one route and not another is a bug that can only
+    // show up on the day it cannot be fixed, so no route may read the raw
+    // field. 진입 점검 is the one exception: it *reports* 티켓 오픈 beside the
+    // corrected fire moment, which is the comparison the field exists for.
+    const routes = source.slice(0, source.indexOf("async function probeEntry()"));
+    const raw = routes.match(/arm\??\.target_server_unix/g) || [];
+    assert.equal(raw.length, 1,
+                 "armTargetUnix is the only place allowed to read the raw target");
+  },
+
+  // --- the clock
+
+  "the fire clock is anchored to the monotonic clock, not the wall clock"() {
+    const { race } = sandbox.window.NOLSniper;
+    const realNow = sandbox.performance.now;
+    const before = { ...race.clockState };
+    try {
+      let perf = 1000;
+      sandbox.performance.now = () => perf;
+      race.anchorClock(0);
+      const at0 = sandbox.window.NOLSniper.serverTimeUnix();
+      // The device clock leaps two hours — someone shifting it forward to make
+      // a not-yet-open show's 예매하기 button appear. The target must not move
+      // with it, or the macro fires two hours early and the panel beside it
+      // keeps counting to the real open.
+      const realDate = Date.now;
+      Date.now = () => realDate() + 7200_000;
+      try {
+        perf += 1000; // one real second later
+        const at1 = sandbox.window.NOLSniper.serverTimeUnix();
+        assert.ok(Math.abs(at1 - at0 - 1) < 0.01,
+                  "one monotonic second must read as one second, whatever the wall clock did");
+        assert.ok(race.clockJumped(), "and the jump must still be detected and reportable");
+        assert.ok(Math.abs(race.clockJumpSeconds() - 7200) < 2);
+      } finally {
+        Date.now = realDate;
+      }
+    } finally {
+      sandbox.performance.now = realNow;
+      Object.assign(race.clockState, before);
+    }
+  },
+
+  "a cooldown survives the device clock being moved"() {
+    const { race } = sandbox.window.NOLSniper;
+    const was = race.state.blockedUntil;
+    const realDate = Date.now;
+    try {
+      race.state.blockedUntil = 0;
+      race.noteGatewayBlock(2000, "/v1/goods/x/waiting");
+      const remaining = race.gatewayBlockRemainingMs();
+      assert.ok(remaining > 1000 && remaining <= 2000);
+      // Set the clock back an hour. A wall-clock deadline would now read as an
+      // hour of lockout that nothing is actually enforcing, and every loop that
+      // consults it — 취켓팅 included — would sit there refusing to work.
+      Date.now = () => realDate() - 3600_000;
+      const after = race.gatewayBlockRemainingMs();
+      assert.ok(Math.abs(after - remaining) < 100,
+                "a block must count down in real elapsed time, not against the device clock");
+    } finally {
+      Date.now = realDate;
+      race.state.blockedUntil = was;
+    }
+  },
+
+  "no deadline in the file is measured against the device clock"() {
+    // The systemic version of the two tests above: every "not before this
+    // moment" value has to be monotonic, or one shifted clock strands it.
+    for (const name of ["blockedUntil", "takenUntil", "unreachableUntil",
+                        "reentryAt", "parkedCheckedAt"]) {
+      const uses = source.split("\n").filter((line) => line.includes(name) && line.includes("Date.now"));
+      assert.deepEqual(uses, [], `${name} must be measured with nowMs(), not Date.now()`);
+    }
+  },
+
+  // --- 진입 점검
+
+  "the entry probe reports what would happen and does none of it"() {
+    // The whole reason it exists: rehearsing an entry before the open used to
+    // mean shifting the device clock, which broke the clock and 취켓팅 and
+    // proved nothing, because a forward-shifted clock does not open a backend.
+    const probe = source.slice(
+      source.indexOf("async function probeEntry()"),
+      source.indexOf("function seatStatusSummary()"),
+    );
+    assert.ok(probe.length > 400, "the probe must exist");
+    assert.doesNotMatch(probe, /location\.href\s*=/, "it must not navigate");
+    assert.doesNotMatch(probe, /openBookSession|enterFromNolPage|forceClick|unlockBookButton/,
+                        "and must not enter or press anything by any route");
+    assert.doesNotMatch(probe, /acquireWaitingUrl/, "one request at most, never the burst");
+    assert.ok((probe.match(/fetchWaitingUrl\(/g) || []).length <= 1);
+    assert.match(probe, /gatewayBlockRemainingMs\(\)/, "and never asks through a block");
+    // The two facts the user cannot get any other way before an open.
+    assert.match(probe, /route:/);
+    assert.match(probe, /pressable:/);
+  },
+
   "the queue-origin probe asks once and never enters"() {
     // It exists to settle two facts about a live session — does the 예매 창 stay
     // on tickets.interpark.com, and does the login reach it — so that entry can
@@ -3998,7 +4235,7 @@ const tests = {
     const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     const probe = source.slice(
       source.indexOf("async function probeQueueOrigin()"),
-      source.indexOf("function seatStatusSummary()"),
+      source.indexOf("async function probeEntry()"),
     );
     assert.ok(probe.length > 400, "the probe must exist");
     assert.doesNotMatch(probe, /location\.href\s*=/, "it must not navigate");
@@ -4056,6 +4293,46 @@ const tests = {
     const budget = race.settleBudgetMs();
     assert.ok(budget >= 1200 && budget <= 1900,
               `the ~1.5s ceiling must survive the faster first look, got ${budget}ms`);
+  },
+
+  // The wait between sweeps, on a venue small enough that one tick reads all of
+  // it. Measured live on 26007416 (겨울왕국): 8 blocks = 4 requests, whole-venue
+  // sweep 50ms median over 33 laps, against a 100ms floor — so a third of the
+  // detect latency was the macro waiting on itself, buying no request budget.
+  "the idle wait shrinks toward the sweep when one tick covers the venue": () => {
+    const race = sandbox.window.NOLSniper.picker;
+    const whole = { requests: 4, sweepTicks: 1, sweepMs: 50 };
+    const got = race.catchIdlePollMs(race.CATCH_MIN_POLL_MS, whole);
+    assert.ok(got < race.CATCH_MIN_POLL_MS,
+              `a finished sweep must not wait out the whole floor, got ${got}ms`);
+    // Bounded by the request-rate ceiling, not by the sweep alone.
+    const perSec = (whole.requests * 1000) / got;
+    assert.ok(perSec <= race.CATCH_MAX_REQUESTS_PER_SEC + 0.5,
+              `${perSec.toFixed(1)} req/s exceeds the ${race.CATCH_MAX_REQUESTS_PER_SEC} ceiling`);
+    assert.ok(got >= race.CATCH_FAST_POLL_MS, `must never go below the hard floor, got ${got}ms`);
+  },
+
+  "a venue that needs several ticks keeps the full floor": () => {
+    const race = sandbox.window.NOLSniper.picker;
+    // 75 blocks at 4 requests a tick — the sweep already spans ticks, so the
+    // wait is holding the request rate down exactly as intended.
+    const got = race.catchIdlePollMs(race.CATCH_MIN_POLL_MS,
+                                     { requests: 38, sweepTicks: 10, sweepMs: 50 });
+    assert.equal(got, race.CATCH_MIN_POLL_MS, "a partial sweep must not speed the tick up");
+  },
+
+  "a slower configured speed is never overridden": () => {
+    const race = sandbox.window.NOLSniper.picker;
+    const asked = 400;
+    assert.equal(race.catchIdlePollMs(asked, { requests: 4, sweepTicks: 1, sweepMs: 50 }), asked,
+                 "an interval the user asked for is a request, not a starting point");
+  },
+
+  "no sweep measurement yet means no change": () => {
+    const race = sandbox.window.NOLSniper.picker;
+    const floor = race.CATCH_MIN_POLL_MS;
+    assert.equal(race.catchIdlePollMs(floor, { requests: 4, sweepTicks: 1, sweepMs: 0 }), floor,
+                 "the first tick has nothing measured and must not guess");
   },
 
   "a small venue passes through the sampler untouched": () => {

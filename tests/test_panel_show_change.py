@@ -71,6 +71,11 @@ class FakePanel:
 
     def _update_zone_summary(self) -> None: ...
     def _refresh_round_line(self) -> None: ...
+
+    # The 일정 picker fills from the same catalog this exercises. It draws
+    # widgets, which this double has none of, so it is a no-op here — the
+    # picker's own behaviour is covered in tests/test_panel_rounds.py.
+    def _apply_rounds(self, catalog: dict) -> None: ...
     def _schedule_zone_map(self) -> None:
         self.redrew = True
 

@@ -46,6 +46,10 @@ START_URL = "https://nol.yanolja.com/ticket"
 # pywebview into a host whose whole point is not to need it.
 _COMMAND_JS = {
     "run_entry": "window.NOLSniper && NOLSniper.runEntry()",
+    # 지금 진입 — enter immediately rather than waiting for 티켓 오픈. For a show
+    # that is already open there is nothing to count down to, and a greyed
+    # 대기 시작 leaves the user with no action at all.
+    "enter_now": "window.NOLSniper && NOLSniper.enterNow()",
     "run_seats": "window.NOLSniper && NOLSniper.runSeats()",
     "run_catch": "window.NOLSniper && NOLSniper.runCatch()",
     "probe_seats": "window.NOLSniper && NOLSniper.probeSeats()",
@@ -56,9 +60,15 @@ _COMMAND_JS = {
     # One /waiting request from wherever the 예매 창 is, to settle whether entry
     # can be done over the API from this page. Never enters, never navigates.
     "probe_queue_origin": "window.NOLSniper && NOLSniper.probeQueueOrigin()",
+    # 진입 점검 — what the entry would do from wherever the 예매 창 is,
+    # reported without pressing or navigating anything. Safe before an
+    # open, which is the whole point: it replaces shifting the clock.
+    "probe_entry": "window.NOLSniper && NOLSniper.probeEntry()",
     "sync_grades": "window.NOLSniper && NOLSniper.syncGrades()",
     "fetch_show": "window.NOLSniper && NOLSniper.fetchShowCatalog()",
     "stop_all": "window.NOLSniper && NOLSniper.stopAll()",
+    # Give back every held seat and unlock, without stopping the rest.
+    "release_seats": "window.NOLSniper && NOLSniper.releaseHeld()",
     "diagnose": "window.NOLSniper && NOLSniper.diagnose()",
     "clear_trace": "window.NOLSniper && NOLSniper.clearTrace()",
 }
@@ -228,28 +238,71 @@ def apply_state(page: cdp.Page) -> None:
         patch_state(STATE_PATH, drop=drop)
 
 
-def watch_state(page: cdp.Page, stop: threading.Event) -> None:
+class PageRef:
+    """The tab the two poller threads are currently driving.
+
+    A level of indirection, so recovering from a closed tab replaces the page
+    rather than the threads. Restarting the threads instead would mean tearing
+    down and rebuilding the only two things that report health, at exactly the
+    moment something has already gone wrong.
+    """
+
+    def __init__(self) -> None:
+        self.page: cdp.Page | None = None
+        self.generation = 0
+
+    def set(self, page: cdp.Page | None) -> None:
+        self.page = page
+        self.generation += 1
+
+
+def watch_state(ref: PageRef, stop: threading.Event) -> None:
     _stage("watch_state thread alive")
     last_mtime = 0.0
+    last_generation = -1
     while not stop.is_set():
+        page = ref.page
+        if page is None:
+            stop.wait(0.12)
+            continue
         try:
+            # A re-attached tab is a fresh document with none of the panel's
+            # config in its localStorage, so the next push has to be applied in
+            # full rather than skipped as "the file has not changed".
+            if ref.generation != last_generation:
+                last_generation = ref.generation
+                last_mtime = 0.0
             mtime = STATE_PATH.stat().st_mtime if STATE_PATH.exists() else 0.0
             if mtime != last_mtime:
                 last_mtime = mtime
                 apply_state(page)
         except OSError:
             pass
+        except cdp.PageGone:
+            # The supervisor owns recovery; this loop only has to not die.
+            stop.wait(0.2)
         except Exception as exc:  # noqa: BLE001 - the loop must outlive one bad push
             _stage(f"apply_state failed: {type(exc).__name__}: {exc}")
         stop.wait(0.12)
 
 
-def poll_context(page: cdp.Page, stop: threading.Event) -> None:
+def poll_context(ref: PageRef, stop: threading.Event) -> None:
     _stage("poll_context thread alive")
     failures = 0
     last_ok = 0.0
     last_error = ""
     while not stop.is_set():
+        page = ref.page
+        if page is None:
+            write_bridge_health({
+                "seen_at": time.time(),
+                "last_ok": last_ok,
+                "failures": failures + 1,
+                "last_error": "예매 창을 다시 여는 중…",
+                **PLATFORM_STATE,
+            })
+            stop.wait(POLL_SECONDS)
+            continue
         try:
             snapshot = page.evaluate(_SNAPSHOT_JS, timeout=EVALUATE_TIMEOUT)
             if isinstance(snapshot, dict):
@@ -261,6 +314,9 @@ def poll_context(page: cdp.Page, stop: threading.Event) -> None:
                     value = snapshot.get(field)
                     if isinstance(value, dict):
                         merge_if_changed(STATE_PATH, key, value)
+                    elif value is None and key == "show_catalog":
+                        # No show on this page: let the panel drop the old one.
+                        merge_if_changed(STATE_PATH, key, {})
                 failures = 0
                 last_ok = time.time()
                 last_error = ""
@@ -281,6 +337,33 @@ def poll_context(page: cdp.Page, stop: threading.Event) -> None:
         stop.wait(POLL_SECONDS)
 
 
+def _open_page(conn: cdp.Connection) -> cdp.Page:
+    """Attach to a tab, install the automation, and put it on the start page."""
+    page = cdp.attach_page(conn)
+    # Before the first navigation, so the popup shim governs the first document.
+    install_document_start_script(page)
+    page.navigate(START_URL)
+    return page
+
+
+def _launch_chrome(chrome: str) -> tuple[subprocess.Popen, cdp.Connection]:
+    flags = _window_flags()
+    proc = cdp.launch(chrome, PROFILE_DIR, "about:blank", extra_flags=flags)
+    _stage(f"chrome launched pid {proc.pid}, profile {PROFILE_DIR}, window {flags or 'default'}")
+    port = cdp.read_port(PROFILE_DIR)
+    conn = cdp.Connection(cdp.browser_ws_url(port))
+    _stage(f"devtools websocket connected on {port}")
+    return proc, conn
+
+
+# How many times to rebuild the 예매 창 before leaving it to the panel. The
+# panel has its own restart and a 다시 열기 button, so this only has to survive
+# the ordinary accidents — a closed tab, a closed window — not fight a Chrome
+# that refuses to start.
+RECOVERY_LIMIT = 5
+RECOVERY_PAUSE_SECONDS = 1.5
+
+
 def main() -> None:
     _stage("main() entered")
     stop = threading.Event()
@@ -294,38 +377,63 @@ def main() -> None:
     PLATFORM_STATE["chrome"] = chrome
     _stage(f"chrome: {chrome}")
 
-    flags = _window_flags()
-    proc = cdp.launch(chrome, PROFILE_DIR, "about:blank", extra_flags=flags)
-    _stage(f"chrome launched pid {proc.pid}, profile {PROFILE_DIR}, window {flags or 'default'}")
+    proc, conn = _launch_chrome(chrome)
+    ref = PageRef()
+    ref.set(_open_page(conn))
+    _stage(f"attached to a page target; document-start: {PLATFORM_STATE['document_start']}")
 
-    port = cdp.read_port(PROFILE_DIR)
-    _stage(f"devtools port {port}")
-    conn = cdp.Connection(cdp.browser_ws_url(port))
-    _stage("devtools websocket connected")
+    threading.Thread(target=watch_state, args=(ref, stop), daemon=True).start()
+    threading.Thread(target=poll_context, args=(ref, stop), daemon=True).start()
+    _stage("threads started; supervising chrome")
 
-    page = cdp.attach_page(conn)
-    _stage("attached to a page target")
-
-    # Before the first navigation, so the popup shim governs the first document.
-    install_document_start_script(page)
-    _stage(f"document-start: {PLATFORM_STATE['document_start']}")
-
-    page.navigate(START_URL)
-    _stage(f"navigated to {START_URL}")
-
-    threading.Thread(target=watch_state, args=(page, stop), daemon=True).start()
-    threading.Thread(target=poll_context, args=(page, stop), daemon=True).start()
-    _stage("threads started; waiting on chrome")
-
+    recoveries = 0
     try:
-        # The 예매 창 closing is Chrome exiting. Poll rather than block so a
-        # KeyboardInterrupt still lands.
-        while proc.poll() is None and not conn.closed.is_set():
-            time.sleep(0.5)
+        while not stop.is_set():
+            # Closing the 예매 창 used to end this process, and closing only the
+            # *tab* used to be worse: Chrome stayed up, so nothing here noticed,
+            # and both pollers ran against a dead session for the rest of the
+            # session. Either way the only fix was quitting and relaunching the
+            # whole app. Both are recoverable, and the login survives both
+            # because it lives in Chrome's own profile directory.
+            page = ref.page
+            browser_gone = proc.poll() is not None or conn.closed.is_set()
+            tab_gone = page is None or not page.alive
+            if not browser_gone and not tab_gone:
+                recoveries = 0
+                time.sleep(0.5)
+                continue
+
+            recoveries += 1
+            if recoveries > RECOVERY_LIMIT:
+                _stage(f"giving up after {RECOVERY_LIMIT} recoveries")
+                break
+
+            ref.set(None)
+            try:
+                if browser_gone:
+                    _stage(f"chrome exited; relaunching ({recoveries}/{RECOVERY_LIMIT})")
+                    conn.close()
+                    if proc.poll() is None:
+                        proc.terminate()
+                    proc, conn = _launch_chrome(chrome)
+                else:
+                    _stage(f"tab closed; re-attaching ({recoveries}/{RECOVERY_LIMIT})")
+                ref.set(_open_page(conn))
+                _stage("예매 창 recovered")
+            except Exception as exc:  # noqa: BLE001 - report and try again, don't die
+                _stage(f"recovery failed: {type(exc).__name__}: {exc}")
+                write_bridge_health({
+                    "seen_at": time.time(),
+                    "last_ok": 0.0,
+                    "failures": recoveries,
+                    "last_error": f"예매 창을 다시 열지 못했습니다: {str(exc)[:120]}",
+                    **PLATFORM_STATE,
+                })
+                time.sleep(RECOVERY_PAUSE_SECONDS)
     except KeyboardInterrupt:
         pass
     finally:
-        _stage("chrome gone; shutting down")
+        _stage("shutting down")
         stop.set()
         conn.close()
         if proc.poll() is None:
