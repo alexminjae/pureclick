@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from core.arm import ENTRY_OFFSET_LIMIT_MS, ArmPayload, browser_config_snippet
+from core.arm import ENTRY_OFFSET_LIMIT_MS, ArmPayload, browser_config_snippet, default_entry_offset_ms
 
 
 class NolSniperArmCoreTests(unittest.TestCase):
@@ -104,3 +104,15 @@ class NolSniperArmCoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EntryLeadTests(unittest.TestCase):
+    def test_default_lead_is_150ms_early(self) -> None:
+        self.assertEqual(default_entry_offset_ms(0), -150)
+        self.assertEqual(default_entry_offset_ms(None), -150)
+
+    def test_a_longer_round_trip_leads_by_the_round_trip(self) -> None:
+        self.assertEqual(default_entry_offset_ms(230), -230)
+
+    def test_the_lead_is_capped(self) -> None:
+        self.assertEqual(default_entry_offset_ms(5000), -600)

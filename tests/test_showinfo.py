@@ -101,7 +101,10 @@ class ShowInfoParsingTests(unittest.TestCase):
         legacy = parse_summary_compatibility(
             {"goodsCode": "26009868", "isIngredientOnestop": False, "isReservedSeat": True}
         )
-        self.assertTrue(any("poticket" in warning for warning in build_warnings(legacy)))
+        # The old-engine flag is a hint, not a fault: it must never produce the
+        # poticket warning that surfaced as a red 문제가 발생했습니다 box over a
+        # perfectly good arm (측정: 드라큘라, 김주택 enter through onestop fine).
+        self.assertFalse(any("poticket" in warning for warning in build_warnings(legacy)))
 
         general = parse_summary_compatibility(
             {"goodsCode": "26010333", "isIngredientOnestop": True, "isReservedSeat": False}
@@ -116,3 +119,26 @@ class ShowInfoParsingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GoodsInfoRoundsTests(unittest.TestCase):
+    """The panel's own round fallback: goods-info → picker-shaped rounds."""
+
+    def test_only_rounds_on_sale_now_are_offered(self) -> None:
+        from core.showinfo import goods_info_rounds
+        payload = {"playSeqList": [
+            {"playSeq": "041", "playDate": "20260904", "playTime": "1930",
+             "saleOpenTime": "20260709140000", "saleCloseTime": "20260904163000"},
+            {"playSeq": "001", "playDate": "20260804", "playTime": "1930",
+             "saleOpenTime": "20260709140000", "saleCloseTime": "20260804163000"},
+            {"playSeq": "120", "playDate": "20261201", "playTime": "1930",
+             "saleOpenTime": "20261101140000", "saleCloseTime": "20261201163000"},
+        ]}
+        rounds = goods_info_rounds(payload, now_compact="20260904120000")
+        self.assertEqual([r["play_seq"] for r in rounds], ["041"])
+        self.assertEqual(rounds[0]["play_date"], "20260904")
+
+    def test_a_bad_payload_is_no_rounds(self) -> None:
+        from core.showinfo import goods_info_rounds
+        self.assertEqual(goods_info_rounds(None), [])
+        self.assertEqual(goods_info_rounds({"path": "/x", "message": "err"}), [])

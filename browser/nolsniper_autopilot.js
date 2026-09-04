@@ -2034,6 +2034,43 @@
    * DOM means three cells reading "4". The month heading inside each slide is
    * what disambiguates them.
    */
+  // The pressed/selected calendar cell, if it is the wanted yyyyMMdd.
+  function activeDateCellFor(wantedDate) {
+    try {
+      const heading = document.querySelector("[class*='EntCalendar_month']");
+      const ym = /^(\d{4})\.(\d{2})$/.exec(((heading && heading.textContent) || "").trim());
+      if (!ym || `${ym[1]}${ym[2]}` !== wantedDate.slice(0, 6)) return null;
+      const day = String(Number(wantedDate.slice(6, 8)));
+      const active = [...document.querySelectorAll(
+        "[class*='EntCalendar_grid'] [aria-pressed='true'], [class*='EntCalendar_grid'] [aria-selected='true'], [class*='EntCalendar_grid'] [class*='selected'], [class*='EntCalendar_grid'] [class*='active']"
+      )];
+      return active.find((el) => (el.textContent || "").replace(/\D/g, "") === day) || null;
+    } catch { return null; }
+  }
+  // The day and time the page currently has pressed on /onestop/schedule.
+  function adoptActiveSelection() {
+    try {
+      const heading = document.querySelector("[class*='EntCalendar_month']");
+      const ym = /^(\d{4})\.(\d{2})$/.exec(((heading && heading.textContent) || "").trim());
+      const cell = document.querySelector(
+        "[class*='EntCalendar_grid'] [aria-pressed='true'], [class*='EntCalendar_grid'] [aria-selected='true'], [class*='EntCalendar_grid'] [class*='selected']"
+      );
+      const day = cell ? (cell.textContent || "").replace(/\D/g, "") : "";
+      if (!ym || !cell || !day) return null;
+      const play_date = `${ym[1]}${ym[2]}${day.padStart(2, "0")}`;
+      const pressed = [...document.querySelectorAll("button[class*='TimeBlock_timeButton']")]
+        .find((b) => b.getAttribute("aria-pressed") === "true" && !b.disabled);
+      const clock = pressed ? (pressed.innerText || pressed.textContent || "").replace(/\s+/g, " ").trim() : "";
+      const m = /(\d{1,2}):(\d{2})\s*(AM|PM)?/i.exec(clock);
+      let play_time = "";
+      if (m) {
+        let h = Number(m[1]) % 12; if (/PM/i.test(m[3] || "")) h += 12;
+        if (!m[3] && Number(m[1]) >= 13) h = Number(m[1]);
+        play_time = `${String(h).padStart(2, "0")}${m[2]}`;
+      }
+      return { cell, play_date, play_time, clock };
+    } catch { return null; }
+  }
   function scheduleDateCells() {
     const cells = new Map();
     // The month is NOT inside each slide: there is exactly one heading in the
@@ -2095,27 +2132,48 @@
   }
 
   async function chooseRoundOnSchedule(arm) {
-    const wantedDate = String(arm.play_date || "").replace(/\D/g, "");
-    if (!wantedDate) return { chose: false, reason: "회차가 선택되지 않았습니다" };
+    let wantedDate = String(arm.play_date || "").replace(/\D/g, "");
+    // No date at all: the page's own selection is the round (adopted below).
+    let adopted = null;
     const deadline = Date.now() + SCHEDULE_STEP_TIMEOUT_MS;
     if (clearScheduleNotice()) {
       updateOverlay("예매 안내 확인 → 회차 선택 중…", "info");
-      await sleep(500);
+      await sleep(200);
     }
 
-    // 1. The date.
+    // 1. The date. A cell already pressed for the wanted day counts as found
+    //    even when the grid parser skips it (its selected styling differs).
     let cell = null;
     let noticeTicks = 0;
     while (Date.now() < deadline) {
-      cell = scheduleDateCells().get(wantedDate) || null;
+      cell = scheduleDateCells().get(wantedDate) || activeDateCellFor(wantedDate);
       if (cell) break;
       if (noticeTicks++ % 4 === 0) clearScheduleNotice();
       await sleep(200);
     }
     if (!cell) {
-      const shownDays = [...scheduleDateCells().keys()];
-      const span = shownDays.length ? ` (달력: ${shownDays[0]}~${shownDays[shownDays.length - 1]})` : "";
-      return { chose: false, reason: `달력에서 공연일 ${wantedDate} 을 찾지 못했습니다${span} — 조작판에서 회차를 다시 고르세요` };
+      // The calendar does not have the wanted day (or none was wanted). If the
+      // page already has a day and a time selected, that selection *is* the
+      // round: adopt it, tell the arm so the seat-page header check agrees,
+      // and go on to [다음] — instead of failing against a date that was never
+      // a round (측정: 엘리자벳, arm said 20260804, calendar 09-01~10-31,
+      // page showed 9/4 7:30 PM selected).
+      adopted = adoptActiveSelection();
+      if (adopted) {
+        wantedDate = adopted.play_date;
+        arm = { ...arm, play_date: adopted.play_date, play_time: adopted.play_time || arm.play_time };
+        try {
+          const saved = loadArmConfig();
+          if (saved) saveArmConfig({ ...saved, play_date: arm.play_date, play_time: arm.play_time });
+          rememberPendingRound(arm);
+        } catch (error) { /* the adoption still drives this step */ }
+        updateOverlay(`화면에 선택된 회차를 사용합니다 · ${adopted.play_date} ${adopted.clock || ""}`, "info");
+        cell = adopted.cell;
+      } else {
+        const shownDays = [...scheduleDateCells().keys()];
+        const span = shownDays.length ? ` (달력: ${shownDays[0]}~${shownDays[shownDays.length - 1]})` : "";
+        return { chose: false, reason: `달력에서 공연일 ${wantedDate || "?"} 을 찾지 못했습니다${span} — 조작판에서 회차를 다시 고르세요` };
+      }
     }
     clearScheduleNotice();
     if (cell.disabled) return { chose: false, reason: "이 날짜는 예매할 수 없습니다" };
@@ -2402,6 +2460,16 @@
           }
         }
       }
+      // Burst: the target already sits entry_offset_ms *before* the open. If
+      // the early shot answered "not open yet" and the published open is still
+      // ahead, the next shot goes out exactly at the open (spin-tight), so
+      // there is always one at -lead and one at 0ms. After that, ease off.
+      const openUnix = target - (Number(arm.entry_offset_ms) || 0) / 1000;
+      const untilOpenMs = (openUnix - serverTimeUnix()) * 1000;
+      if (lastError && lastError.notOpenYet && untilOpenMs > 0 && untilOpenMs < 2000) {
+        await waitUntilServerUnix(openUnix);
+        continue;
+      }
       // Tight while the open is within reach, easing off after it.
       const interval = offsetMs < 1500 ? 80 : offsetMs < 5000 ? 150 : 300;
       await sleep(Math.max(0, interval - (performance.now() - startedPerf)));
@@ -2518,15 +2586,27 @@
    * arm nor the seat catalog has it yet — but the page's own payload does.
    */
   function placeCodeFromPage() {
+    // NOL-native products carry L-prefixed codes (L0000001), not only digits.
     try {
       const html = document.documentElement.innerHTML;
-      const found = html.match(/placeCode\\?":\\?"(\d{6,})/) || html.match(/"placeCode":"(\d{6,})"/);
+      const found = html.match(/placeCode\\?":\\?"([A-Z]?\d{6,})/) || html.match(/"placeCode":"([A-Z]?\d{6,})"/);
       return found ? found[1] : "";
     } catch {
       return "";
     }
   }
 
+  // What the panel says is on screen (goods + place), handed over the bridge
+  // the moment it looks a show up — so rounds can load before any arm exists.
+  function loadShowHint() {
+    try {
+      const raw = localStorage.getItem("nolsniper_show_v1");
+      const value = raw ? JSON.parse(raw) : null;
+      return value && typeof value === "object" ? value : null;
+    } catch {
+      return null;
+    }
+  }
   function scheduleFor(goodsCode, placeCode, bizCode) {
     const key = `${goodsCode}|${placeCode}`;
     if (!goodsCode || !placeCode) return null;
@@ -3215,6 +3295,7 @@
       traceCall("armRefused", null, why);
     };
     if (!arm) return refuse("예약 정보가 없습니다 — 조작판에서 다시 [대기 시작]을 누르세요.");
+    if (loginState() === false) return refuse("[로그인 필요 — 세션이 없습니다] 예매 창에서 로그인한 뒤 다시 누르세요.");
     if (!arm.enabled) return refuse("예약이 꺼져 있습니다.");
     if (arm.fired || armState.fired) return refuse("이미 이번 예약으로 진입했습니다.");
     // Was a bare `return`. When `running` could get stuck true this was the
@@ -3580,6 +3661,12 @@
     return strategy === "left" ? seat.posLeft <= centerX : seat.posLeft >= centerX;
   }
 
+  // 0 for the ground floor (1층/1F/unknown), 1 for anything above it.
+  function floorRank(seat) {
+    const floor = String(seat?.floor || seat?.floorName || "").replace(/\s+/g, "");
+    if (!floor) return 0;
+    return /^(1층|1F|B1|지하|G)/i.test(floor) ? 0 : (/[2-9]층|[2-9]F/i.test(floor) ? 1 : 0);
+  }
   function rankCandidates(
     candidates,
     gradeOrder,
@@ -3602,12 +3689,15 @@
       }
       const [keyA, keyB] = strategyKeys(seat, mode, seed, middle, shape);
 
-      ranked.push({ ...seat, _rank: rank, _posA: keyA, _posB: keyB });
+      ranked.push({ ...seat, _rank: rank, _floor: floorRank(seat), _posA: keyA, _posB: keyB });
     }
     const sorted = ranked.sort((a, b) => {
       // Grade preference still wins outright — a strategy only decides which
       // seat *within* a grade tier.
       if (a._rank !== b._rank) return a._rank - b._rank;
+      // 1층 outranks any upper floor within a grade: a front-centre 2F seat
+      // must never beat a 1F seat on distance alone.
+      if (a._floor !== b._floor) return a._floor - b._floor;
       if (a._posA !== b._posA) return a._posA - b._posA;
       if (a._posB !== b._posB) return a._posB - b._posB;
       if (a.rowNo !== b.rowNo) return String(a.rowNo).localeCompare(String(b.rowNo), "ko", { numeric: true });
@@ -5473,17 +5563,30 @@
       const seq = String(data?.playSeq?.playSeq || data?.playSeq || "");
       return seq ? `${code}:${seq}` : String(code);
     };
+    // Strict goods match: the stored booking session is the *previous* show on
+    // a fresh product/goods page, and keying the sketch off it is what drew
+    // another venue's seats under a new show's name. A key whose goods is not
+    // the show this URL names is no key at all.
     try {
       const direct = withSeq(window.__NEXT_DATA__?.props?.pageProps?.initData);
-      if (direct) return direct;
+      if (direct) return sketchKeyFits(direct) ? direct : null;
     } catch (error) {
       /* fall through */
     }
     try {
-      return withSeq(getInitData());
+      const key = withSeq(getInitData());
+      return sketchKeyFits(key) ? key : null;
     } catch (error) {
       return null;
     }
+  }
+  // Does this sketch key belong to the show the page names? Pages that name no
+  // show (queue, home) cannot contradict it, so they accept any key.
+  function sketchKeyFits(key) {
+    if (!key) return false;
+    const m = location.pathname.match(/\/(?:goods|ticket\/products)\/([A-Z0-9]+)/i);
+    if (!m) return true;
+    return String(key).split(":")[0].toUpperCase() === m[1].toUpperCase();
   }
 
   function parkSketch(points, key = currentSketchKey()) {
@@ -9682,6 +9785,19 @@
     return digits.length >= 8 ? digits.slice(0, 8) : null;
   }
 
+  // Is there a session on this page? true / false / null (cannot tell).
+  // A visible top-bar "로그인" link with no "로그아웃"/"마이" beside it means
+  // logged out. Checked on every poll so the panel warns before the open.
+  function loginState() {
+    try {
+      const bar = document.querySelector("header, nav, [class*='Header'], [class*='header'], [class*='gnb']");
+      const text = ((bar || document.body)?.innerText || "").replace(/\s+/g, " ");
+      if (!text) return null;
+      if (/로그아웃|마이페이지|마이 페이지|MY페이지|내 예매/.test(text)) return true;
+      if (/(^| )로그인( |$)/.test(text) || /로그인\/회원가입/.test(text)) return false;
+      return null;
+    } catch { return null; }
+  }
   function readShowContext() {
     const context = {
       goods_code: null,
@@ -9692,6 +9808,7 @@
       place_code: null,
       ticket_open: null,
       ready: false,
+      logged_in: loginState(),
       url: location.href,
       page: "other",
     };
@@ -9737,11 +9854,22 @@
     const payload = flightPayload();
     if (!context.goods_name) context.goods_name = payloadString(payload, "goodsName");
     if (!context.place_code) context.place_code = payloadString(payload, "placeCode", /\d+/);
-    // Do not fall back to playStartDate on the product page — that is the run's
-    // first night and is why the panel showed 0석 while Aug 28 had seats.
-    if (!context.play_date && context.page !== "nol") {
-      context.play_date = compactDate(payloadString(payload, "playStartDate"));
-    }
+    // Never fall back to playStartDate, on any page. It is the run's first
+    // night, not a round: on the goods page it became the panel's play_date
+    // and then the arm's, and the schedule step went hunting for 20260804 in a
+    // September calendar (측정: 엘리자벳). A missing date stays missing until a
+    // real round supplies it.
+    // The round the panel is aimed at, when the page itself names none: the
+    // overlay then reads the picked 회차 (029) rather than the page default (001).
+    try {
+      const hint = loadShowHint();
+      const hintGoods = String(hint?.goods_code || "").toUpperCase();
+      if (hint && hintGoods && hintGoods === String(context.goods_code || "").toUpperCase()) {
+        if (!context.play_seq && hint.play_seq) context.play_seq = String(hint.play_seq);
+        if (!context.play_date && hint.play_date) context.play_date = compactDate(hint.play_date);
+        if (!context.play_time && hint.play_time) context.play_time = normalizePlayTime(hint.play_time);
+      }
+    } catch (error) { /* a hint is optional */ }
     if (!context.play_seq) context.play_seq = payloadString(payload, "playSeq", /\d{3}/);
     if (!context.ticket_open) context.ticket_open = payloadString(payload, "bookingOpenTime");
 
@@ -9930,10 +10058,18 @@
             play_seq: arm.play_seq, play_time: arm.play_time }
         : null;
       const pending = takePendingRound() || armedRound;
+      // Never two choosers at once, and never the same lost cause twice: bootRoute
+      // fires on every URL/DOM change, and re-launching the chooser for a date
+      // the calendar does not have is what flapped between 회차 맞추는 중 and the
+      // error forever (측정: 엘리자벳, 20260804 vs 20260904).
+      const wantKey = pending ? String(pending.play_date || "") : "";
+      if (pending && (seatState.scheduleChoosing || seatState.scheduleGaveUp === wantKey)) return;
       if (pending) {
+        seatState.scheduleChoosing = true;
         clearScheduleNotice();
         updateOverlay("회차 선택 중…", "info");
         void chooseRoundOnSchedule(pending)
+          .finally(() => { seatState.scheduleChoosing = false; })
           .then((result) => {
             if (result.chose) {
               clearPendingRound();
@@ -9941,6 +10077,8 @@
               updateOverlay("회차 선택 완료", "ok");
             } else {
               armState.lastError = result.reason || "회차를 고르지 못했습니다";
+              // The calendar simply does not have this date: stop, do not loop.
+              if (/찾지 못했습니다|예매할 수 없습니다/.test(armState.lastError)) seatState.scheduleGaveUp = wantKey;
               updateOverlay(armState.lastError, "warn");
             }
           })
@@ -10221,6 +10359,9 @@
         if (!arm.goods_code || !arm.play_seq) {
           return refuse({ ok: false, reason: "공연과 회차를 먼저 고르세요" });
         }
+        if (loginState() === false) {
+          return refuse({ ok: false, reason: "[로그인 필요 — 세션이 없습니다] 예매 창에서 로그인한 뒤 다시 누르세요." });
+        }
         if (!secureUrlUsableHere()) {
           return refuse({
             ok: false,
@@ -10250,7 +10391,7 @@
         }
       },
       auditBlocks: () => auditBlocks(),
-      sketchCache: { parkSketch, parkedSketchFor, restoreParkedSketch, currentSketchKey },
+      sketchCache: { parkSketch, parkedSketchFor, restoreParkedSketch, currentSketchKey, sketchKeyFits },
       syncGrades: () => syncGrades(loadSeatConfig()),
       fetchShowCatalog,
       readShowCatalog: () => {
@@ -10289,8 +10430,12 @@
           // the picker with another show's single round and entry then landed on
           // 일정 선택. The arm is the one statement of which show is being
           // entered, so it outranks anything left over.
-          const goods = String(arm.goods_code || context.goods_code || catalog?.goods_code || "");
-          const place = String(arm.place_code || context.place_code || catalog?.place_code
+          // Trust the hint only for the show the page actually names.
+          const hint = loadShowHint() || {};
+          const pageGoods = String(context.goods_code || "");
+          const hintFits = hint.goods_code && (!pageGoods || String(hint.goods_code) === pageGoods);
+          const goods = String(arm.goods_code || context.goods_code || (hintFits ? hint.goods_code : "") || catalog?.goods_code || "");
+          const place = String(arm.place_code || context.place_code || (hintFits ? hint.place_code : "") || catalog?.place_code
                                || placeCodeFromPage() || "");
           if (catalog && goods && String(catalog.goods_code || goods) !== goods) {
             // Left over from another show; its blocks and sketch are not ours.

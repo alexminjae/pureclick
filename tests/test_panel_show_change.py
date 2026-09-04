@@ -86,6 +86,9 @@ class FakePanel:
     def _load_cached_sketch(self, goods) -> bool:
         return False
 
+    def _clear_zone_canvas(self) -> None:
+        self.canvas_cleared = True
+
     def _apply_blocks(self, blocks: list) -> None:
         self._block_rows = list(blocks)
 
@@ -160,3 +163,139 @@ class ShowChangeTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+rounds_signature = _load("_rounds_signature")
+
+
+class RoundsSignatureTests(unittest.TestCase):
+    """A rounds-only catalog must register as a change, or the picker stays blank."""
+
+    def test_a_round_list_arriving_is_a_change(self) -> None:
+        before = {"goods_code": "26009314"}
+        after = {"goods_code": "26009314", "rounds": [{"play_seq": "041"}, {"play_seq": "106"}]}
+        self.assertNotEqual(rounds_signature(None, before), rounds_signature(None, after))
+
+    def test_the_same_list_is_not_a_change(self) -> None:
+        cat = {"rounds": [{"play_seq": "041"}, {"play_seq": "106"}]}
+        self.assertEqual(rounds_signature(None, cat), rounds_signature(None, dict(cat)))
+        self.assertEqual(rounds_signature(None, None), (0, "", ""))
+
+
+import re as _re
+from core.arm import ArmPayload as _ArmPayload
+from core.clock import NolSniperError as _NolSniperError
+
+_on_round_pick = _load("_on_round_pick")
+_refresh_show_where = _load("_refresh_show_where")
+_refresh_round_line = _load("_refresh_round_line")
+_pretty_play_date = _load("_pretty_play_date")
+_clock_text = _load("_clock_text")
+_row_date = _load("_row_date")
+_row_time = _load("_row_time")
+_round_label = _load("_round_label")
+_arm_payload = _load("_arm_payload")
+# The loaded functions share one namespace; give it what the panel module has,
+# including a stand-in NolSniperApp for the staticmethod cross-calls.
+_NS_APP = type("NolSniperApp", (), {"_row_date": staticmethod(
+    _row_date.__func__ if hasattr(_row_date, "__func__") else _row_date),
+    "_row_time": staticmethod(_row_time.__func__ if hasattr(_row_time, "__func__") else _row_time)})
+for _fn in (_on_round_pick, _refresh_show_where, _refresh_round_line, _pretty_play_date,
+            _clock_text, _row_date, _row_time, _round_label, _arm_payload):
+    (_fn.__func__ if hasattr(_fn, "__func__") else _fn).__globals__.update(
+        {"re": _re, "ArmPayload": _ArmPayload, "NolSniperError": _NolSniperError,
+         "NolSniperApp": _NS_APP})
+_row_date = _row_date.__func__ if hasattr(_row_date, "__func__") else _row_date
+_row_time = _row_time.__func__ if hasattr(_row_time, "__func__") else _row_time
+_clock_text = _clock_text.__func__ if hasattr(_clock_text, "__func__") else _clock_text
+_round_label = _round_label.__func__ if hasattr(_round_label, "__func__") else _round_label
+
+
+class _RoundBox:
+    def __init__(self, index: int) -> None:
+        self._index = index
+    def current(self) -> int:
+        return self._index
+
+
+class _Bridge:
+    def __init__(self) -> None:
+        self.published = []
+    def publish_show(self, goods, place, biz_code="61776", **round_) -> None:
+        self.published.append((goods, place, round_))
+
+
+class _PickPanel:
+    """Just enough panel for a round pick to flow to the card and the page."""
+    ROUNDS = [
+        {"play_seq": "026", "play_date": "20260905", "play_time": "1400"},
+        {"play_seq": "029", "play_date": "20260908", "play_time": "1930"},
+    ]
+    def __init__(self, index: int) -> None:
+        self.rounds = list(self.ROUNDS)
+        self.round_box = _RoundBox(index)
+        self.play_seq = FakeVar("026"); self.play_date = FakeVar("20260905"); self.play_time = FakeVar("1400")
+        self.goods_code = FakeVar("26009314"); self.place_code = FakeVar("26000011")
+        self.round_note = FakeVar(); self.show_where = FakeVar(); self.show_round = FakeVar()
+        self._show_info_data = {"place_name": "블루스퀘어"}
+        self._round_user_picked = False
+        self.browser = _Bridge()
+        self.entry_offset_ms = FakeVar("0"); self.auto_start_on = FakeVar("1")
+    # bound helpers
+    def _row_date(self, row): return _row_date(row)
+    def _row_time(self, row): return _row_time(row)
+    def _round_label(self, row): return _round_label(row)
+    def _clock_text(self, v): return _clock_text(v)
+    def _pretty_play_date(self, raw=None): return _pretty_play_date(self, raw)
+    def _refresh_show_where(self, **kw): _refresh_show_where(self, **kw)
+    def _refresh_round_line(self): _refresh_round_line(self)
+    def _publish_round_hint(self):
+        self.browser.publish_show(self.goods_code.get(), self.place_code.get(),
+                                  play_seq=self.play_seq.get(), play_date=self.play_date.get(),
+                                  play_time=self.play_time.get())
+    def _resolved_goods(self): return self.goods_code.get()
+    def _entry_offset_ms(self): return 0
+    def get(self): return "1"
+
+
+class RoundPickSyncTests(unittest.TestCase):
+    """Picking 029 must move the card subtitle and the page hint to 029."""
+
+    def test_the_subtitle_follows_the_pick(self) -> None:
+        panel = _PickPanel(1)
+        _on_round_pick(panel, event=object())
+        self.assertEqual(panel.play_seq.get(), "029")
+        self.assertEqual(panel.play_date.get(), "20260908")
+        self.assertEqual(panel.play_time.get(), "1930")
+        self.assertIn("2026.09.08", panel.show_where.get())
+        self.assertIn("19:30", panel.show_where.get())
+        self.assertIn("회차 029", panel.show_where.get())
+        self.assertNotIn("회차 026", panel.show_where.get())
+        self.assertTrue(panel._round_user_picked)
+
+    def test_the_page_is_told_the_picked_round(self) -> None:
+        panel = _PickPanel(1)
+        _on_round_pick(panel)
+        goods, place, round_ = panel.browser.published[-1]
+        self.assertEqual((goods, place), ("26009314", "26000011"))
+        self.assertEqual(round_["play_seq"], "029")
+        self.assertEqual(round_["play_date"], "20260908")
+
+
+class ArmRoundSyncTests(unittest.TestCase):
+    """The arm carries the picked round, never a stale date left in the field."""
+
+    def test_a_stale_play_date_cannot_reach_the_arm(self) -> None:
+        panel = _PickPanel(1)
+        panel.play_seq.set("029"); panel.play_date.set("20260804")  # stale premiere date
+        panel.auto_start_on = FakeVar("1")
+        payload = _arm_payload(panel, target_unix=1.0, offset_seconds=0.0, dry_run=False)
+        self.assertEqual(payload.play_seq, "029")
+        self.assertEqual(payload.play_date, "20260908")
+        self.assertEqual(payload.play_time, "1930")
+
+    def test_an_unknown_seq_falls_back_to_the_picker_selection(self) -> None:
+        panel = _PickPanel(1)
+        panel.play_seq.set("001"); panel.play_date.set("20260804")
+        payload = _arm_payload(panel, target_unix=1.0, offset_seconds=0.0, dry_run=False)
+        self.assertEqual((payload.play_seq, payload.play_date), ("029", "20260908"))

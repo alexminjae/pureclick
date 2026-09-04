@@ -221,6 +221,65 @@ def normalize_play_time(value: str | None) -> str:
     return f"{int(match.group(1)):02d}:{match.group(2)}"
 
 
+def goods_info_rounds(payload: Any, now_compact: str | None = None) -> list[dict[str, Any]]:
+    """The bookable rounds in a reserve-gate goods-info answer, panel-shaped.
+
+    Mirrors the page's bookableRounds: only rounds whose sale is open now and
+    not yet closed. Pure, so the shape is testable without the network.
+    """
+    from datetime import datetime, timedelta, timezone
+    now = now_compact or datetime.now(timezone(timedelta(hours=9))).strftime("%Y%m%d%H%M%S")
+    rows = (payload or {}).get("playSeqList") if isinstance(payload, dict) else None
+    out: list[dict[str, Any]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        seq = str(row.get("playSeq") or "")
+        date = str(row.get("playDate") or "")
+        if not seq or len(date) < 8:
+            continue
+        open_at = str(row.get("saleOpenTime") or "")
+        close_at = str(row.get("saleCloseTime") or "")
+        if open_at and open_at > now:
+            continue
+        if close_at and close_at < now:
+            continue
+        out.append({
+            "play_seq": seq,
+            "play_date": date[:8],
+            "play_time": str(row.get("playTime") or ""),
+            "day_of_week": str(row.get("dayOfWeek") or ""),
+            "sale_open_time": open_at,
+            "sale_close_time": close_at,
+        })
+    return out
+
+
+def fetch_goods_info_rounds(goods_code: str, place_code: str, *, biz_code: str = "61776",
+                            timeout: float = 8.0) -> tuple[list[dict[str, Any]], str]:
+    """Rounds straight from reserve-gate/goods-info — the panel's own fallback.
+
+    The page normally publishes these, but only once its own fetch has run and
+    the panel has noticed; this lets the picker fill the moment a show is
+    looked up. Returns (rounds, ticket_open_date). Public endpoint: measured
+    to answer without a session.
+    """
+    if not goods_code or not place_code:
+        return [], ""
+    url = (
+        "https://tickets.interpark.com/api/ticket/v2/reserve-gate/goods-info"
+        f"?bizCode={urllib.parse.quote(str(biz_code))}&goodsCode={urllib.parse.quote(str(goods_code))}"
+        f"&lang=ko&placeCode={urllib.parse.quote(str(place_code))}"
+    )
+    request = urllib.request.Request(url, headers={"User-Agent": BROWSER_UA, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
+        raise ShowInfoError(f"goods-info → {error}") from error
+    return goods_info_rounds(payload), str((payload or {}).get("ticketOpenDate") or "")
+
+
 def fetch_nol_schedules(
     goods_code: str,
     place_code: str,
@@ -319,11 +378,10 @@ def fetch_round_remains(
 def build_warnings(compatibility: ShowCompatibility) -> list[str]:
     warnings: list[str] = []
     flow = compatibility.flow_label
-    if flow == "legacy-poticket":
-        warnings.append(
-            "이 공연은 구형 poticket 엔진입니다. 원스탑 좌석 API가 없어 자동 선점을 지원하지 않습니다."
-        )
-    elif flow == "onestop-general-admission":
+    # No legacy-poticket warning: shows that carry the old engine flag enter
+    # through onestop routinely (측정: 드라큘라, 김주택), and the text landed in
+    # the panel as a red "문제가 발생했습니다" box over a perfectly good arm.
+    if flow == "onestop-general-admission":
         warnings.append(
             "비지정석/입장권 상품입니다. 좌석 선택 단계가 없으므로 매수만 지정해 결제 단계로 진행합니다."
         )

@@ -19,6 +19,28 @@ SEAT_STORAGE_KEY = "nolsniper_seat_v1"
 ENTRY_OFFSET_LIMIT_MS = 5000
 
 
+# The default lead when the user leaves 진입 보정 at 0: fire this far *before*
+# 티켓 오픈 so the request lands on the server at the open, not one RTT after it.
+# Measured 2026-09-04 15:00: firing at 0ms cost ~150ms of round trip and rows 1-5.
+DEFAULT_ENTRY_LEAD_MS = 150
+MAX_ENTRY_LEAD_MS = 600
+
+
+def default_entry_offset_ms(rtt_ms: object) -> int:
+    """The negative offset to arm with when none was typed.
+
+    At least DEFAULT_ENTRY_LEAD_MS early; more when the measured round trip is
+    longer than that, never more than MAX_ENTRY_LEAD_MS (a wild RTT sample must
+    not fire seconds early into UnableReservationTime).
+    """
+    try:
+        rtt = float(rtt_ms or 0)
+    except (TypeError, ValueError):
+        rtt = 0.0
+    lead = max(DEFAULT_ENTRY_LEAD_MS, int(round(rtt)))
+    return -min(MAX_ENTRY_LEAD_MS, lead)
+
+
 def clamp_entry_offset_ms(value: object) -> int:
     """The offset as a whole number of milliseconds, inside the allowed range.
 

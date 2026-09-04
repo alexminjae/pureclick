@@ -1,0 +1,8 @@
+{
+  "name": "nolsniper",
+  "private": true,
+  "description": "NOL Sniper — test runner for the in-page autopilot",
+  "scripts": {
+    "test": "node tests/test_autopilot_picker.mjs"
+  }
+}

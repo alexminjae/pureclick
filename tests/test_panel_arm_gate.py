@@ -114,8 +114,8 @@ class _Panel:
         self._show_guidance = lambda visible: NS["_show_guidance"](self, visible)
         self.update(page, seat, url)
 
-    def update(self, page: str, seat: dict | None = None, url: str = "") -> None:
-        NS["_update_guidance"](self, {"page": page, "goods_code": "26099999", "url": url}, seat)
+    def update(self, page: str, seat: dict | None = None, url: str = "", **ctx) -> None:
+        NS["_update_guidance"](self, {"page": page, "goods_code": "26099999", "url": url, **ctx}, seat)
 
 
 class ArmGateTest(unittest.TestCase):
@@ -156,6 +156,20 @@ class ArmGateTest(unittest.TestCase):
         self.assertFalse(panel.btn_enter_now.enabled)
         self.assertTrue(panel.btn_catch.enabled)
         self.assertEqual(panel.mode_text.get(), "좌석맵")
+
+
+class LoginWatchdogTest(unittest.TestCase):
+    def test_no_session_disables_entry_and_says_so(self) -> None:
+        panel = _Panel({"ticket_open_kst": PAST})
+        panel.update("nol", logged_in=False)
+        self.assertIn("로그인 필요", panel.mode_banner.get())
+        self.assertFalse(panel.btn_enter_now.enabled)
+        self.assertFalse(panel.btn_arm.enabled)
+
+    def test_a_session_keeps_entry_on(self) -> None:
+        panel = _Panel({"ticket_open_kst": PAST})
+        panel.update("nol", logged_in=True)
+        self.assertTrue(panel.btn_enter_now.enabled)
 
 
 class ModeBannerTest(unittest.TestCase):

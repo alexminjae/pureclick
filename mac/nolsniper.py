@@ -19,7 +19,7 @@ if str(MAC_DIR) not in sys.path:
     sys.path.insert(0, str(MAC_DIR))
 
 from browser_bridge import BrowserBridge  # noqa: E402
-from core.arm import ArmPayload, clamp_entry_offset_ms  # noqa: E402
+from core.arm import ArmPayload, clamp_entry_offset_ms, default_entry_offset_ms  # noqa: E402
 from core.entry import needs_parking, park_url  # noqa: E402
 from core.mode import (  # noqa: E402
     BEFORE_OPEN, MODE_LABELS, OPEN, derive_mode, guidance as mode_guidance, sale_phase,
@@ -37,7 +37,7 @@ from core.seat import (  # noqa: E402
     click_log_lines,
     serialize_preferences,
 )
-from core.showinfo import seat_table_lines, fetch_round_remains, fetch_show_catalog  # noqa: E402
+from core.showinfo import seat_table_lines, fetch_round_remains, fetch_show_catalog, fetch_goods_info_rounds  # noqa: E402
 from core.watch_trigger import TriggerState, next_trigger_state  # noqa: E402
 from core.zone_map import (  # noqa: E402
     block_keys_in_watch_rect,
@@ -118,6 +118,8 @@ class NolSniperApp(tk.Tk):
     # Aiming strategies, in the order they appear in the picker.
     # All three go for the stage first; the label's tail says which side of the
     # house to look at when several seats are equally close.
+    NO_SKETCH_NOTICE = ("아직 좌석 배치도가 저장되지 않은 공연입니다. "
+                        "[지금 진입] 후 실제 공연장 좌석도가 동기화됩니다.")
     STRATEGY_LABELS = {
         "center": "무대 가까운 순 · 가운데 (기본)",
         "left": "무대 가까운 순 · 왼쪽",
@@ -590,21 +592,9 @@ class NolSniperApp(tk.Tk):
         # Kept because the tip box above is packed and unpacked as the macro
         # starts and stops, and `before=` is how it returns to its own place
         # rather than to the bottom of the column.
-        aim = self._card(root, "좌석 고르는 순서")
-        self.aim_card = aim.master.master
-        pick = ttk.Frame(aim, style="Card.TFrame")
-        pick.pack(fill="x")
-        pick.columnconfigure(0, weight=1)
-        self.strategy_box = ttk.Combobox(pick, values=list(self.STRATEGY_LABELS.values()),
-                                         state="readonly")
-        self.strategy_box.grid(row=0, column=0, sticky="ew")
-        self.strategy_box.set(
-            self.STRATEGY_LABELS.get(self.seat_strategy.get(), self.STRATEGY_LABELS["center"])
-        )
-        self.strategy_box.bind("<<ComboboxSelected>>", self._on_strategy_pick)
-        ttk.Label(pick, text="매수", style="CardFaint.TLabel").grid(row=0, column=1, padx=(12, 6))
-        ttk.Combobox(pick, textvariable=self.quantity, values=["1", "2", "3", "4"],
-                     state="readonly", width=3).grid(row=0, column=2)
+        # 좌석 고르는 순서 and 매수 now live under 고급 설정 (built below); the
+        # main surface is show → round → checkbox → one action.
+        self.aim_card = None
         # The per-attempt ranking used to be drawn here — stage distances, the
         # top five candidates, and what each kind of map move cost. It changed
         # on every poll and resized the card with it, which shoved the whole
@@ -627,20 +617,10 @@ class NolSniperApp(tk.Tk):
                  justify="left", wraplength=wrap - 40,
                  font=(UI_FONT, 11)).pack(fill="x", pady=(4, 0))
 
-        # --- 2. When ------------------------------------------------------------
+        # --- 2. The one action --------------------------------------------------
+        # (티켓 오픈 시각 is filled from the picked round and lives under 고급.)
         tk.Frame(openq, bg=BORDER, height=1).pack(fill="x", pady=(14, 12))
-        when = tk.Frame(openq, bg=PANEL)
-        when.pack(fill="x")
-        tk.Label(when, text="② 티켓 오픈", bg=PANEL, fg=FG,
-                 font=(UI_FONT, 12, "bold")).pack(side="left", padx=(0, 10))
-        ttk.Entry(when, textvariable=self.target_date, width=11).pack(side="left")
-        ttk.Entry(when, textvariable=self.target_time, width=9).pack(side="left", padx=(6, 0))
-        tk.Label(openq, text="회차를 고르면 자동으로 채워집니다.", bg=PANEL, fg=FAINT,
-                 anchor="w", font=(UI_FONT, 11)).pack(anchor="w", pady=(4, 0))
-
-        # --- 3. The one action --------------------------------------------------
-        tk.Frame(openq, bg=BORDER, height=1).pack(fill="x", pady=(14, 12))
-        tk.Label(openq, text="③ 실행", bg=PANEL, fg=FG,
+        tk.Label(openq, text="② 실행", bg=PANEL, fg=FG,
                  font=(UI_FONT, 12, "bold"), anchor="w").pack(anchor="w", pady=(0, 8))
 
         # Always packed, blank when there is nothing to count: packing and
@@ -695,6 +675,31 @@ class NolSniperApp(tk.Tk):
                                        command=self._toggle_advanced)
         self.btn_advanced.pack(fill="x")
         self.advanced_box = tk.Frame(openq, bg=PANEL)
+        self.aim_card = self.advanced_box
+        # 티켓 오픈 시각 — normally filled from the picked round; editable here
+        # for a show whose open time the API does not know.
+        when = tk.Frame(self.advanced_box, bg=PANEL)
+        when.pack(fill="x", pady=(12, 0))
+        tk.Label(when, text="티켓 오픈", bg=PANEL, fg=MUTED,
+                 font=(UI_FONT, 11)).pack(side="left", padx=(0, 10))
+        ttk.Entry(when, textvariable=self.target_date, width=11).pack(side="left")
+        ttk.Entry(when, textvariable=self.target_time, width=9).pack(side="left", padx=(6, 0))
+        tk.Label(self.advanced_box, text="회차를 고르면 자동으로 채워집니다.", bg=PANEL, fg=FAINT,
+                 anchor="w", font=(UI_FONT, 11)).pack(anchor="w", pady=(2, 0))
+        # 좌석 고르는 순서 and 매수.
+        pick = tk.Frame(self.advanced_box, bg=PANEL)
+        pick.pack(fill="x", pady=(12, 0))
+        pick.columnconfigure(0, weight=1)
+        self.strategy_box = ttk.Combobox(pick, values=list(self.STRATEGY_LABELS.values()),
+                                         state="readonly")
+        self.strategy_box.grid(row=0, column=0, sticky="ew")
+        self.strategy_box.set(
+            self.STRATEGY_LABELS.get(self.seat_strategy.get(), self.STRATEGY_LABELS["center"])
+        )
+        self.strategy_box.bind("<<ComboboxSelected>>", self._on_strategy_pick)
+        tk.Label(pick, text="매수", bg=PANEL, fg=FAINT, font=(UI_FONT, 11)).grid(row=0, column=1, padx=(12, 6))
+        ttk.Combobox(pick, textvariable=self.quantity, values=["1", "2", "3", "4"],
+                     state="readonly", width=3).grid(row=0, column=2)
 
         # The ms correction. Off the main surface: entry is a single API call
         # the server timestamps itself, so there is nothing here for a normal
@@ -912,9 +917,14 @@ class NolSniperApp(tk.Tk):
             self.delivery.set(preferences.delivery)
             self.payment.set(preferences.payment)
             self.discord.set(preferences.discord_webhook)
-            self.seat_strategy.set(
-                self.LEGACY_STRATEGIES.get(preferences.seat_strategy, preferences.seat_strategy)
+            strategy = self.LEGACY_STRATEGIES.get(
+                preferences.seat_strategy, preferences.seat_strategy
             )
+            # 가운데 is the default: an empty or unrecognised saved strategy
+            # loads as 무대 가까운 순 · 가운데 rather than a stale side choice.
+            if strategy not in self.STRATEGY_LABELS:
+                strategy = "center"
+            self.seat_strategy.set(strategy)
             self.auto_assign_on.set(preferences.auto_assign)
             self.reentry_on.set(preferences.reentry)
             self.entry_offset_ms.set(str(preferences.entry_offset_ms))
@@ -1063,10 +1073,19 @@ class NolSniperApp(tk.Tk):
             self._auto_loaded_code = code
         if info.get("place_code"):
             self.place_code.set(str(info["place_code"]))
+        # Hand goods + place to the page now, not at arm time: the 일정 picker
+        # fills from goods-info, which needs the place code the page often
+        # cannot read for itself (측정: 엘리자벳 blank, 드라큘라 L-code).
+        try:
+            self.browser.publish_show(str(info.get("goods_code") or self.goods_code.get()),
+                                      str(info.get("place_code") or self.place_code.get()))
+        except Exception:  # noqa: BLE001 - a hint, never a blocker
+            pass
         # The API only knows the run's first date; if the browser is showing a
         # particular date, that is the one being booked.
-        if info.get("play_start_date") and not self.play_date.get().strip():
-            self.play_date.set(str(info["play_start_date"]))
+        # Deliberately NOT seeding play_date from play_start_date: that is the
+        # run's first night, not a round, and it leaked into the arm as the date
+        # to enter. The picker sets play_date from the chosen round instead.
         play_seqs = info.get("play_seqs") or []
         if play_seqs and self.play_seq.get() not in play_seqs:
             self.play_seq.set(str(play_seqs[0]))
@@ -1087,15 +1106,26 @@ class NolSniperApp(tk.Tk):
         # Collected and then dropped into an unrendered variable — these say
         # things like "등급 정보를 가져오지 못했습니다", which is exactly what a
         # confused user needs to see.
-        warnings = list(info.get("warnings") or []) + list(info.get("errors") or [])
-        if info.get("flow") == "legacy-poticket":
-            self.status.set("이 공연은 구형 엔진이라 자동 선점을 지원하지 않습니다")
-        else:
+        warnings = list(info.get("warnings") or [])
+        errors = list(info.get("errors") or [])
+        # Never overwrite a live arm's band: 오픈 대기 중 must stay clean. The
+        # lookup result goes to the status line only when nothing is running.
+        if not getattr(self, "_armed_target_unix", None):
             self.status.set(f"공연 불러옴 · 등급 {len(self._grade_rows)}개")
-        if warnings:
-            self._note(" · ".join(warnings), error=True)
+        if errors:
+            # A real failure to read the show — the only thing worth a red box.
+            self._note(" · ".join(errors), error=True)
+        elif warnings:
+            # Informational (입장권, 스포츠…): the reason line, never the red box.
+            self._note(" · ".join(warnings))
         else:
             self._note(f"상품 {info.get('goods_code')} · 회차 {self.play_seq.get()}")
+        # The picker must never sit blank: if the page has not delivered rounds
+        # yet, ask goods-info directly with the place code we now hold.
+        if not (getattr(self, "rounds", None) or []):
+            goods = str(info.get("goods_code") or self.goods_code.get() or "")
+            place = str(info.get("place_code") or self.place_code.get() or "")
+            self._start_worker(lambda: self._fetch_rounds_fallback(goods, place))
         self._update_guidance(self.browser.read_page_context())
         # Initial lookup uses play_start_date (often 0석). If the 예매판 already
         # has a date/round selected, replace those zeros immediately.
@@ -1132,9 +1162,12 @@ class NolSniperApp(tk.Tk):
         info = self._show_info_data or {}
         place_text = place if place is not None else str(info.get("place_name") or "")
         pretty = self._pretty_play_date()
-        time_text = self.play_time.get().strip()
-        round_text = " ".join(part for part in (pretty, time_text) if part)
-        self.show_where.set(" · ".join(part for part in (round_text, place_text) if part) or place_text)
+        time_text = self._clock_text(self.play_time.get())
+        seq = self.play_seq.get().strip()
+        parts = [part for part in (pretty, time_text) if part]
+        if seq:
+            parts.append(f"회차 {seq}")
+        self.show_where.set(" · ".join(part for part in (" · ".join(parts), place_text) if part) or place_text)
 
     def _grade_remain_signature(self, rows: list[dict] | None = None) -> tuple:
         source = rows if rows is not None else self._grade_rows
@@ -1326,10 +1359,10 @@ class NolSniperApp(tk.Tk):
                 code = self.goods_code.get().strip() or self._resolved_goods()
             except Exception:  # noqa: BLE001 - no code yet is fine; default map covers it
                 code = ""
-            if not (code and self._load_cached_sketch(code)):
-                self._zone_sketch = self._default_venue_sketch()
-                if not self._block_rows:
-                    self._apply_blocks(self._default_venue_blocks())
+            if code:
+                self._load_cached_sketch(code)
+            # No cached layout: the canvas shows the notice below rather than a
+            # generic venue — seats that are not this show's read as a bug.
 
         window = tk.Toplevel(self)
         window.title("가상 좌석판 — 목표 구역")
@@ -1382,7 +1415,7 @@ class NolSniperApp(tk.Tk):
         that are not being sold at all, where nothing can ever come free.
         """
         if not self._zone_sketch:
-            return "좌석맵에 들어가면 지도가 채워집니다."
+            return self.NO_SKETCH_NOTICE
         # Counted from what is on screen, not from the sketch: they differ by
         # the far side blocks house_frame keeps out of the drawing, and a hint
         # naming more dark seats than the map shows reads as a miscount.
@@ -1406,6 +1439,20 @@ class NolSniperApp(tk.Tk):
             return None
         return (rect["left"], rect["top"], rect["right"], rect["bottom"])
 
+    def _clear_zone_canvas(self) -> None:
+        """Wipe the virtual seat map at once.
+
+        Called the moment the show changes, before anything for the new show
+        is loaded: the redraw is scheduled, not immediate, and until it ran the
+        previous venue stayed on screen under the new show's name.
+        """
+        self._zone_view = None
+        canvas = getattr(self, "_zone_canvas", None)
+        if canvas is not None and canvas.winfo_exists():
+            canvas.delete("all")
+        if getattr(self, "_zone_hint", None) is not None:
+            self._zone_hint.set("새 공연의 좌석 배치를 불러오는 중…")
+
     def _redraw_zone_map(self) -> None:
         """Paint the venue and the current watch box."""
         self._zone_redraw_job = None
@@ -1419,21 +1466,15 @@ class NolSniperApp(tk.Tk):
         height = max(canvas.winfo_height(), 240)
 
         if not self._zone_sketch:
-            # Never a blank screen: fall back to the generic venue so the user
-            # can always drag a target. The real layout replaces it the moment
-            # this show's seat map is seen (or its cache loads).
-            self._zone_sketch = self._default_venue_sketch()
-            if not self._block_rows:
-                self._block_rows = [
-                    {"key": b["key"], "name": b["name"],
-                     "left": b["left"], "top": b["top"], "right": b["right"], "bottom": b["bottom"]}
-                    for b in self._default_venue_blocks()
-                ]
+            # Only this show's own layout is ever drawn. Until it has been seen
+            # once, say so plainly instead of rendering another venue's seats.
             canvas.create_text(
-                width / 2, height * 0.06,
-                text="기본 배치입니다 — 예매 창에서 좌석맵을 한 번 열면 실제 배치로 채워집니다",
-                fill=MUTED, justify="center",
+                width / 2, height / 2,
+                text=self.NO_SKETCH_NOTICE, fill=MUTED, justify="center",
+                width=max(200, width - 40),
             )
+            self._zone_view = None
+            return
 
         # Only blocks that are selling this round.
         #
@@ -1635,6 +1676,7 @@ class NolSniperApp(tk.Tk):
         # sketch had been built — the picker showed the previous show's map.
         if target_changed:
             self._zone_sketch = []
+            self._clear_zone_canvas()
 
         if incoming:
             self._apply_blocks(incoming)
@@ -1887,6 +1929,9 @@ class NolSniperApp(tk.Tk):
         self._trigger_state = None
 
     def arm(self, *, dry_run: bool = False) -> None:
+        if self._login_required():
+            self._flash(AMBER, "로그인 필요 — 세션이 없습니다", "예매 창에서 로그인한 뒤 다시 누르세요.")
+            return
         # Acknowledge the press on the spot. Everything after this happens on a
         # worker thread and the first thing it does takes ~2s, so without this
         # the button looks inert for long enough to be pressed again.
@@ -2195,12 +2240,18 @@ class NolSniperApp(tk.Tk):
                     or catalog.get("play_seq") != prev.get("play_seq")
                     or catalog.get("play_time") != prev.get("play_time")
                 )
+                # A catalog that carries only a round list changes none of the
+                # above — no fetched_at, blocks, sketch or grades — so the 66
+                # rounds goods-info delivered never reached the picker and it sat
+                # blank (측정: 엘리자벳). The list itself has to count.
+                rounds_changed = self._rounds_signature(catalog) != self._rounds_signature(prev)
                 if (
                     catalog.get("fetched_at") != prev.get("fetched_at")
                     or len(new_blocks) != len(old_blocks)
                     or len(new_sketch) != len(old_sketch)
                     or grade_sig != prev_grade_sig
                     or round_changed
+                    or rounds_changed
                 ):
                     self._apply_catalog(catalog)
             self._apply_autopilot_status(status, health)
@@ -2613,9 +2664,31 @@ class NolSniperApp(tk.Tk):
                 var.set("")
             self.show_round.set("")
             self._refresh_show_where()
+            # The virtual seat map is keyed strictly by goods code: the previous
+            # show's sketch is meaningless here (seat coords have no common
+            # scale between venues), so drop it and load this show's cached
+            # layout at once. The picker window, if open, redraws from it.
+            self._zone_sketch = []
+            self._block_rows = []
+            self._catalog = None
+            self._watch_rect = None
+            self._clear_zone_canvas()
+            self._load_cached_sketch(code)  # else the canvas shows NO_SKETCH_NOTICE
+            self._schedule_zone_map()
             self.goods_code.set(code)
             self.product_url.set(f"https://nol.yanolja.com/ticket/products/{code}")
-            self.status.set(f"예매 창 공연 감지 · {code}")
+            # Refresh the card the instant the show changes. The title was only
+            # ever written when the lookup finished, so a slow or failed fetch
+            # left the previous show's name on screen (측정: 김주택 shown as
+            # 드라큘라). Say what is being loaded until the real name lands.
+            self.show_title.set(f"불러오는 중… · {code}")
+            self.show_where.set("")
+            self.show_round.set("")
+            self._show_info_data = None
+            self._grade_rows = []
+            self._render_seat_table([], False)
+            if not getattr(self, "_armed_target_unix", None):
+                self.status.set(f"예매 창 공연 감지 · {code}")
             self._apply_context_fields(context)
             # The page itself carries no round list and no open time; the
             # ticketfront API has both, so the panel is filled from there.
@@ -2631,7 +2704,37 @@ class NolSniperApp(tk.Tk):
         if any(round_key) and round_key != self._followed_round:
             self._followed_round = round_key
             self._apply_context_fields(context)
+            self._select_round_matching(context)
             self._schedule_remain_refresh(context)
+
+    def _select_round_matching(self, context: dict) -> None:
+        """Move the ① picker to the round the page just showed.
+
+        Clicking a date or time block on the product page changes the page's
+        own selection; the picker used to ignore it and stay on whatever it
+        seeded, so the calendar and the combobox disagreed (측정: 엘리자벳).
+        A round the user pinned by hand is left alone.
+        """
+        rounds = getattr(self, "rounds", None) or []
+        if not rounds or getattr(self, "_round_user_picked", False):
+            return
+        date = re.sub(r"\D", "", str(context.get("play_date") or ""))
+        time_ = re.sub(r"\D", "", str(context.get("play_time") or ""))
+        seq = str(context.get("play_seq") or "").strip()
+        best = -1
+        for i, row in enumerate(rounds):
+            if seq and str(row.get("play_seq") or "") == seq:
+                best = i; break
+            if date and re.sub(r"\D", "", str(row.get("play_date") or "")) == date:
+                if not time_ or re.sub(r"\D", "", str(row.get("play_time") or "")) == time_:
+                    best = i
+                    if time_: break
+        if best >= 0 and hasattr(self, "round_box"):
+            try:
+                self.round_box.current(best)
+            except Exception:  # noqa: BLE001 - a stand-in without a box
+                pass
+            self._on_round_pick()
 
     def _refresh_round_line(self) -> None:
         """The 일정 the macro is targeting, on screen.
@@ -2641,7 +2744,7 @@ class NolSniperApp(tk.Tk):
         wrong round looked identical to one aimed at the right one.
         """
         date = self._pretty_play_date()
-        parts = [part for part in (date, self.play_time.get().strip()) if part]
+        parts = [part for part in (date, self._clock_text(self.play_time.get())) if part]
         seq = self.play_seq.get().strip()
         if seq:
             parts.append(f"회차 {seq}")
@@ -2762,13 +2865,23 @@ class NolSniperApp(tk.Tk):
                              open_text=open_text, reason=reason)
         instruction = told.instruction
         primary = told.primary
+        logged_out = (context or {}).get("logged_in") is False
+        if logged_out and mode in {"ready", "halted", "error", "no_show"}:
+            # Real-time login watchdog: a page with no session cannot arm or
+            # enter, and saying so beats a 401 at the open.
+            told = told.__class__("[로그인 필요 — 세션이 없습니다]",
+                                  "예매 창에서 로그인하세요. 로그인되면 버튼이 다시 켜집니다.",
+                                  "", "로그인 필요", "로그인 필요")
+            instruction = told.instruction
+            primary = ""
         if mode == "ready" and not loaded:
             instruction = (f"예매 창에서 {goods_on_page}를 감지했습니다. 공연 정보를 가져오는 중…"
                            if goods_on_page else instruction)
             primary = ""
-        elif loaded and loaded.get("flow") == "legacy-poticket":
-            instruction = "이 공연은 구형 예매 엔진이라 자동화를 지원하지 않습니다."
-            primary = ""
+        # No legacy hard-block: some reserved-seat shows report the old engine
+        # flag yet enter through onestop perfectly well (측정: 드라큘라). The
+        # buttons stay live for every reserved-seat show; the flow note, if any,
+        # is a hint, not a gate.
         self._mode = mode
         self.mode_banner.set(told.banner)
         self.mode_text.set(MODE_LABELS.get(mode, mode))
@@ -2867,7 +2980,8 @@ class NolSniperApp(tk.Tk):
         except Exception:
             return raw.upper()
 
-    def _arm_payload(self, *, target_unix: float, offset_seconds: float, dry_run: bool) -> ArmPayload:
+    def _arm_payload(self, *, target_unix: float, offset_seconds: float, dry_run: bool,
+                     auto_offset_ms: int | None = None) -> ArmPayload:
         play_date = self.play_date.get().strip().replace("-", "")
         play_seq = self.play_seq.get().strip() or "001"
         play_time = re.sub(r"\D", "", self.play_time.get().strip())
@@ -2877,15 +2991,22 @@ class NolSniperApp(tk.Tk):
         # at the 2026-09-04 12:00 open the arm carried the *open* date with the
         # round's seq — so the seat map was asked to change to a day that had
         # no performance. Resolve both from the round list by seq instead.
-        for row in getattr(self, "rounds", None) or []:
-            if str(row.get("play_seq") or "") == play_seq:
-                row_date = re.sub(r"\D", "", str(row.get("play_date") or ""))
-                row_time = re.sub(r"\D", "", str(row.get("play_time") or ""))
-                if len(row_date) == 8:
-                    play_date = row_date
-                if row_time:
-                    play_time = row_time
-                break
+        rounds = getattr(self, "rounds", None) or []
+        chosen = next((row for row in rounds
+                       if str(row.get("play_seq") or row.get("playSeq") or "") == play_seq), None)
+        if chosen is None and rounds and hasattr(self, "round_box"):
+            try:
+                index = self.round_box.current()
+                if 0 <= index < len(rounds):
+                    chosen = rounds[index]
+            except Exception:  # noqa: BLE001 - a stand-in without a box
+                chosen = None
+        if chosen is not None:
+            play_seq = str(chosen.get("play_seq") or chosen.get("playSeq") or play_seq)
+            if self._row_date(chosen):
+                play_date = self._row_date(chosen)
+            if self._row_time(chosen):
+                play_time = self._row_time(chosen)
         if not play_date.isdigit() or len(play_date) != 8:
             raise NolSniperError("공연일은 YYYYMMDD 형식이어야 합니다")
         return ArmPayload(
@@ -2902,7 +3023,9 @@ class NolSniperApp(tk.Tk):
             channel_code="pc",
             pre_sales="N",
             auto_seats_after_entry=self.auto_start_on.get(),
-            entry_offset_ms=self._entry_offset_ms(),
+            # A typed correction wins; an untouched 0 takes the RTT-derived lead.
+            entry_offset_ms=(auto_offset_ms if auto_offset_ms is not None and self._entry_offset_ms() == 0
+                             else self._entry_offset_ms()),
             play_time=play_time,
         )
 
@@ -2916,15 +3039,38 @@ class NolSniperApp(tk.Tk):
             self.advanced_box.pack_forget()
 
     @staticmethod
+    def _row_date(row: dict) -> str:
+        """The round's performance date, whatever the API called it.
+
+        Only the round's own date: play_date / playDate. The show-level start
+        date (play_start_date / playStartDate) is the premiere, not this
+        round — reading it here is what sent the schedule step hunting for
+        20260804 when the user had picked 20260904 (측정: 엘리자벳).
+        """
+        for key in ("play_date", "playDate"):
+            value = re.sub(r"\D", "", str((row or {}).get(key) or ""))
+            if len(value) == 8:
+                return value
+        return ""
+
+    @staticmethod
+    def _row_time(row: dict) -> str:
+        for key in ("play_time", "playTime"):
+            value = re.sub(r"\D", "", str((row or {}).get(key) or ""))
+            if value:
+                return value
+        return ""
+
+    @staticmethod
     def _round_label(row: dict[str, str]) -> str:
         """One round, written the way a ticket buyer reads one.
 
         `1회차` on its own is the app's word, not the user's — the date and the
         clock time are what someone is actually choosing between.
         """
-        date = re.sub(r"\D", "", str(row.get("play_date") or ""))
-        clock = re.sub(r"\D", "", str(row.get("play_time") or ""))
-        seq = str(row.get("play_seq") or "")
+        date = NolSniperApp._row_date(row)
+        clock = NolSniperApp._row_time(row)
+        seq = str(row.get("play_seq") or row.get("playSeq") or "")
         when = f"{int(date[4:6])}월 {int(date[6:8])}일" if len(date) == 8 else date
         day = str(row.get("day_of_week") or "")
         korean_day = {
@@ -2937,6 +3083,33 @@ class NolSniperApp(tk.Tk):
             when += f" {clock[:2]}:{clock[2:4]}"
         return f"{when}  ·  {seq}회차" if seq else when
 
+    def _fetch_rounds_fallback(self, goods: str, place: str) -> None:
+        """Worker: fill the 일정 picker from goods-info when the page has not."""
+        try:
+            rounds, open_date = fetch_goods_info_rounds(goods, place)
+        except Exception as exc:  # noqa: BLE001 - a fallback that fails is just no fallback
+            self._ui(self._note, f"회차 조회 실패: {exc}")
+            return
+        if not rounds:
+            return
+        def apply() -> None:
+            if getattr(self, "rounds", None):
+                return  # the page got there first; its list wins
+            if str(self.goods_code.get() or "") not in ("", str(goods)):
+                return  # the show changed while we were fetching
+            self._apply_rounds({"goods_code": goods, "place_code": place,
+                                "rounds": rounds, "ticket_open_date": open_date})
+            self._refresh_round_line()
+        self._ui(apply)
+
+    def _rounds_signature(self, catalog: dict | None) -> tuple:
+        """What identifies a round list: its length and its first/last seq."""
+        rounds = [row for row in ((catalog or {}).get("rounds") or []) if isinstance(row, dict)]
+        if not rounds:
+            return (0, "", "")
+        seq = lambda row: str(row.get("play_seq") or row.get("playSeq") or "")  # noqa: E731
+        return (len(rounds), seq(rounds[0]), seq(rounds[-1]))
+
     def _apply_rounds(self, catalog: dict) -> None:
         """Fill the picker from what the page published, without fighting the user.
 
@@ -2944,7 +3117,7 @@ class NolSniperApp(tk.Tk):
         four times a second and resetting the box on each one would make the
         picker impossible to use.
         """
-        rounds = [row for row in (catalog.get("rounds") or []) if row.get("play_seq")]
+        rounds = [row for row in (catalog.get("rounds") or []) if row.get("play_seq") or row.get("playSeq")]
         if not rounds:
             if not self.rounds:
                 self.round_note.set("공연을 열면 날짜·회차가 여기에 나옵니다.")
@@ -2960,7 +3133,7 @@ class NolSniperApp(tk.Tk):
         # same round does not silently move to a different one.
         wanted = str(self.play_seq.get() or "").strip()
         chosen = next((i for i, row in enumerate(rounds)
-                       if str(row.get("play_seq")) == wanted), 0)
+                       if str(row.get("play_seq") or row.get("playSeq") or "") == wanted), 0)
         self.round_box.current(chosen)
         self._on_round_pick()
 
@@ -2975,21 +3148,51 @@ class NolSniperApp(tk.Tk):
         if index < 0 or index >= len(self.rounds):
             return
         row = self.rounds[index]
-        self.play_seq.set(str(row.get("play_seq") or ""))
-        self.play_date.set(re.sub(r"\D", "", str(row.get("play_date") or "")))
-        if row.get("play_time"):
-            self.play_time.set(re.sub(r"\D", "", str(row.get("play_time") or "")))
+        self.play_seq.set(str(row.get("play_seq") or row.get("playSeq") or ""))
+        self.play_date.set(self._row_date(row))
+        if self._row_time(row):
+            self.play_time.set(self._row_time(row))
         self.round_note.set(f"선택: {self._round_label(row)}")
+        # The card and the page follow the pick at once: the subtitle used to
+        # keep the previous round (2026.09.05 · 회차 026 under a pick of 029),
+        # and the overlay kept the page default (001) until an arm was pushed.
+        self._refresh_show_where()
+        self._refresh_round_line()
+        self._publish_round_hint()
         # Only a real click pins the round. `_apply_rounds` calls this too, to
         # seed the box, and that must not count as the user having decided.
         if event is not None:
             self._round_user_picked = True
+
+    @staticmethod
+    def _clock_text(hhmm: str) -> str:
+        """1930 → 19:30, for the card."""
+        digits = re.sub(r"\D", "", str(hhmm or ""))
+        return f"{digits[:-2]}:{digits[-2:]}" if len(digits) >= 3 else digits
+
+    def _publish_round_hint(self) -> None:
+        """Tell the page which round the panel is aimed at (overlay + catalog)."""
+        goods = str(self.goods_code.get() or "").strip()
+        place = str(self.place_code.get() or "").strip()
+        if not goods:
+            return
+        try:
+            self.browser.publish_show(goods, place, play_seq=self.play_seq.get().strip(),
+                                      play_date=self.play_date.get().strip(),
+                                      play_time=self.play_time.get().strip())
+        except Exception:  # noqa: BLE001 - a hint, never a blocker
+            pass
 
     def _selected_round_label(self) -> str:
         index = self.round_box.current() if hasattr(self, "round_box") else -1
         if 0 <= index < len(self.rounds):
             return self._round_label(self.rounds[index])
         return f"{self._pretty_play_date()} · {self.play_seq.get()}회차"
+
+    def _login_required(self) -> bool:
+        """True when the 예매 창 reports no session. None/absent means unknown."""
+        context = getattr(self, "_last_context", None) or {}
+        return context.get("logged_in") is False
 
     def enter_now(self) -> None:
         """지금 진입 — enter an already-open show without waiting for anything.
@@ -2999,6 +3202,9 @@ class NolSniperApp(tk.Tk):
         answered 이미 지난 시각입니다 and left no working action at all. This runs
         the same two entry calls immediately.
         """
+        if self._login_required():
+            self._flash(AMBER, "로그인 필요 — 세션이 없습니다", "예매 창에서 로그인한 뒤 다시 누르세요.")
+            return
         try:
             payload = self._arm_payload(target_unix=time.time(), offset_seconds=0.0, dry_run=False)
         except Exception as exc:
@@ -3086,11 +3292,16 @@ class NolSniperApp(tk.Tk):
             deadline_perf = self.clock.deadline_for_server_time(target_unix)
             if deadline_perf < time.perf_counter() - 0.100:
                 raise NolSniperError("이미 지난 시각입니다")
+            rtt_ms = float(getattr(result, "best_rtt_seconds", 0.0) or 0.0) * 1000
+            auto_lead = default_entry_offset_ms(rtt_ms)
             payload = self._arm_payload(
                 target_unix=target_unix,
                 offset_seconds=result.offset_seconds,
                 dry_run=dry_run,
+                auto_offset_ms=auto_lead,
             )
+            if payload.entry_offset_ms == auto_lead and self._entry_offset_ms() == 0:
+                self._ui(self._note, f"진입 보정 자동 {auto_lead}ms (왕복 {rtt_ms:.0f}ms 기준)")
             # Park before publishing, never after: the arm is what the page acts
             # on, and pushing it at a page that is about to be navigated away
             # from arms the document that is leaving.

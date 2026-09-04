@@ -1482,6 +1482,40 @@ const tests = {
     const all = race.collectFromBlocks([block], {}).map((s) => s.seatInfoId).sort();
     assert.deepEqual(all, ["in1", "in2", "out"], "with no box the whole block is eligible");
   },
+  "1층 outranks a nearer 2층 seat within the same grade"() {
+    const stage = { x: 50, y: 0 };
+    const upperFront = { seatInfoId: "2f", seatGrade: "1", seatGradeName: "VIP석", rowNo: "1열", seatNo: "1",
+      blockKey: "u", seatGroupId: null, posLeft: 50, posTop: 5, floor: "2층" };
+    const groundBack = { seatInfoId: "1f", seatGrade: "1", seatGradeName: "VIP석", rowNo: "12열", seatNo: "1",
+      blockKey: "b", seatGroupId: null, posLeft: 50, posTop: 40, floor: "1층" };
+    const ranked = picker.rankCandidates([upperFront, groundBack], [], [], { strategy: "center", centerX: 50, stage });
+    assert.equal(ranked[0].seatInfoId, "1f", "1층 first, even further back");
+  },
+  // A parked sketch from another show must never be restored under a new
+  // show's URL, whatever session the browser still holds.
+  "a sketch key must name the show the page names"() {
+    const { sketchCache } = sandbox.window.NOLSniper;
+    const loc = sandbox.location;
+    const saved = { pathname: loc.pathname, hostname: loc.hostname };
+    try {
+      loc.hostname = "tickets.interpark.com";
+      loc.pathname = "/goods/26009314";
+      assert.equal(sketchCache.sketchKeyFits("26007442:043"), false, "another show's key is rejected");
+      assert.equal(sketchCache.sketchKeyFits("26009314:029"), true, "this show's key fits");
+      loc.pathname = "/ticket/products/L0000142";
+      assert.equal(sketchCache.sketchKeyFits("L0000142:001"), true, "NOL L-codes match case-insensitively");
+      loc.pathname = "/waiting";
+      assert.equal(sketchCache.sketchKeyFits("26007442:043"), true, "a page naming no show cannot contradict");
+      assert.equal(sketchCache.sketchKeyFits(""), false, "no key is no key");
+      // And the parked sketch itself: parked under one show, invisible to another.
+      loc.pathname = "/goods/26007442";
+      sketchCache.parkSketch([{ k: "a", x: 1, y: 1 }], "26007442:043");
+      assert.equal(sketchCache.parkedSketchFor("26007442:043").length, 1, "same key restores");
+      assert.equal(sketchCache.parkedSketchFor("26009314:029").length, 0, "other key does not");
+    } finally {
+      loc.pathname = saved.pathname; loc.hostname = saved.hostname;
+    }
+  },
   "a plain venue still takes front centre"() {
     const { race } = sandbox.window.NOLSniper;
     const seats = [];

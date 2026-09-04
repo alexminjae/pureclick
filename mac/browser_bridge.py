@@ -314,6 +314,26 @@ class BrowserBridge:
     def send_command(self, command: str, *, clear_arm: bool = False) -> None:
         self.push(command=command, clear_arm=clear_arm)
 
+    def publish_show(self, goods_code: str, place_code: str, biz_code: str = "61776", *,
+                     play_seq: str = "", play_date: str = "", play_time: str = "") -> None:
+        """Tell the page which show is on screen, without arming it.
+
+        goods-info needs a placeCode and the page cannot always read one off a
+        NOL product page (and never an L-coded one), so with no arm the 일정
+        picker stayed empty. The panel learns the place code the moment it
+        looks the show up; this hands it across so rounds load on first sight.
+        """
+        # The picked round rides along, so the page's overlay names the round
+        # the panel is aimed at rather than whatever the product page defaulted to.
+        patch_state(self.state_path, {"show": {
+            "goods_code": str(goods_code or ""),
+            "place_code": str(place_code or ""),
+            "biz_code": str(biz_code or "61776"),
+            "play_seq": str(play_seq or ""),
+            "play_date": str(play_date or ""),
+            "play_time": str(play_time or ""),
+        }})
+
     def navigate(self, url: str) -> None:
         patch_state(self.state_path, {"navigate_url": url})
         if not self.running:

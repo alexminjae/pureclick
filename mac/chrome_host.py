@@ -209,6 +209,9 @@ def apply_state(page: cdp.Page) -> None:
         scripts.append(_storage_set_js("nolsniper_arm_v1", state["arm"]))
     if state.get("seat") is not None:
         scripts.append(_storage_set_js("nolsniper_seat_v1", state["seat"]))
+    # The show on screen (goods + place), so rounds can load before any arm.
+    if state.get("show") is not None:
+        scripts.append(_storage_set_js("nolsniper_show_v1", state["show"]))
     if state.get("reload_autopilot"):
         install_document_start_script(page)
         scripts.append(load_script())
