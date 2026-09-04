@@ -127,10 +127,10 @@ jobs:
           # .NET writes UTF-8 without a BOM and needs nothing resolved.
           $readmePath = Join-Path (Get-Location) $stage 'README_윈도우_실행방법.txt'
           [IO.File]::WriteAllText($readmePath, $readme, [Text.UTF8Encoding]::new($false))
-          # Not Compress-Archive: it stores entry names in the runner's ANSI code
-          # page with no UTF-8 flag, so the Korean README name unzipped as
-          # mojibake on the first v0.3.2 build. ZipFile with an explicit UTF-8
-          # encoding sets the flag and Explorer shows the name as written.
+          # ZipFile with an explicit UTF-8 encoding, rather than Compress-Archive,
+          # so the Korean README name is guaranteed the UTF-8 flag regardless of
+          # the runner's pwsh version. (v0.3.2, built with Compress-Archive, did
+          # set it — macOS's old `unzip -l` merely displayed it as mojibake.)
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $zipPath = Join-Path (Get-Location) 'dist/NOLSniper_Windows.zip'
           Remove-Item $zipPath -ErrorAction SilentlyContinue
