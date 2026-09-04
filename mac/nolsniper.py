@@ -2477,6 +2477,17 @@ class NolSniperApp(tk.Tk):
             self._fetching_code = code
             self._followed_round = None
             self._remain_refresh_key = None
+            # A new show starts with no round: the old play_date/seq/time belong
+            # to the show we are leaving, and _apply_context_fields only *sets*
+            # fields the incoming context carries — so a product page with no
+            # round left the previous show's 회차 on the card (측정: 디어 에반
+            # 핸슨이 회차 004로 표시). Clear them, then fill from the new show.
+            self._round_user_picked = False
+            self.rounds = []
+            for var in (self.play_date, self.play_seq, self.play_time):
+                var.set("")
+            self.show_round.set("")
+            self._refresh_show_where()
             self.goods_code.set(code)
             self.product_url.set(f"https://nol.yanolja.com/ticket/products/{code}")
             self.status.set(f"예매 창 공연 감지 · {code}")

@@ -1374,6 +1374,67 @@ const tests = {
     );
   },
 
+  // The user's live bug: on a round where the middle blocks have sold, only a
+  // wing block is free up front. Straight-line distance took the wing every
+  // time ("무조건 오른쪽"); 가운데 now trades a few rows of depth to stay central.
+  "가운데 prefers a central seat a few rows back over a forward wing seat"() {
+    const { race } = sandbox.window.NOLSniper;
+    const seats = [];
+    // A full house, so the stage x is the true middle (x=50).
+    for (let x = 0; x <= 100; x += 5)
+      for (let y = 0; y <= 60; y += 4)
+        seats.push({
+          seatInfoId: `x${x}y${y}`, seatGrade: "1", seatGradeName: "R석",
+          rowNo: `${y}열`, seatNo: String(x), blockKey: "b", seatGroupId: null,
+          posLeft: x, posTop: y,
+        });
+    const stage = race.stagePoint([{ blockKey: "b", seats }]);
+    assert.equal(stage.x, 50, `stage over the middle, got ${stage.x}`);
+    // Central but eight rows back vs. a wing seat two rows back. Straight-line
+    // distance prefers the wing (sqrt(40^2+8^2)=40.8 < sqrt(0^2+32^2)=32? no) —
+    // pick values where Euclid picks the wing but the weighted centre wins.
+    const centre = seats.find((s) => s.posLeft === 50 && s.posTop === 32); // dead centre, back
+    const wing = seats.find((s) => s.posLeft === 90 && s.posTop === 4);    // far wing, front
+    assert.ok(centre && wing, "both seats exist");
+    // Euclid: centre 32.0, wing sqrt(40^2+4^2)=40.2 — wait, centre already wins.
+    // Use a deeper centre so Euclid flips to the wing, and the weight flips back.
+    const centreDeep = seats.find((s) => s.posLeft === 50 && s.posTop === 44); // Euclid 44
+    const wingFwd = seats.find((s) => s.posLeft === 90 && s.posTop === 4);      // Euclid 40.2
+    assert.ok(centreDeep && wingFwd, "the deeper pair exists");
+    const ranked = picker.rankCandidates([centreDeep, wingFwd], [], [], {
+      strategy: "center", centerX: stage.x, stage,
+    });
+    assert.equal(
+      ranked[0].seatInfoId, centreDeep.seatInfoId,
+      "가운데 keeps to the centre even a few rows back",
+    );
+  },
+  // But depth still matters: a clearly-forward central-ish seat beats a
+  // deep one. The weight tips ambiguous cases, it does not send everyone back.
+  "가운데 still takes the forward seat when the wing is only slightly off"() {
+    const stage = { x: 50, y: 0 };
+    const forward = { seatInfoId: "fwd", seatGrade: "1", seatGradeName: "R석",
+      rowNo: "1열", seatNo: "1", blockKey: "b", seatGroupId: null, posLeft: 58, posTop: 2 };
+    const deep = { seatInfoId: "deep", seatGrade: "1", seatGradeName: "R석",
+      rowNo: "20열", seatNo: "1", blockKey: "b", seatGroupId: null, posLeft: 50, posTop: 80 };
+    const ranked = picker.rankCandidates([forward, deep], [], [], {
+      strategy: "center", centerX: 50, stage,
+    });
+    assert.equal(ranked[0].seatInfoId, "fwd", "a near-front seat still wins over a deep centre one");
+  },
+  // The centre reference is the venue geometry, not the free-seat median: a
+  // free pool bunched to one side must not redefine where "centre" is.
+  "venueCenterX is the extent midpoint, not the density-weighted median"() {
+    const seats = [];
+    // Ten seats crowded on the left (x 0..9), one lone seat on the right (x 100).
+    for (let x = 0; x <= 9; x += 1)
+      seats.push({ seatInfoId: `l${x}`, posLeft: x, posTop: 10, seatGrade: "1",
+        seatGradeName: "R석", rowNo: "1", seatNo: String(x), blockKey: "b" });
+    seats.push({ seatInfoId: "r", posLeft: 100, posTop: 10, seatGrade: "1",
+      seatGradeName: "R석", rowNo: "1", seatNo: "r", blockKey: "b" });
+    const centre = picker.venueCenterX([{ blockKey: "b", seats }]);
+    assert.equal(centre, 50, `extent midpoint (0..100) is 50, got ${centre}`);
+  },
   "a plain venue still takes front centre"() {
     const { race } = sandbox.window.NOLSniper;
     const seats = [];

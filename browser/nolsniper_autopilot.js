@@ -3538,17 +3538,36 @@
     return top;
   }
 
+  // 가운데 weights a step sideways more than a step back, so a central seat a
+  // few rows deeper beats one out toward the wing. Pure straight-line distance
+  // treated them as equal cost, which — on a round where the middle blocks have
+  // sold and only a wing block is free up front — always chose the wing (the
+  // "무조건 오른쪽" the user saw). The horizontal anchor is the stage's own x
+  // (the front-row extent midpoint), never the free-seat median, so a lopsided
+  // free pool cannot drag "centre" toward the crowded side. 1.0 restores the
+  // old isotropic behaviour.
+  const CENTER_HWEIGHT = 1.6;
   function strategyKeys(seat, strategy, seed, centerX, stage = null) {
     // `== null` on purpose: toCandidate normalises to null, but DOM-built and
     // test-built seats simply omit the field. Treating `undefined` as a number
     // yields NaN, and one NaN key makes the whole comparison meaningless.
     const left = seat.posLeft == null ? null : seat.posLeft;
+    const top = seat.posTop == null ? null : seat.posTop;
     const mid = centerX == null ? null : centerX;
     // A missing key sorts last, so positioned seats lead and the positionless
     // tail falls through to the rowNo/seatNo chain exactly as it did before.
     const NONE = Number.POSITIVE_INFINITY;
-    const near = stageDistance(seat, stage);
     const sideward = left === null || mid === null ? NONE : Math.abs(left - mid);
+    // 가운데, with a real stage: anchor centrality on the stage x and make a
+    // sideways unit cost more than a depth unit. Left/right keep the plain
+    // straight-line distance and let their side filter do the narrowing.
+    if (strategy === "center" && stage && left !== null && top !== null
+        && stage.x !== null && stage.x !== undefined) {
+      const dx = (left - stage.x) * CENTER_HWEIGHT;
+      const dy = top - stage.y;
+      return [Math.sqrt(dx * dx + dy * dy), sideward];
+    }
+    const near = stageDistance(seat, stage);
     return [near === null || near === undefined ? NONE : near, sideward];
   }
 
@@ -3634,7 +3653,9 @@
       // whenever an area was drawn, with no sign that it had been ignored.
       strategy: config.seat_strategy || "center",
       seed: seatState.shuffleSeed || 0,
-      centerX: seatState.mapCenterX ?? null,
+      // The stage's own x is the truest centre (front-row extent midpoint);
+      // fall back to the venue extent midpoint, then to the free-pool median.
+      centerX: seatState.mapStage?.x ?? seatState.mapCenterX ?? null,
     };
   }
 
@@ -3674,17 +3695,24 @@
     return { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: front };
   }
 
+  // The geometric centre of the house: the midpoint between its leftmost and
+  // rightmost seat. Deliberately the extent midpoint, not the median — the
+  // median is pulled toward whichever side holds more seats, so on an
+  // asymmetric venue (or a round where one side has sold) it drifted off true
+  // centre and dragged 왼쪽/오른쪽 and the centrality tiebreak with it.
   function venueCenterX(blocks) {
-    const values = [];
+    let min = Infinity;
+    let max = -Infinity;
     for (const block of blocks || []) {
       for (const seat of block.seats || []) {
         const left = numOrNull(seat.posLeft);
-        if (left !== null) values.push(left);
+        if (left === null) continue;
+        if (left < min) min = left;
+        if (left > max) max = left;
       }
     }
-    if (!values.length) return null;
-    values.sort((a, b) => a - b);
-    return values[Math.floor(values.length / 2)];
+    if (min === Infinity) return null;
+    return (min + max) / 2;
   }
 
   function medianPosLeft(candidates) {
@@ -4871,10 +4899,23 @@
   // Which seat to travel to, when none is drawn yet. See the note at the call
   // site: reachability beats distance, because the travel costs more than the
   // difference between two seats usually does.
+  // Staying in the block already open is usually right — a block switch costs
+  // more than the gap between two seats. But not when the open block is a wing
+  // and a much better (central) seat is free elsewhere: honouring the open
+  // block then meant the grab took whatever side the map happened to boot on
+  // ("무조건 오른쪽"). Switch once when the open block's best seat is far down
+  // the ranked list; otherwise keep the fast path.
+  const OPEN_BLOCK_KEEP_RANK = 6;
   function aimForCandidates(candidates, openBlock) {
     if (openBlock) {
-      const here = candidates.find((seat) => String(seat.blockKey) === String(openBlock));
-      if (here) return here;
+      const hereIndex = candidates.findIndex((seat) => String(seat.blockKey) === String(openBlock));
+      if (hereIndex >= 0) {
+        const tolerance = Math.max(OPEN_BLOCK_KEEP_RANK, Math.ceil(candidates.length * 0.05));
+        // The open block holds a near-best seat: no switch worth its cost.
+        if (hereIndex <= tolerance) return candidates[hereIndex];
+        // The open block is a wing while the top of the list is elsewhere —
+        // aim at the best seat so the loop moves to its (more central) block.
+      }
     }
     return candidates[0] || null;
   }
@@ -8875,6 +8916,7 @@
     seatState.parkedCheckedAt = 0;
     seatState.parkFailures = 0;
     seatState.reparks = 0;
+    seatState.centerReachTried = "";
     seatState.triggerActedAt = 0;
     seatState.triggerBursts = 0;
     seatState.domScans = 0;
@@ -9279,6 +9321,27 @@
       // Exception: auto_assign has no circles to click; it uses the API path.
       let clickable = clickableAmong(candidates);
       seatState.clickableNow = clickable.length;
+      // The best seat we want may be off-screen in a more central block. The map
+      // boots showing one block, so clickableAmong only ever offers that block's
+      // seats — and on a round where the centre has sold up front that block is
+      // a wing, which is the "무조건 오른쪽" the user saw. Once per run (grab
+      // only, never mid-catch), if the best *rendered* seat sits far down the
+      // ranked list while the top of the list is in another block, move there
+      // before settling for the wing.
+      if (
+        !isCatch && !config.auto_assign && clickable.length && candidates.length
+        && !seatState.centerReachTried
+      ) {
+        const bestClickableIdx = candidates.indexOf(clickable[0]);
+        const openBlk = String(clickable[0].blockKey || "");
+        const wantBlk = String((candidates[0] || {}).blockKey || "");
+        const tolerance = Math.max(OPEN_BLOCK_KEEP_RANK, Math.ceil(candidates.length * 0.05));
+        if (wantBlk && wantBlk !== openBlk && bestClickableIdx > tolerance) {
+          seatState.centerReachTried = wantBlk;
+          updateOverlay(`더 가운데 구역으로 이동합니다… · ${AUTOPILOT_BUILD}`, "info");
+          clickable = [];  // fall into the move path below, which aims at candidates[0]
+        }
+      }
       if (!clickable.length && !config.auto_assign) {
         // Nothing we want is drawn. On a big venue that is normal: the map
         // mounts only what is in the viewport, and a stadium's first screen is
@@ -9656,11 +9719,20 @@
     // sessionStorage still held that session. Only pages inside a session
     // (seat, schedule, pay) take their identity from it.
     if (initData?.goods?.goodsCode && !nolMatch && !goodsMatch) context.goods_code = initData.goods.goodsCode;
+    // The round only belongs to this page when the stored session is *for* the
+    // show the page is showing. On a product/goods page the URL names the show
+    // and initData is the previous booking session — its playSeq is another
+    // show's round, and copying it printed a stale 회차 (measured 2026-09-04:
+    // 디어 에반 핸슨 shown as 회차 004 from an earlier session). Match the code.
+    const initGoods = initData?.goods?.goodsCode ? String(initData.goods.goodsCode).toUpperCase() : "";
+    const roundIsOurs = !!initData && (
+      (!nolMatch && !goodsMatch) || (initGoods && initGoods === String(context.goods_code || "").toUpperCase())
+    );
     if (initData?.goods?.goodsName) context.goods_name = initData.goods.goodsName;
     if (initData?.goods?.placeCode) context.place_code = initData.goods.placeCode;
-    if (initData?.playSeq?.playSeq) context.play_seq = initData.playSeq.playSeq;
-    if (initData?.playSeq?.playDate) context.play_date = compactDate(initData.playSeq.playDate);
-    if (initData?.playSeq?.playTime) context.play_time = normalizePlayTime(initData.playSeq.playTime);
+    if (roundIsOurs && initData?.playSeq?.playSeq) context.play_seq = initData.playSeq.playSeq;
+    if (roundIsOurs && initData?.playSeq?.playDate) context.play_date = compactDate(initData.playSeq.playDate);
+    if (roundIsOurs && initData?.playSeq?.playTime) context.play_time = normalizePlayTime(initData.playSeq.playTime);
 
     const payload = flightPayload();
     if (!context.goods_name) context.goods_name = payloadString(payload, "goodsName");
@@ -10328,6 +10400,8 @@
         rankCandidates,
         groupCandidates,
         selectSeatUnit,
+        venueCenterX,
+        stagePoint,
         resolveSeatType,
         decodeStatusMask,
         parseSeatStatus,
