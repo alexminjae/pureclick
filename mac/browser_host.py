@@ -409,11 +409,19 @@ def watch_state(window: webview.Window, stop_event: threading.Event) -> None:
 _SNAPSHOT_JS = """
 (function () {
   if (!window.NOLSniper) return null;
-  return {
+  // Time the read itself. It runs every 400ms on the page's own JS thread, so
+  // an expensive snapshot starves everything else (it once serialized the whole
+  // 1.1MB seat-map DOM and timed the bridge out into 예매 창 응답 없음). The
+  // number rides along so the panel/state can prove it stays cheap (<2ms).
+  var t0 = (self.performance && performance.now) ? performance.now() : Date.now();
+  var out = {
     context: NOLSniper.readShowContext(),
     catalog: NOLSniper.readShowCatalog(),
     status: NOLSniper.status(),
   };
+  var t1 = (self.performance && performance.now) ? performance.now() : Date.now();
+  out.snapshot_ms = Math.round((t1 - t0) * 100) / 100;
+  return out;
 })()
 """
 
@@ -427,11 +435,45 @@ def write_bridge_health(health: dict[str, Any]) -> None:
     Deliberately not in the shared state file: this changes every tick, and the
     point of it is that its timestamp keeps moving while the loop lives and
     stops the moment it does not.
+
+    Written atomically (temp + os.replace): the panel reads this file every
+    500ms, and a torn read — half a JSON object because a write was in flight —
+    parses to nothing and looked exactly like a dead bridge, i.e. a spurious
+    예매 창 응답 없음 flicker.
     """
     try:
-        HEALTH_PATH.write_text(json.dumps(health), encoding="utf-8")
+        tmp = HEALTH_PATH.with_suffix(HEALTH_PATH.suffix + f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(health), encoding="utf-8")
+        os.replace(tmp, HEALTH_PATH)
     except OSError:
         pass  # a health report that cannot be written is not worth crashing for
+
+
+# The last health the poll loop computed, mirrored here so the heartbeat can
+# report liveness while the loop is blocked inside a slow evaluate_js. seen_at
+# is added fresh by whoever writes; these are the read-success facts.
+_LIVE_HEALTH: dict[str, Any] = {
+    "last_ok": 0.0, "failures": 0, "last_error": "",
+    "hang_since": 0.0, "main_thread_ok": None, "snapshot_ms": None,
+}
+
+
+def heartbeat(stop_event: threading.Event, period: float = 0.5) -> None:
+    """Bump the health file's seen_at on a fixed cadence, whatever the read is doing.
+
+    seen_at used to advance only when a poll tick *finished*, so a single read
+    that took longer than BRIDGE_STALE_SECONDS (up to the 8s evaluate_js ceiling)
+    aged the file past stale and the panel flipped to 예매 창 응답 없음 — "the
+    window is closed" — while the window was plainly alive and merely busy.
+    A dedicated thread, blocked by nothing the page can do, makes seen_at mean
+    exactly what the panel treats it as: the host process is alive. A read that
+    is genuinely failing still shows through `failures` as 읽기 실패, and a
+    process that has actually died stops this heartbeat and earns the real
+    응답 없음.
+    """
+    while not stop_event.is_set():
+        write_bridge_health({"seen_at": time.time(), **_LIVE_HEALTH, **PLATFORM_STATE})
+        stop_event.wait(period)
 
 
 def _desktop_dir() -> Path:
@@ -543,6 +585,60 @@ def write_desktop_diagnostic(health: dict[str, Any], probe: Any, elapsed: float 
         pass
 
 
+# A hung read is two different faults with one symptom. Telling them apart is
+# what decides the remedy:
+#
+#   main thread blocked   — a native dialog (alert/confirm/file panel) is up, so
+#                           AppHelper.callAfter never runs and *every* call
+#                           through pywebview hangs, not only evaluate_js.
+#                           Nothing to restart; someone has to press the button.
+#   page script busy      — the WebContent process never goes idle (a loop in
+#                           the page), so evaluateJavaScript's completion never
+#                           fires. The app's own main thread is fine.
+#
+# The probe below touches the main thread without touching the page.
+HANG_RESTART_AFTER_S = 45.0
+
+
+def _main_thread_alive(window: Any) -> bool | None:
+    """True/False if the app's main thread answered a no-op in time, None if the
+    probe itself could not be made."""
+    try:
+        _call_with_timeout(lambda: window.width, timeout=2.0, label="main_thread_ping")
+        return True
+    except TimeoutError:
+        return False
+    except Exception:  # noqa: BLE001 - a window without get_size (tests) proves nothing
+        return None
+
+
+def _note_hang_restart(health: dict[str, Any]) -> None:
+    """The last health report before a self-restart, so the panel can say why
+    the 예매 창 went away rather than only that it did."""
+    write_bridge_health(health)
+
+
+def should_restart_hung_host(seat: dict[str, Any] | None, hang_seconds: float,
+                             main_thread_ok: bool | None) -> bool:
+    """Restart the 예매 창 for a page whose script never goes idle — but never
+    over a held seat, and never when the fault is a dialog on the main thread
+    (a restart would not clear it and would throw the session away for nothing).
+    """
+    if hang_seconds < HANG_RESTART_AFTER_S:
+        return False
+    if main_thread_ok is False:
+        return False
+    seat = seat or {}
+    if seat.get("locked") or seat.get("confirmStarted") or seat.get("awaitingPayment"):
+        return False
+    try:
+        if int(seat.get("pageSelected") or 0) > 0:
+            return False
+    except (TypeError, ValueError):
+        pass
+    return True
+
+
 def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
     """Read the page every 400ms — and say so when it cannot.
 
@@ -562,10 +658,14 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
     last_ok = 0.0
     last_error = ""
     last_reload = 0.0
+    snapshot_ms = None
+    hang_since = 0.0
+    main_thread_ok: bool | None = None
     while not stop_event.is_set():
         tick += 1
         if tick <= 3:
             _stage(f"poll_context tick {tick}")
+        snapshot_ms = None
         try:
             # Carry the login forward. Logging in is the one manual step in the
             # whole flow, so it is worth a round trip every ten seconds to make
@@ -584,6 +684,7 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
                 timeout=_POLL_CONTEXT_TIMEOUT, label="poll_context",
             )
             if isinstance(snapshot, dict):
+                snapshot_ms = snapshot.get("snapshot_ms")
                 for key, field in (
                     ("page_context", "context"),
                     ("show_catalog", "catalog"),
@@ -617,6 +718,33 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
         # page had worked at least once, then one reload, then a 60s cooldown so
         # a site that is genuinely down is not reload-looped.
         is_hang = "did not return within" in last_error
+        if is_hang:
+            if not hang_since:
+                hang_since = time.time()
+            main_thread_ok = _main_thread_alive(window)
+            hang_seconds = time.time() - hang_since
+            seat_snapshot: dict[str, Any] = {}
+            try:
+                seat_snapshot = ((load_state(STATE_PATH).get("autopilot_status") or {}).get("seat")) or {}
+            except Exception:  # noqa: BLE001 - no snapshot means no held seat is known
+                seat_snapshot = {}
+            if should_restart_hung_host(seat_snapshot, hang_seconds, main_thread_ok):
+                # The page's script has not gone idle for HANG_RESTART_AFTER_S
+                # and nothing is held: leave, and let the panel bring a fresh
+                # 예매 창 back (it relaunches a dead host on its own). Measured
+                # 2026-09-05 10:10: a 취켓팅 watch hung every read from 5s in,
+                # for 25 minutes, with the panel saying only 예매 창 응답 없음.
+                PLATFORM_STATE["last_recovery"] = datetime.datetime.now().isoformat(timespec="seconds")
+                _stage(f"hung {hang_seconds:.0f}s (main thread ok={main_thread_ok}); exiting for a relaunch")
+                _note_hang_restart({
+                    "seen_at": time.time(), "last_ok": last_ok, "failures": failures,
+                    "last_error": last_error, "hang_since": hang_since,
+                    "main_thread_ok": main_thread_ok, "hang_restart": True, **PLATFORM_STATE,
+                })
+                os._exit(3)
+        else:
+            hang_since = 0.0
+            main_thread_ok = None
         if (failures >= 75 and not is_hang and last_ok > 0
                 and time.time() - last_reload > 60):
             last_reload = time.time()
@@ -633,11 +761,21 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
         # so its timestamp ages when the loop dies, and the shared state is
         # ~180KB — merging into that 2.5 times a second would mean rewriting it
         # constantly and holding its lock away from the panel for no reason.
+        _LIVE_HEALTH.update({
+            "last_ok": last_ok, "failures": failures, "last_error": last_error,
+            "hang_since": hang_since, "main_thread_ok": main_thread_ok,
+            "snapshot_ms": snapshot_ms,
+        })
         write_bridge_health({
             "seen_at": time.time(),
             "last_ok": last_ok,
             "failures": failures,
             "last_error": last_error,
+            # A hang, classified: since when, and whether the app's own main
+            # thread still answers (False = a native dialog is up, not the page).
+            "hang_since": hang_since,
+            "main_thread_ok": main_thread_ok,
+            "snapshot_ms": snapshot_ms,
             # Which platform hooks took. On a machine neither of us has tested,
             # this is what turns "it doesn't work" into a specific answer.
             **PLATFORM_STATE,
@@ -804,6 +942,7 @@ def main() -> None:
 
     window.events.shown += on_shown
 
+    threading.Thread(target=heartbeat, args=(stop_event,), name="bridge-heartbeat", daemon=True).start()
     threading.Thread(target=watch_state, args=(window, stop_event), daemon=True).start()
     threading.Thread(target=poll_context, args=(window, stop_event), daemon=True).start()
     # DevTools (a second window on Windows) only when asked for with

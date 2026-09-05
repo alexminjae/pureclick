@@ -10585,9 +10585,9 @@
     if (roundIsOurs && initData?.playSeq?.playDate) context.play_date = compactDate(initData.playSeq.playDate);
     if (roundIsOurs && initData?.playSeq?.playTime) context.play_time = normalizePlayTime(initData.playSeq.playTime);
 
-    const payload = flightPayload();
-    if (!context.goods_name) context.goods_name = payloadString(payload, "goodsName");
-    if (!context.place_code) context.place_code = payloadString(payload, "placeCode", /\d+/);
+    const payload = (!context.goods_name || !context.place_code) ? flightPayload() : "";
+    if (payload && !context.goods_name) context.goods_name = payloadString(payload, "goodsName");
+    if (payload && !context.place_code) context.place_code = payloadString(payload, "placeCode", /\d+/);
     // Never fall back to playStartDate, on any page. It is the run's first
     // night, not a round: on the goods page it became the panel's play_date
     // and then the arm's, and the schedule step went hunting for 20260804 in a
@@ -10648,6 +10648,12 @@
   let flightCache = { html: null, text: "" };
 
   function flightPayload() {
+    // The flight payload (self.__next_f) is a NOL App Router thing. On the
+    // onestop seat map there is none, and document.documentElement.innerHTML is
+    // ~1.1MB there — serializing it every 400ms poll, contended by the focus
+    // poller, is what timed the bridge read out into 예매 창 응답 없음
+    // (measured 2026-09-05: main thread alive, snapshot read >8s during 취켓팅).
+    if (!isNolProductPage()) return "";
     const html = document.documentElement?.innerHTML || "";
     if (flightCache.html === html) return flightCache.text;
     // Unescaping the whole document once is far cheaper than a tolerant regex

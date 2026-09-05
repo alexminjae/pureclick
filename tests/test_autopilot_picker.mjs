@@ -4552,6 +4552,21 @@ const tests = {
                  "the first tick has nothing measured and must not guess");
   },
 
+  "flightPayload never serializes the DOM off a NOL product page": () => {
+    // The 400ms bridge snapshot calls readShowContext -> flightPayload. On the
+    // onestop seat map innerHTML is ~1.1MB; serializing it every poll while the
+    // focus poller runs is what timed the read out into 예매 창 응답 없음.
+    const src = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
+    const fn = src.slice(src.indexOf("function flightPayload()"), src.indexOf("function payloadString"));
+    assert.match(fn, /if \(!isNolProductPage\(\)\) return "";/, "guarded before any innerHTML read");
+    assert.ok(/return "";/.test(fn) && fn.search(/isNolProductPage\(\)\) return ""/) < fn.indexOf("documentElement?.innerHTML"),
+      "the guard is BEFORE the 1.1MB serialization, not after");
+    // readShowContext only pays for the payload when a field is still missing.
+    const ctxFn = src.slice(src.indexOf("function readShowContext()"), src.indexOf("function flightPayload()"));
+    assert.match(ctxFn, /\(!context\.goods_name \|\| !context\.place_code\) \? flightPayload\(\) : ""/,
+      "flightPayload is lazy: skipped when goods_name and place_code are already known");
+  },
+
   "a small venue passes through the sampler untouched": () => {
     const points = [{ k: "a", x: 1, y: 1 }, { k: "a", x: 2, y: 2 }];
     assert.equal(sandbox.window.NOLSniper.downsampleSketch(points), points, "under the cap, do not copy or thin");

@@ -114,3 +114,68 @@ class PollContextSurvivesAHungCallTests(unittest.TestCase):
         # seen_at is written every tick regardless of success — that is what
         # lets the panel tell "alive but failing" apart from "dead".
         self.assertGreater(last["seen_at"], 0)
+
+
+class HungHostRestartRule(unittest.TestCase):
+    """A page whose script never idles gets a fresh 예매 창 — never over a held
+    seat, never for a blocked main thread, never before 45s."""
+
+    def test_restarts_a_hung_page_once_it_has_lasted_and_nothing_is_held(self) -> None:
+        self.assertTrue(browser_host.should_restart_hung_host({"running": True, "pageSelected": 0}, 46.0, True))
+        self.assertTrue(browser_host.should_restart_hung_host({}, 46.0, None), "no snapshot means no known hold")
+
+    def test_too_early_is_not_a_hang_worth_a_relaunch(self) -> None:
+        self.assertFalse(browser_host.should_restart_hung_host({}, 8.0, True))
+
+    def test_never_over_a_held_seat(self) -> None:
+        for seat in ({"locked": True}, {"confirmStarted": True}, {"awaitingPayment": True}, {"pageSelected": 1}):
+            self.assertFalse(browser_host.should_restart_hung_host(seat, 120.0, True), seat)
+
+    def test_a_blocked_main_thread_is_a_dialog_not_a_hang(self) -> None:
+        # Restarting would not clear it and would throw the session away.
+        self.assertFalse(browser_host.should_restart_hung_host({}, 120.0, False))
+
+
+class HeartbeatKeepsLivenessTruthful(unittest.TestCase):
+    """seen_at means 'the host is alive', not 'the last read finished' — a slow
+    read must not read as a closed window (예매 창 응답 없음)."""
+
+    def setUp(self) -> None:
+        self._orig = browser_host.write_bridge_health
+        self.written: list[dict] = []
+        browser_host.write_bridge_health = lambda h: self.written.append(dict(h))
+        self._orig_live = dict(browser_host._LIVE_HEALTH)
+
+    def tearDown(self) -> None:
+        browser_host.write_bridge_health = self._orig
+        browser_host._LIVE_HEALTH.clear()
+        browser_host._LIVE_HEALTH.update(self._orig_live)
+
+    def test_heartbeat_bumps_seen_at_while_the_read_facts_stay_put(self) -> None:
+        # A read succeeded 10s ago and nothing has completed since (a slow tick).
+        stale_ok = time.time() - 10
+        browser_host._LIVE_HEALTH.update({"last_ok": stale_ok, "failures": 0, "last_error": ""})
+        stop = threading.Event()
+        t = threading.Thread(target=browser_host.heartbeat, args=(stop, 0.02), daemon=True)
+        t.start()
+        time.sleep(0.1)
+        stop.set(); t.join(timeout=1.0)
+        self.assertGreaterEqual(len(self.written), 3, "the heartbeat keeps writing on its own cadence")
+        last = self.written[-1]
+        # seen_at is fresh (the host is alive) even though the last read is old.
+        self.assertLess(time.time() - last["seen_at"], 1.0, "seen_at is current — the window is not 'lost'")
+        self.assertEqual(last["last_ok"], stale_ok, "the real read-success time is preserved for the panel")
+
+    def test_a_dead_heartbeat_lets_seen_at_age_into_lost(self) -> None:
+        from core.seat import BRIDGE_STALE_SECONDS, bridge_status
+        # The heartbeat stopped (process gone): seen_at frozen in the past.
+        frozen = {"seen_at": time.time() - (BRIDGE_STALE_SECONDS + 2), "failures": 0}
+        state, _ = bridge_status(frozen)
+        self.assertEqual(state, "lost")
+
+
+class HealthWriteIsAtomic(unittest.TestCase):
+    def test_write_uses_replace_not_a_bare_write(self) -> None:
+        import inspect
+        src = inspect.getsource(browser_host.write_bridge_health)
+        self.assertIn("os.replace", src, "a torn read of the health file reads as a dead bridge")

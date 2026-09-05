@@ -79,11 +79,19 @@ _COMMAND_JS = {
 _SNAPSHOT_JS = """
 (function () {
   if (!window.NOLSniper) return null;
-  return {
+  // Time the read itself. It runs every 400ms on the page's own JS thread, so
+  // an expensive snapshot starves everything else (it once serialized the whole
+  // 1.1MB seat-map DOM and timed the bridge out into 예매 창 응답 없음). The
+  // number rides along so the panel/state can prove it stays cheap (<2ms).
+  var t0 = (self.performance && performance.now) ? performance.now() : Date.now();
+  var out = {
     context: NOLSniper.readShowContext(),
     catalog: NOLSniper.readShowCatalog(),
     status: NOLSniper.status(),
   };
+  var t1 = (self.performance && performance.now) ? performance.now() : Date.now();
+  out.snapshot_ms = Math.round((t1 - t0) * 100) / 100;
+  return out;
 })()
 """
 
@@ -153,10 +161,26 @@ def _stage(msg: str) -> None:
 
 
 def write_bridge_health(health: dict[str, Any]) -> None:
+    # Atomic (temp + os.replace): the panel reads this every 500ms and a torn
+    # read parses to nothing, which looked exactly like a dead bridge.
     try:
-        HEALTH_PATH.write_text(json.dumps(health), encoding="utf-8")
+        tmp = HEALTH_PATH.with_suffix(HEALTH_PATH.suffix + f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(health), encoding="utf-8")
+        os.replace(tmp, HEALTH_PATH)
     except OSError:
         pass
+
+
+# Read-success facts the heartbeat reports while poll_context is mid-evaluate.
+_LIVE_HEALTH: dict[str, Any] = {"last_ok": 0.0, "failures": 0, "last_error": "", "snapshot_ms": None}
+
+
+def heartbeat(stop: threading.Event, period: float = 0.5) -> None:
+    """Bump seen_at on a fixed cadence so a slow read never reads as a closed
+    window. seen_at means the host is alive; `failures` carries read trouble."""
+    while not stop.is_set():
+        write_bridge_health({"seen_at": time.time(), **_LIVE_HEALTH, **PLATFORM_STATE})
+        stop.wait(period)
 
 
 def _window_flags() -> list[str]:
@@ -297,7 +321,9 @@ def poll_context(ref: PageRef, stop: threading.Event) -> None:
     failures = 0
     last_ok = 0.0
     last_error = ""
+    snapshot_ms = None
     while not stop.is_set():
+        snapshot_ms = None
         page = ref.page
         if page is None:
             write_bridge_health({
@@ -312,6 +338,7 @@ def poll_context(ref: PageRef, stop: threading.Event) -> None:
         try:
             snapshot = page.evaluate(_SNAPSHOT_JS, timeout=EVALUATE_TIMEOUT)
             if isinstance(snapshot, dict):
+                snapshot_ms = snapshot.get("snapshot_ms")
                 for key, field in (
                     ("page_context", "context"),
                     ("show_catalog", "catalog"),
@@ -333,11 +360,13 @@ def poll_context(ref: PageRef, stop: threading.Event) -> None:
             failures += 1
             last_error = f"{type(error).__name__}: {error}"[:160]
 
+        _LIVE_HEALTH.update({"last_ok": last_ok, "failures": failures, "last_error": last_error, "snapshot_ms": snapshot_ms})
         write_bridge_health({
             "seen_at": time.time(),
             "last_ok": last_ok,
             "failures": failures,
             "last_error": last_error,
+            "snapshot_ms": snapshot_ms,
             **PLATFORM_STATE,
         })
         stop.wait(POLL_SECONDS)
@@ -388,6 +417,7 @@ def main() -> None:
     ref.set(_open_page(conn))
     _stage(f"attached to a page target; document-start: {PLATFORM_STATE['document_start']}")
 
+    threading.Thread(target=heartbeat, args=(stop,), name="bridge-heartbeat", daemon=True).start()
     threading.Thread(target=watch_state, args=(ref, stop), daemon=True).start()
     threading.Thread(target=poll_context, args=(ref, stop), daemon=True).start()
     _stage("threads started; supervising chrome")
