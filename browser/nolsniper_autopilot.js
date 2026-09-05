@@ -3,7 +3,7 @@
 
   // Bumped whenever seat-grab behaviour changes. Shown in the overlay on load /
   // 좌석 잡기 so you can tell the 예매 창 actually got the new script.
-  const AUTOPILOT_BUILD = "trigger-v68";
+  const AUTOPILOT_BUILD = "trigger-v71";
 
   // ---------------------------------------------------------------------------
   // Popup shim — runs before anything else, on every frame.
@@ -331,6 +331,12 @@
     discord_webhook: "",
     // Which seat to aim for within a grade tier. See SEAT_STRATEGIES.
     seat_strategy: "center",
+    // How a freed seat is pressed. "auto": the page's own seatSelectHandler
+    // through the React fiber when the circle is still drawn disabled (the
+    // pointer press would be refused by the leaf gate until the page's 3-4s
+    // SWR redraw), the proven pointer press once it is enabled. "handler"
+    // always goes through the fiber; "pointer" never does. See pressViaHandler.
+    press_via: "auto",
     // 취켓팅 takes one seat and stops, so an unwanted grade ends the watch.
     catch_grade_strict: true,
     reentry: false,
@@ -425,16 +431,23 @@
   // above that lands at 67ms rather than 100ms, at 60 requests a second
   // against the ~460 the site's own page does opening a 구역.
   //
-  // 20, not 30: the request-rate ceiling below is what actually bounds the
-  // gateway exposure, and a 30ms floor sat on top of a ~20-29ms seatStatus
-  // round trip, so a seat freeing just after a reading was up to 30ms stale
-  // before the next one. The floor now matches the RTT; the 60/s cap and the
-  // MessageChannel yield (never a timer) are unchanged.
-  const CATCH_FAST_POLL_MS = 20;
+  // 15, not 20: the request-rate ceiling below is what actually bounds the
+  // gateway exposure, and a floor sitting at the seatStatus RTT (~20ms) still
+  // let a seat freeing just after a reading go a whole round trip stale. With
+  // three interleaved workers the readings arrive ~16ms apart at the 60/s cap,
+  // so the floor drops under that spacing and stops being the thing that
+  // paces anything; the cap and the MessageChannel yield (never a timer) do.
+  const CATCH_FAST_POLL_MS = 15;
   // Hyper-focus: once a block is open on screen, 취켓팅 reads only that block,
   // this often, and never leaves it. Measured 17:00: sequential sweeps across
   // 10+ blocks (~1s a lap) lost every cancellation to bots parked on one block.
-  const CATCH_FOCUS_POLL_MS = 20;
+  const CATCH_FOCUS_POLL_MS = 15;
+  // The one number that is NOT pushed: the gateway answers GATEWAY_ABUSE_BLOCKED
+  // with a ~165s lockout (measured, docs §3.1), and its threshold has not been
+  // measured. 60/s sustained is the highest rate that has run for whole
+  // watches without a block. A block at the moment a seat frees loses every
+  // seat for three minutes, which no polling gain can repay — so the stream is
+  // made gapless *under* this cap rather than the cap raised.
   const CATCH_MAX_REQUESTS_PER_SEC = 60;
   const CATCH_LIVE_TRIES = 8;
   // 좌석 잡기 gives up after this many refusals in a row. 취켓팅 keeps watching,
@@ -453,6 +466,33 @@
     lastSeat: "",
     // Set by 정지, cleared only by a button press in the panel.
     haltedByUser: false,
+    // Why the engine is paused, when it paused itself rather than being
+    // stopped: "userDeselect" (the held seat was let go on the map),
+    // "humanTouch" (a real pointer press landed on a seat while the watch
+    // ran), "priceStep" (the page advanced to 가격 선택). Cleared by 감시 시작.
+    pauseReason: "",
+    pausedAt: 0,
+    humanTouches: 0,
+    // The hold guard: watches a caught seat for the user letting it go.
+    holdGuardOn: false,
+    holdGuardTimer: null,
+    holdGuardEmpty: 0,
+    // Bitmap flip → pointer events dispatched, for the last press, in ms.
+    lastDetectToPressMs: null,
+    // Which path the last press took: "pointer" | "handler" | "".
+    lastPressVia: "",
+    handlerPresses: 0,
+    handlerMisses: 0,
+    // Synthetic `online` pulses sent to wake the page's SWR poll.
+    swrNudges: 0,
+    swrNudgedAt: 0,
+    // P41149 좌석 상태가 변경 dialogs seen, and dialogs dismissed by the
+    // observer the moment they mounted.
+    statusChangedDialogs: 0,
+    fastDismissed: 0,
+    lastFastDismissMs: null,
+    // When the page's own hold timer (7 minutes from the preselect) runs out.
+    holdExpiresAt: 0,
     // Aiming strategy support: seed is per run, centre is per venue.
     shuffleSeed: 0,
     mapCenterX: null,
@@ -777,12 +817,65 @@
     return clockState.offsetSeconds;
   }
 
+  // An exact short wait that survives a backgrounded window.
+  //
+  // A timer is the cheap tool and is used while it is proven honest. WKWebView
+  // behind another window fires a 30ms timer about once a second (measured),
+  // and Chrome clamps a hidden tab to ~1s too; a poller waiting on such a
+  // timer collapses to a few requests a second exactly when the user has
+  // switched to the 조작판. So every timer wait is measured, and one that
+  // overshoots by more than TIMER_CLAMP_SLACK_MS marks timers clamped for
+  // TIMER_CLAMP_HOLD_MS. While clamped the wait spins on MessageChannel hops —
+  // each a real macrotask, so the renderer still paints between them — and a
+  // 4ms probe timer (never awaited) keeps checking whether timers are honest
+  // again, so a window brought back to the front gets its idle CPU back.
+  const TIMER_CLAMP_SLACK_MS = 25;
+  const TIMER_CLAMP_HOLD_MS = 5000;
+  let timersClampedUntil = 0;
+  let timerProbeInFlight = false;
+  function probeTimerClamp() {
+    if (timerProbeInFlight) return;
+    timerProbeInFlight = true;
+    const started = performance.now();
+    setTimeout(() => {
+      timerProbeInFlight = false;
+      const late = performance.now() - started - 4;
+      timersClampedUntil = late > TIMER_CLAMP_SLACK_MS ? performance.now() + TIMER_CLAMP_HOLD_MS : 0;
+    }, 4);
+  }
+  function timersClamped() {
+    return performance.now() < timersClampedUntil;
+  }
+  async function pauseFor(ms) {
+    const until = performance.now() + ms;
+    if (timersClamped()) {
+      probeTimerClamp();
+      while (performance.now() < until) await yieldFast();
+      return;
+    }
+    if (ms > 2) {
+      const started = performance.now();
+      await sleep(ms);
+      if (performance.now() - started - ms > TIMER_CLAMP_SLACK_MS) timersClampedUntil = performance.now() + TIMER_CLAMP_HOLD_MS;
+    }
+    while (performance.now() < until) await yieldFast();
+  }
   // Timer-free yield: WKWebView clamps setTimeout hard in a non-frontmost
   // window; a MessageChannel hop is not clamped, so short waits stay short.
+  //
+  // One channel, a queue of waiters. This used to set port1.onmessage per
+  // call, and two workers yielding inside the same task (their fetches
+  // answering on the same frame, which three interleaved workers do often)
+  // overwrote the first's handler: its message resolved the second, and the
+  // first worker hung on a promise nothing would ever settle — one poller
+  // silently down to two, then one. Each posted message now settles exactly
+  // one waiter, in order.
   const fastChannel = typeof MessageChannel === "function" ? new MessageChannel() : null;
+  const fastWaiters = [];
+  if (fastChannel) fastChannel.port1.onmessage = () => { const wake = fastWaiters.shift(); if (wake) wake(); };
   function yieldFast() {
     if (!fastChannel) return Promise.resolve();
-    return new Promise((resolve) => { fastChannel.port1.onmessage = () => resolve(); fastChannel.port2.postMessage(0); });
+    return new Promise((resolve) => { fastWaiters.push(resolve); fastChannel.port2.postMessage(0); });
   }
   // Resolve the moment the page's own seat request answers — from inside the
   // network callback, not from a poll. `since` guards against an older answer.
@@ -836,7 +929,10 @@
           throw error;
         }
       }
-      await sleep(Math.min(20, remainingMs - 4));
+      // Never a bare timer on the approach: WKWebView behind another window
+      // fires a 20ms timer about once a second, and one clamped step lands
+      // the fire up to a second late. pauseFor detects the clamp and spins.
+      await pauseFor(Math.min(20, remainingMs - 4));
     }
   }
 
@@ -874,7 +970,11 @@
   }
   // Keep the header truthful between messages: the mode can change (a stop,
   // a lock) without anyone calling updateOverlay.
-  setInterval(() => {
+  // One per document, not one per reload: the previous instance's ticker is
+  // cleared before this one starts, or every reload_autopilot left another
+  // running against a retired seatState.
+  if (window.__nolsniperOverlayHeadId) clearInterval(window.__nolsniperOverlayHeadId);
+  window.__nolsniperOverlayHeadId = setInterval(() => {
     const root = document.getElementById("nolsniper-overlay");
     if (!root || currentMode() === lastOverlayMode) return;
     const head = root.querySelector("strong");
@@ -1154,7 +1254,9 @@
   // Only the Interpark modal title. Never "보안문자" — that string is in our
   // own toast, and matching it made the sniper wait forever after a manual solve.
   function isCaptchaPageCopy(text) {
-    return /화면의\s*문자를\s*입력해주세요|문자를\s*입력해주세요/.test(String(text || ""));
+    // Both variants the seat page ships (locale seat.json): the image captcha
+    // and the slider puzzle 화살표를 밀어 퍼즐을 맞춰주세요.
+    return /화면의\s*문자를\s*입력해주세요|문자를\s*입력해주세요|화살표를\s*밀어|퍼즐을\s*맞춰/.test(String(text || ""));
   }
 
   function isSniperOverlay(node) {
@@ -1172,11 +1274,29 @@
     return true;
   }
 
+  // The text walk below reads innerText on every div/section/article/aside —
+  // a layout over the whole document — and the catch tick asked it every
+  // 15ms. A captcha always brings an input, a canvas, or a captcha-named
+  // element with it, so one querySelector (no layout) answers "no" first;
+  // the walk only runs when something captcha-shaped is actually mounted,
+  // and its answer is held for CAPTCHA_CHECK_TTL_MS so a tick never pays twice.
+  const CAPTCHA_SHAPE = '[class*="captcha" i],[id*="captcha" i],input[name*="captcha" i],input[maxlength="6"],input[maxlength="4"],canvas,[class*="puzzle" i],[class*="slider" i]';
+  const CAPTCHA_CHECK_TTL_MS = 100;
+  let captchaCheckedAt = 0;
+  let captchaLast = false;
+  function captchaShapePresent() {
+    try { return Boolean(document.querySelector(CAPTCHA_SHAPE)); } catch (error) { return true; }
+  }
   function captchaPresent() {
+    const now = performance.now();
+    if (now - captchaCheckedAt < CAPTCHA_CHECK_TTL_MS) return captchaLast;
+    captchaCheckedAt = now;
+    if (!captchaShapePresent()) { captchaLast = false; return false; }
     const modal = findCaptchaModal();
-    if (modal && isVisible(modal)) return true;
+    if (modal && isVisible(modal)) { captchaLast = true; return true; }
     const input = findCaptchaInput();
-    return Boolean(input && isVisible(input));
+    captchaLast = Boolean(input && isVisible(input));
+    return captchaLast;
   }
 
   function findCaptchaModal() {
@@ -1363,8 +1483,60 @@
   // It had no pattern at all, so seatErrorDialogVisible() answered false, the
   // select wait ran to its timeout, and the modal — which is modal — sat there
   // blocking every later click. The run did not move on; it ground to a halt.
+  //
+  // P41149 SEAT_STATUS_CHANGED — 좌석 상태가 변경되었습니다. 다른 좌석을 선택해
+  // 주세요 (locale error.json, fetched 2026-09-05) — is the same verdict said
+  // differently: that seat is gone, take the next one. It matched neither
+  // pattern and fell into unknownDialog, where it was dismissed late by the
+  // generic overlay path. Also accepted: 이선좌, the users' own word for it.
   const SEAT_TAKEN_DIALOG =
-    /이미\s*선점|이미\s*선택된\s*좌석|이미\s*판매|다른\s*고객(님)?\s*이/;
+    /이미\s*선점|이미\s*선택된\s*좌석|이미\s*판매|다른\s*고객(님)?\s*이|좌석\s*상태가\s*변경|이선좌/;
+  const SEAT_STATUS_CHANGED_DIALOG = /좌석\s*상태가\s*변경/;
+  // The page's own hold timer (bundle: 420000ms from the preselect, though the
+  // copy says 10분) ran out: a blocking modal, and the seat is gone with it.
+  const HOLD_LIFETIME_MS = 420000;
+  const HOLD_EXPIRED_DIALOG = /시간\s*(10분|7분)?\s*이?\s*종료되었어요|선택할\s*수\s*있는\s*시간.*종료|좌석\s*선택\s*시간이?\s*(만료|종료)/;
+  // A session gone (IE0006, P41147, P41148): its 확인 button navigates to the
+  // product page (goToProduct), so this one must never be auto-pressed.
+  const SESSION_EXPIRED_DIALOG = /세션이\s*만료|예매를\s*진행할\s*수\s*없습니다|로그인이\s*필요|다시\s*로그인/;
+  // What a small modal is saying, in one word — the one place every matcher
+  // agrees, so the dismissers and the watch cannot classify differently.
+  function classifyDialogText(text) {
+    const t = String(text || "");
+    if (!t.trim()) return "none";
+    if (isCaptchaPageCopy(t)) return "captcha";
+    if (SESSION_EXPIRED_DIALOG.test(t)) return "sessionExpired";
+    if (HOLD_EXPIRED_DIALOG.test(t)) return "holdExpired";
+    if (SEAT_STATUS_CHANGED_DIALOG.test(t)) return "statusChanged";
+    if (SEAT_TAKEN_DIALOG.test(t)) return "taken";
+    if (SEAT_ERROR_DIALOG.test(t)) return "error";
+    if (isBookingNoticeCopy(t)) return "bookingNotice";
+    return "unknown";
+  }
+  // Dialogs the watch may press 확인 on without a second thought: they carry
+  // no decision, and every millisecond they stay up the map is unclickable.
+  const INFORMATIONAL_DIALOG = new Set(["taken", "statusChanged", "error"]);
+  // Dialogs whose 확인 must never be pressed by the engine.
+  // holdExpired too: the 10분/7분 timer modal's 확인 drops the session's
+  // seats and can leave the map; it is reported and paused on, never pressed.
+  const NEVER_DISMISS_DIALOG = new Set(["captcha", "sessionExpired", "holdExpired"]);
+  // The booking session's own expiry, when initData carries it (expireAt /
+  // sessionExpireAt / expiresAt, epoch ms or ISO). Past it, any small dialog
+  // that mounts is the expiry modal whatever it says, and is never pressed.
+  function sessionExpireAt() {
+    try {
+      const init = getInitData() || {};
+      const raw = init.expireAt ?? init.sessionExpireAt ?? init.expiresAt ?? init.session?.expireAt ?? null;
+      if (raw == null) return null;
+      const n = typeof raw === "number" ? raw : Date.parse(String(raw));
+      if (!Number.isFinite(n)) return null;
+      return n < 1e12 ? n * 1000 : n;
+    } catch (error) { return null; }
+  }
+  function sessionClockExpired() {
+    const at = sessionExpireAt();
+    return at !== null && Date.now() > at;
+  }
 
   function confirmButtonIn(node) {
     return [...node.querySelectorAll("button,a,[role=button]")].find((el) =>
@@ -1429,7 +1601,87 @@
   }
 
   function dismissSeatTakenDialog() {
-    return dismissDialogNodes(seatTakenDialogNodes(), "takenConflicts");
+    const nodes = seatTakenDialogNodes();
+    if (nodes.some((node) => SEAT_STATUS_CHANGED_DIALOG.test(node.innerText || ""))) {
+      seatState.statusChangedDialogs = (seatState.statusChangedDialogs || 0) + 1;
+    }
+    return dismissDialogNodes(nodes, "takenConflicts");
+  }
+
+  // The instant a modal mounts, not on the next 400ms sweep.
+  //
+  // Informational dialogs (이미 선점 / 좌석 상태가 변경 / 요청 오류) are answered
+  // from a MutationObserver on the document body — React portals mount them
+  // as new subtrees — so 확인 is pressed in the same task the modal appeared
+  // in. The seat map's own subtree is skipped record by record (its circles
+  // churn constantly and the seat index already observes it), and a dialog
+  // the engine must not touch (captcha, session expired) is classified and
+  // left alone, with the classification reported.
+  function dialogRootOf(node) {
+    if (!node || node.nodeType !== 1) return null;
+    if (isSniperOverlay(node)) return null;
+    const own = (node.innerText || "").trim();
+    if (own && own.length <= SEAT_ERROR_MAX_TEXT && confirmButtonIn(node)) return node;
+    // The mounted subtree may be a portal wrapper around the box.
+    for (const inner of node.querySelectorAll?.("[role=dialog],[role=alertdialog],[class*='dialog' i],[class*='modal' i]") || []) {
+      const text = (inner.innerText || "").trim();
+      if (text && text.length <= SEAT_ERROR_MAX_TEXT && confirmButtonIn(inner)) return inner;
+    }
+    return null;
+  }
+  function onDialogMounted(node, mountedAtPerf) {
+    const box = dialogRootOf(node);
+    if (!box) return false;
+    const text = (box.innerText || "").trim();
+    let kind = classifyDialogText(text);
+    if (kind === "unknown" && sessionClockExpired()) kind = "sessionExpired";
+    seatState.lastDialog = { kind, text: text.slice(0, 160), at: Date.now() };
+    if (kind === "statusChanged") seatState.statusChangedDialogs = (seatState.statusChangedDialogs || 0) + 1;
+    if (kind === "sessionExpired") seatState.sessionExpiredSeen = (seatState.sessionExpiredSeen || 0) + 1;
+    if (kind === "holdExpired") { onHoldExpired(); return false; }
+    if (NEVER_DISMISS_DIALOG.has(kind) || !INFORMATIONAL_DIALOG.has(kind)) return false;
+    if (!(seatState.running || seatState.locked || seatState.pressSequenceBusy)) return false;
+    const button = confirmButtonIn(box);
+    if (!button || NEVER_CLICK.test(button.textContent || "")) return false;
+    button.click();
+    seatState.fastDismissed = (seatState.fastDismissed || 0) + 1;
+    seatState.lastFastDismissMs = +(performance.now() - mountedAtPerf).toFixed(2);
+    if (kind === "taken" || kind === "statusChanged") seatState.takenConflicts = (seatState.takenConflicts || 0) + 1;
+    traceCall("fastDismiss", kind, { ms: seatState.lastFastDismissMs, text: text.slice(0, 80) });
+    return true;
+  }
+  function installDialogWatch() {
+    if (typeof MutationObserver !== "function" || !document.body) return false;
+    try { window.__nolsniperDialogObserver?.disconnect(); } catch (error) { /* an older instance */ }
+    const observer = new MutationObserver((records) => {
+      const at = performance.now();
+      for (const record of records) {
+        if (record.type !== "childList" || !record.addedNodes?.length) continue;
+        if (seatIndex.root && seatIndex.root !== document.body && seatIndex.root.contains?.(record.target)) continue;
+        for (const node of record.addedNodes) {
+          if (node.nodeType !== 1) continue;
+          if (onDialogMounted(node, at)) return;
+        }
+      }
+    });
+    try {
+      observer.observe(document.body, { childList: true, subtree: true });
+    } catch (error) { return false; }
+    window.__nolsniperDialogObserver = observer;
+    return true;
+  }
+  // The 7-minute hold ran out under a held seat: the page's modal blocks the
+  // map and the seat is gone. Say so and pause; nothing is auto-pressed.
+  function onHoldExpired() {
+    if (seatState.pauseReason === "holdExpired") return;
+    seatState.locked = false; seatState.confirmStarted = false; seatState.awaitingPayment = false;
+    seatState.heldSeatIds.clear();
+    seatState.holdExpiresAt = 0;
+    seatState.lastError = "좌석 선점 시간(7분)이 끝났습니다 — 안내창의 [확인]을 누른 뒤 다시 [감시 시작]을 누르세요.";
+    pauseWatch("holdExpired");
+  }
+  function holdRemainingMs() {
+    return seatState.holdExpiresAt ? Math.max(0, seatState.holdExpiresAt - Date.now()) : null;
   }
 
   // Anything small, visible and modal that neither pattern claims. Recording it
@@ -1509,6 +1761,17 @@
       // the user was typing. That submits a half-typed captcha, repeatedly, and
       // there was nothing anywhere in this path that knew what a captcha was.
       if (isCaptchaPageCopy(text)) continue;
+      // Nor the session-expired box: its 확인 is goToProduct — a navigation
+      // off the seat map. Report it; the user decides.
+      const kind = classifyDialogText(text);
+      if (NEVER_DISMISS_DIALOG.has(kind)) {
+        seatState.lastDialog = { kind, text: text.slice(0, 160), at: Date.now() };
+        if (kind === "sessionExpired" && seatState.running) {
+          seatState.lastError = "세션이 만료되었습니다 — 예매 창에서 [확인]을 누르고 다시 로그인한 뒤 [감시 시작]을 누르세요.";
+        }
+        continue;
+      }
+      if (kind === "holdExpired") { onHoldExpired(); continue; }
       owners.push({ node, button, len: text.length });
     }
     if (!owners.length) return false;
@@ -2704,7 +2967,7 @@
       }
       // Tight while the open is within reach, easing off after it.
       const interval = offsetMs < 1500 ? SECURE_URL_BURST_MS : offsetMs < 5000 ? 150 : 300;
-      await sleep(Math.max(0, interval - (performance.now() - startedPerf)));
+      await pauseFor(Math.max(0, interval - (performance.now() - startedPerf)));
     }
     armState.waitingAttempts = attempts;
     const message = lastError && lastError.notOpenYet
@@ -2718,6 +2981,7 @@
   async function enterViaSecureUrl(arm, memberInfo = null) {
     const info = memberInfo || (await mintMemberInfo(arm));
     const waitingUrl = await fetchSecureUrl(arm, info);
+    const secureAnsweredPerf = performance.now();
     armState.enteredVia = "secure-url";
     armState.route = "secure-url";
     armState.waitingUrl = waitingUrl;
@@ -2727,7 +2991,7 @@
     rememberPendingRound(arm);
     // Line up and read the rank from here, now — not after handing the key to
     // the waiting room and paying its boot before it does exactly the same.
-    const direct = await enterQueueDirect(waitingUrl);
+    const direct = await enterQueueDirect(waitingUrl, { secureAnsweredPerf });
     if (direct.navigated) return { waitingUrl, secureUrl: true, ...direct };
     // The waiting page lines the key up again (line-up is not idempotent), so
     // after a successful line-up this hands back the place we held. Only
@@ -2791,7 +3055,7 @@
   // key goes from secure-url to a queue position in one more round trip, and
   // the turn is noticed within RANK_POLL_MS. Anything unexpected falls back
   // to navigating to the waiting page exactly as before.
-  async function enterQueueDirect(waitingUrl) {
+  async function enterQueueDirect(waitingUrl, { secureAnsweredPerf = null } = {}) {
     const gen = armState.entryGen || 0;
     const startedPerf = performance.now();
     const report = { key: false, lineUpMs: null, rankMs: null, totalMs: null, userSeq: null, exist: false,
@@ -2800,6 +3064,10 @@
     const key = queueKeyFrom(waitingUrl);
     report.key = Boolean(key);
     if (!key) { report.outcome = "no-key"; return { navigated: false, ...report }; }
+    // secure-url answered → line-up on the wire. Two localStorage writes and
+    // a key parse sit in between; this is what they cost, so a regression
+    // that puts a render or a fetch in front of the line-up is visible.
+    report.dispatchGapMs = secureAnsweredPerf === null ? null : +(performance.now() - secureAnsweredPerf).toFixed(2);
     let lu;
     try {
       lu = await postLineUp(key);
@@ -3637,6 +3905,92 @@
     return host;
   }
 
+  // ── Pre-paying the queue API's fixed costs ────────────────────────────────
+  //
+  // Measured 2026-09-05 from this machine: cold TCP+TLS to the queue API
+  // 29-38ms to TLS complete, first byte 42-48ms; and every POST there is a
+  // credentialed application/json request, so the browser preflights it —
+  // and the API sends no Access-Control-Max-Age, so the preflight cache is
+  // the browser default (5s). secure-url and line-up are different URLs,
+  // hence two preflights in front of the position-deciding line-up.
+  //
+  // preconnectEntWaiting  — TLS up before the first POST (F6)
+  // warmQueueApi          — one harmless POST per URL so both preflights are
+  //                         cached; sent T-3s (inside the 5s window) on the
+  //                         scheduled path and on landing for 지금 진입 (F4).
+  //                         Never repeated inside QUEUE_WARM_MIN_GAP_MS: the
+  //                         queue endpoint's block is the unrecoverable one.
+  // premintOnLanding      — member-info minted on the goods page, refreshed
+  //                         every MINT_REFRESH_MS while parked, so 지금 진입
+  //                         skips its ~60ms GET (F5)
+  const QUEUE_WARM_LEAD_MS = 3000;
+  const QUEUE_WARM_MIN_GAP_MS = 4000;
+  const MINT_REFRESH_MS = 240000;
+  function preconnectEntWaiting() {
+    try {
+      if (!document.head || document.querySelector('link[data-nolsniper-preconnect="ent-waiting"]')) return true;
+      for (const rel of ["dns-prefetch", "preconnect"]) {
+        const link = document.createElement("link");
+        link.rel = rel;
+        link.href = ENT_WAITING_ORIGIN;
+        if (rel === "preconnect") link.crossOrigin = "use-credentials";
+        link.dataset.nolsniperPreconnect = "ent-waiting";
+        document.head.appendChild(link);
+      }
+      return true;
+    } catch (error) { return false; }
+  }
+  async function warmQueueApi(reason = "") {
+    const now = Date.now();
+    if (now - (armState.queueWarmedAt || 0) < QUEUE_WARM_MIN_GAP_MS) return armState.queueWarm || null;
+    armState.queueWarmedAt = now;
+    preconnectEntWaiting();
+    const startedPerf = performance.now();
+    const post = (path, body) => {
+      const controller = typeof AbortController === "function" ? new AbortController() : null;
+      if (controller) setTimeout(() => controller.abort(), 3000);
+      return fetch(`${ENT_WAITING_ORIGIN}${path}`, {
+        method: "POST", credentials: "include", body: JSON.stringify(body),
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        signal: controller?.signal,
+      });
+    };
+    // Bodies the gate rejects harmlessly and answers fast: no key lines
+    // nothing up, and an empty secure-url command names no show.
+    const settled = await Promise.allSettled([post(SECURE_URL_PATH, {}), post(LINE_UP_PATH, { key: "" })]);
+    const report = {
+      at: now, reason, ms: Math.round(performance.now() - startedPerf),
+      secureUrl: settled[0].status === "fulfilled" ? settled[0].value.status : `err:${String(settled[0].reason).slice(0, 40)}`,
+      lineUp: settled[1].status === "fulfilled" ? settled[1].value.status : `err:${String(settled[1].reason).slice(0, 40)}`,
+    };
+    armState.queueWarm = report;
+    armState.queueWarms = (armState.queueWarms || 0) + 1;
+    traceCall("warmQueueApi", reason, report);
+    return report;
+  }
+  function stopMintRefresh() {
+    if (window.__nolsniperMintRefreshId) clearInterval(window.__nolsniperMintRefreshId);
+    window.__nolsniperMintRefreshId = 0;
+  }
+  async function premintOnLanding(arm, { refresh = true } = {}) {
+    if (!arm?.goods_code || !secureUrlUsableHere() || loginState() === false) return false;
+    try {
+      await mintMemberInfo(arm);
+    } catch (error) {
+      armState.memberInfo = null;
+      log("landing premint failed", error);
+      return false;
+    }
+    if (refresh) {
+      stopMintRefresh();
+      window.__nolsniperMintRefreshId = setInterval(() => {
+        if (!secureUrlUsableHere()) { stopMintRefresh(); return; }
+        mintMemberInfo(arm, { maxAgeMs: MINT_REFRESH_MS - 5000 }).catch(() => { armState.memberInfo = null; });
+      }, MINT_REFRESH_MS);
+    }
+    return true;
+  }
+
   function rememberQueueHost(waitingUrl) {
     try {
       const origin = new URL(String(waitingUrl), location.origin).origin;
@@ -3742,6 +4096,10 @@
       armState.clockQuality = clockState.quality;
       armState.clockOffsetMs = Math.round((clockState.offsetSeconds || 0) * 1000);
       armState.queueHost = preconnectQueueHost();
+      preconnectEntWaiting();
+      // The credential now, so 지금 진입 pressed while parked skips its GET;
+      // the burst re-mints fresh at T-10s regardless.
+      if (secureUrlUsableHere() && arm.goods_code && !arm.dry_run) void premintOnLanding(arm);
       armState.clockJumpMs = 0;
       const remaining = armTargetUnix(arm) - serverTimeUnix();
       updateOverlay(`${arm.dry_run ? "테스트 " : ""}대기열 예약<br>${Math.max(0, remaining).toFixed(1)}초`, "info");
@@ -3775,6 +4133,12 @@
             await sleep(500);
           }
         }
+      }
+      // T-3s: both CORS preflights cached (5s browser default, no Max-Age
+      // from the API) and TLS warm, so the first shot is one round trip.
+      if (secureUrlUsableHere() && arm.goods_code && !arm.dry_run) {
+        await waitUntilServerUnix(entryStart - QUEUE_WARM_LEAD_MS / 1000, { cancelled });
+        await warmQueueApi("scheduled").catch(() => null);
       }
       await waitUntilServerUnix(entryStart, { cancelled });
 
@@ -5225,6 +5589,9 @@
     if (!root) return false;
     if (seatIndex.observer && seatIndex.root === root) return true;
     if (seatIndex.observer) seatIndex.observer.disconnect();
+    // A previous script instance's observer (reload_autopilot) is closure-
+    // scoped and would keep indexing into a retired seatState per mutation.
+    try { window.__nolsniperSeatObserver?.disconnect(); } catch (error) { /* gone */ }
     seatIndex.root = root;
     rebuildSeatIndex();
     try {
@@ -5267,6 +5634,7 @@
         attributes: true,
         attributeFilter: ["class", "fill", "aria-disabled", "style"],
       });
+      window.__nolsniperSeatObserver = seatIndex.observer;
       return true;
     } catch (error) {
       seatIndex.observer = null;
@@ -5470,13 +5838,23 @@
   // stale mask can never resurrect a seat that has since been taken. And the
   // press happens right here, in the callback — not in a loop tick that may be
   // throttled — so detection→press is a function call, not a scheduler.
-  const FOCUS_WORKERS = 2;
+  // Three, not two. Two RTT-paced workers reach the cap only while the round
+  // trip stays under ~33ms; a 40ms spike (measured under load) drops them to
+  // 50/s with nothing to fill the gap. Three keep the wire full past a 50ms
+  // RTT, and the slot pacer below — not the RTT — is what spaces them at the
+  // cap, so more workers cost no extra requests.
+  const FOCUS_WORKERS = 3;
+  // First sends are staggered by this much so three answers do not land on
+  // the same frame and then re-issue on the same frame, forever.
+  const FOCUS_STAGGER_MS = 5;
   // `epoch` counts spawns and `workers` counts live loops. A worker belongs to
   // the epoch that spawned it: a stop followed by a restart inside one fetch
   // round trip used to leave the old pair alive beside the new one (the
   // restart re-raised `active` before they had looked), and every such cycle
   // added two more loops against the 60/s budget.
-  const focusPoller = { active: false, key: "", seq: 0, applied: 0, inFlight: 0, responses: [], gen: 0, sent: [], epoch: 0, workers: 0 };
+  const focusPoller = { active: false, key: "", seq: 0, applied: 0, inFlight: 0, responses: [], gen: 0, sent: [], epoch: 0, workers: 0, lastSentAt: 0 };
+  // One cap period: the spacing the pacer holds between consecutive sends.
+  const FOCUS_SEND_PERIOD_MS = 1000 / CATCH_MAX_REQUESTS_PER_SEC;
   function stopFocusPoller() {
     focusPoller.active = false; focusPoller.key = "";
   }
@@ -5485,10 +5863,40 @@
     focusPoller.responses = focusPoller.responses.filter((t) => now - t < 1000);
     return focusPoller.responses.length;
   }
+  // Two guards on a send, and both must pass:
+  //   spacing — the last send was at least one cap period ago. This is what
+  //             makes the stream *even*: without it three workers on a 10ms
+  //             round trip fired 60 probes in 200ms and then sat silent for
+  //             800ms while the window slid (measured in the journey harness:
+  //             gap median 0.1ms, gap max 761ms). A cancellation in the silent
+  //             800ms was the whole race lost to a cap we were under.
+  //   window  — no more than the cap in any trailing second, the guard the
+  //             gateway's abuse block is actually about.
   function focusPollerCanSend() {
     const now = performance.now();
+    if (now - focusPoller.lastSentAt < FOCUS_SEND_PERIOD_MS - 0.25) return false;
     focusPoller.sent = focusPoller.sent.filter((t) => now - t < 1000);
     return focusPoller.sent.length < CATCH_MAX_REQUESTS_PER_SEC && gatewayBlockRemainingMs() <= 0;
+  }
+  // Milliseconds until the next send is admitted; 0 when one may leave now.
+  // Waiting exactly this long — rather than a fixed FOCUS_YIELD_MS, which was
+  // where the stream went quiet — is what makes the probes gapless: at 60/s
+  // one leaves every ~16.7ms whether the previous answer took 9ms or 40ms.
+  function focusPollerNextSlotMs() {
+    if (gatewayBlockRemainingMs() > 0) return FOCUS_YIELD_MS;
+    const now = performance.now();
+    const spacing = FOCUS_SEND_PERIOD_MS - (now - focusPoller.lastSentAt);
+    focusPoller.sent = focusPoller.sent.filter((t) => now - t < 1000);
+    let window = 0;
+    if (focusPoller.sent.length >= CATCH_MAX_REQUESTS_PER_SEC) {
+      let oldest = Infinity;
+      for (const t of focusPoller.sent) if (t < oldest) oldest = t;
+      window = 1000 - (now - oldest);
+    }
+    return Math.max(0, spacing, window);
+  }
+  function onPriceStep() {
+    return location.search.includes("step=price");
   }
   function focusPollerAlive(runGen, epoch = focusPoller.epoch) {
     // Deliberately NOT gated on runGen: a sold-out landing hands off to a
@@ -5498,8 +5906,11 @@
     // block is the same watch, whichever run object is driving it. It IS gated
     // on the spawn epoch: a worker outlived by a stop+restart must not join
     // the pair the restart spawned.
+    // And on the page: the moment the URL carries step=price the checkout is
+    // the user's, and not one more seatStatus may leave under it.
     return focusPoller.active && epoch === focusPoller.epoch && seatState.running && !seatState.stopRequested
-      && !seatState.locked && seatState.runMode === "catch" && seatState.catchFocusBlock === focusPoller.key;
+      && !seatState.locked && seatState.runMode === "catch" && seatState.catchFocusBlock === focusPoller.key
+      && !onPriceStep();
   }
   // The floor on one worker's poll period. A bitmap request answers in ~20ms,
   // so this is normally free (the fetch already took it); it only bites when a
@@ -5508,20 +5919,25 @@
   // yield and starved the renderer into Chrome's "페이지 응답 없음" dialog.
   // Flooring the period AND yielding a real macrotask every iteration keeps
   // ~50 req/s while guaranteeing the main thread paints at 60fps.
-  const FOCUS_YIELD_MS = 20;
-  async function focusWorker(initData, config, runGen, gradeOrder, blockKeys, epoch = focusPoller.epoch) {
+  const FOCUS_YIELD_MS = 15;
+  async function focusWorker(initData, config, runGen, gradeOrder, blockKeys, epoch = focusPoller.epoch, lane = 0) {
     focusPoller.workers += 1;
     try {
-      await focusWorkerLoop(initData, config, runGen, gradeOrder, blockKeys, epoch);
+      await focusWorkerLoop(initData, config, runGen, gradeOrder, blockKeys, epoch, lane);
     } finally {
       focusPoller.workers = Math.max(0, focusPoller.workers - 1);
     }
   }
-  async function focusWorkerLoop(initData, config, runGen, gradeOrder, blockKeys, epoch) {
+  async function focusWorkerLoop(initData, config, runGen, gradeOrder, blockKeys, epoch, lane = 0) {
+    // Interleave from the first send: lane 0 goes now, the others a few ms
+    // apart, so the stream starts spread rather than as one burst that then
+    // re-issues in lockstep.
+    if (lane > 0) await pauseFor(lane * FOCUS_STAGGER_MS);
     while (focusPollerAlive(runGen, epoch)) {
       if (focusPollerCanSend()) {
         const mySeq = ++focusPoller.seq;
-        focusPoller.sent.push(performance.now());
+        focusPoller.lastSentAt = performance.now();
+        focusPoller.sent.push(focusPoller.lastSentAt);
         focusPoller.inFlight += 1;
         let masks = null;
         // The fetch itself paces the worker (~20ms RTT) and — unlike a timer —
@@ -5552,12 +5968,15 @@
         // setTimeout floor that a background window would clamp to ~1s.
         await yieldFast();
       } else {
-        // Rate-limited (60/s) or gateway-blocked: nothing to send, so idle a
-        // real ~20ms here. A clamp when backgrounded is harmless — we are
-        // deliberately waiting for the send window either way.
+        // Rate-capped (60/s) or gateway-blocked: nothing may leave yet. Wait
+        // exactly until the next slot opens — at most one cap period — and
+        // never a fixed period, which is where the wire used to go idle.
+        // pauseFor is timer-backed only while timers are proven unclamped;
+        // behind another window it spins on MessageChannel hops instead, so
+        // a backgrounded 예매 창 holds the full rate.
         await yieldFast();
         if (!focusPollerAlive(runGen, epoch)) break;
-        await sleep(FOCUS_YIELD_MS);
+        await pauseFor(Math.min(FOCUS_YIELD_MS, Math.max(1, focusPollerNextSlotMs())));
       }
     }
     focusPoller.inFlight = Math.max(0, focusPoller.inFlight);
@@ -5568,6 +5987,22 @@
   //     "sidebar quiet" wait → page select answers → held.
   // A taken answer marks the seat and presses the next freed one immediately.
   const PRESS_SNAP_MAX = 4;
+  // How long a 선택 완료 press may go without the page's select request
+  // leaving before it is pressed again. The page submits synchronously from
+  // the click (validateAndSubmit → axios), so on a healthy page the send is
+  // stamped within the same task; 120ms is a full frame budget of slack.
+  const CONFIRM_WATCHDOG_MS = 120;
+  // True once the page's own select request has left (or answered) since
+  // `since`. Hops, not timers, so a backgrounded window cannot stretch it.
+  async function waitForSelectSent(since, timeoutMs) {
+    const deadline = performance.now() + timeoutMs;
+    for (;;) {
+      const net = window.__nolsniperLastSeatNet || {};
+      if ((net.selectSentAt || 0) >= since || (net.selectAt || 0) >= since) return true;
+      if (performance.now() >= deadline) return false;
+      await yieldFast();
+    }
+  }
   async function pressSequence(ranked, config) {
     const tried = [];
     // The run this press belongs to. A stop (or a fresh run) bumps the
@@ -5579,16 +6014,24 @@
     const bail = (lat) => { finishCatchTiming("stopped"); if (lat) lat.outcome = "stopped"; };
     for (const seat of ranked.slice(0, PRESS_SNAP_MAX)) {
       if (halted()) return;
-      if (!seatNodeFor(seat.seatInfoId)) continue;
+      // One index lookup, handed to the press. This used to be looked up
+      // here and again inside clickSeatOnMap, with a sidebar read (a layout)
+      // between deciding and pressing. Now nothing sits in front of the
+      // pointer events but the lookup itself.
+      const node = seatNodeFor(seat.seatInfoId);
+      // Not drawn: only the page's handler can still press it (it needs no
+      // circle). Resolved here, once, before the clock starts.
+      if (!node && (pressVia(config) === "pointer" || !handlerReachable())) continue;
       const detect = seat.freedAtPerf || performance.now();
       startCatchTiming(detect);
       const since = Date.now();
-      const pressed = clickSeatOnMap(seat.seatInfoId, { countBefore: selectedSeatCount() });
+      const pressed = clickSeatOnMap(seat.seatInfoId, { node, blockKey: seat.blockKey || null, config });
       const pressAt = performance.now();
       if (!pressed) continue;
       noteCatchStage("click", pressAt);
       seatState.fastClickedId = String(seat.seatInfoId); seatState.fastClickedAt = nowMs();
       seatState.fastClicks = (seatState.fastClicks || 0) + 1;
+      seatState.lastDetectToPressMs = +(pressAt - detect).toFixed(3);
       tried.push(seat.seatInfoId);
       const lat = (seatState.lastCatchLatency = { seat: seat.label || seat.seatInfoId, pressMs: +(pressAt - detect).toFixed(2), preselectMs: null, confirmMs: null, holdMs: null, outcome: "pressed" });
       const pre = await waitForSeatNet("preselect", since, 2500);
@@ -5601,8 +6044,16 @@
         lat.outcome = pre.timeout ? "preselect-timeout" : "taken";
         continue;
       }
-      // Confirm the instant the hold is acknowledged — wait only for the button
-      // to exist (MessageChannel hops, not timers; bounded at 400ms).
+      // One full macrotask before 선택 완료. The preselect answer wakes this
+      // sequence from inside the page's own network callback, and the page's
+      // React commit that removes the seat from its in-flight set and enables
+      // the button runs in the same task, after the callback. Pressing inside
+      // it hit showToastIfSeatBusy / seat_requestPending — a won race with a
+      // 선택 완료 that did nothing. A MessageChannel hop (never a timer) lets
+      // that commit land first.
+      await yieldFast();
+      if (halted()) return bail(lat);
+      // Then confirm — wait only for the button to exist (hops, bounded 400ms).
       const confirmDeadline = performance.now() + 400;
       let confirmed = false;
       while (performance.now() < confirmDeadline) {
@@ -5611,7 +6062,21 @@
         await yieldFast();
       }
       lat.confirmMs = confirmed ? Math.round(performance.now() - detect) : null;
-      if (!confirmed) { lat.outcome = "no-confirm-button"; seatState.lastSeat = seat.label || ""; seatState.locked = true; return; }
+      if (!confirmed) { lat.outcome = "no-confirm-button"; seatState.lastSeat = seat.label || ""; seatState.locked = true; startHoldGuard(); return; }
+      // Commit watchdog. The press is a DOM click; whether the page acted on
+      // it shows up as POST /onestop/api/seats/select leaving the browser,
+      // which the XHR/fetch hooks stamp at send time. Not seen within
+      // CONFIRM_WATCHDOG_MS: press once more, decisively. A press the page
+      // did act on but the hook missed lands on its own busy guard (a toast,
+      // not a modal), so the second press is cheap and the first is not lost.
+      const commitAt = performance.now();
+      const seen = await waitForSelectSent(since, CONFIRM_WATCHDOG_MS);
+      if (halted()) return bail(lat);
+      if (!seen) {
+        seatState.confirmRepresses = (seatState.confirmRepresses || 0) + 1;
+        lat.represses = (lat.represses || 0) + 1;
+        traceCall("confirmWatchdog", seat.seatInfoId, { afterMs: Math.round(performance.now() - commitAt), pressed: clickConfirmSelect() });
+      }
       const sel = await waitForSeatNet("select", since, 3000);
       if (sel.aborted) return bail(lat);
       lat.holdMs = sel.at ? Math.round(performance.now() - detect) : null;
@@ -5625,23 +6090,187 @@
       finishCatchTiming(sel.timeout ? "unconfirmed" : "reserved");
       lat.outcome = sel.timeout ? "unconfirmed" : "reserved";
       seatState.locked = true; seatState.confirmStarted = true;
+      seatState.holdExpiresAt = Date.now() + HOLD_LIFETIME_MS;
+      seatState.heldSeatIds.add(String(seat.seatInfoId));
       seatState.lastSeat = seat.label || String(seat.seatInfoId);
       seatState.lastExit = "reservedUserContinues";
       seatState.lastSeatPos = { x: seat.posLeft, y: seat.posTop, block: seat.blockKey };
-      updateOverlay(`예약 요청 ${seatState.lastSeat} · 감지→클릭 ${lat.pressMs}ms · 가선점 ${lat.preselectMs}ms · 확정 ${lat.holdMs}ms`, "ok");
+      // Caught. The sweep is over (focusPollerAlive reads `locked`) and the
+      // page is the user's from here; the guard below is the only thing left
+      // watching, and it watches for them letting the seat go.
+      startHoldGuard();
+      updateOverlay(`좌석 선점 완료 ${seatState.lastSeat} · 감지→클릭 ${lat.pressMs}ms · 가선점 ${lat.preselectMs}ms · 확정 ${lat.holdMs}ms`, "ok");
       return;
     }
   }
+  // Warm the press path. The first catch of a sitting used to run the ranking,
+  // the index lookup and the event construction cold — measured 2.7ms in the
+  // journey harness against 0.3ms for every press after it — and the first
+  // catch is the one that matters. Same functions, same shapes, nothing
+  // dispatched; what it records is put back.
+  function warmPressPath(config, gradeOrder, blockKeys) {
+    try {
+      const block = (seatState.lastBlocks || []).find((b) => String(b.blockKey) === focusPoller.key);
+      const seat = (block?.seats || []).find((s) => s?.seatInfoId && s.isExposable);
+      if (!block || !seat) return;
+      const keepOrder = seatState.lastOrder;
+      const keepStage = seatState.lastStagePoint;
+      const traceLen = trace.length;
+      const candidate = toCandidate(seat, block.blockKey);
+      candidate.freedAtPerf = performance.now();
+      const warmNode = { isConnected: true, tagName: "circle", style: {}, getAttribute: () => "", getBoundingClientRect: () => ({ left: 0, top: 0, width: 0, height: 0 }), dispatchEvent: () => true };
+      for (let i = 0; i < 4; i += 1) {
+        const ranked = rankCandidates([candidate], gradeOrder, blockKeys, pickerOptions(config, { isCatch: true }));
+        const node = seatNodeFor(ranked[0]?.seatInfoId);
+        if (node) { seatNodeDisabled(node); node.getBoundingClientRect?.(); }
+        if (typeof PointerEvent === "function") void new PointerEvent("pointerdown", { bubbles: true, cancelable: true, composed: true });
+        void new Date().toISOString().slice(11, 23);
+        // The press itself, into a detached stand-in: the same code runs end
+        // to end and no listener can hear it.
+        clickSeatOnMap("__warm__", { node: warmNode, warm: true });
+      }
+      seatState.lastOrder = keepOrder;
+      seatState.lastStagePoint = keepStage;
+      while (trace.length > traceLen) trace.pop();
+    } catch (error) { /* warming is optional */ }
+  }
   function startFocusPoller(initData, blockKey, config, runGen, gradeOrder = [], blockKeys = []) {
     // Already watching this block: adopt the caller's run, keep the workers.
-    if (focusPoller.active && focusPoller.key === String(blockKey)) { focusPoller.gen = runGen; return; }
+    // Only with workers actually alive — a start that found the watch not
+    // running left `active` raised over zero workers, and every later start
+    // adopted that nothing.
+    if (focusPoller.active && focusPoller.key === String(blockKey) && focusPoller.workers > 0) { focusPoller.gen = runGen; return; }
     stopFocusPoller();
     // A new epoch retires every worker still finishing a fetch from before.
     const epoch = ++focusPoller.epoch;
     focusPoller.active = true; focusPoller.key = String(blockKey); focusPoller.gen = runGen;
+    warmPressPath(config, gradeOrder, blockKeys);
     for (let i = 0; i < FOCUS_WORKERS; i += 1) {
-      void focusWorker(initData, config, runGen, gradeOrder, blockKeys, epoch).catch(() => {});
+      void focusWorker(initData, config, runGen, gradeOrder, blockKeys, epoch, i).catch(() => {});
     }
+  }
+  // ── Hold lifecycle: caught → held → (let go | touched by hand | price step) ──
+  //
+  // Catching a seat ends the sweep, and from then on the page belongs to the
+  // user. Three things can happen next, and each must leave the engine PAUSED
+  // — nothing sweeping, nothing pressing, the 감시 시작 button the only way back:
+  //
+  //   userDeselect  the held seat was let go on the map (선택 좌석 reads 0)
+  //   humanTouch    a real pointer press landed on a seat while the watch ran
+  //   priceStep     the page advanced to step=price; the checkout is manual
+  //
+  // "Paused" is the state 전부 정지 leaves — running false, haltedByUser true,
+  // so bootRoute's URL watcher cannot restart the watch on its own — minus what
+  // stopAll does on top: this never clears the map's selection and never hands
+  // a hold back to the server. A seat the user is looking at, chosen by us or
+  // by hand, is theirs to keep. The one exception is bookkeeping: after a
+  // userDeselect the hold is already gone from the page, so the local lock
+  // goes too, or the next 감시 시작 would refuse to start for a seat nobody holds.
+  const PAUSE_TEXT = {
+    userDeselect: "좌석을 놓았습니다 · 감시 일시정지<br>[감시 시작]을 누르면 다시 감시합니다",
+    holdExpired: "좌석 선점 시간(7분) 종료 · 감시 일시정지<br>안내창 [확인] 후 [감시 시작]을 누르세요",
+    humanTouch: "직접 선택 감지 · 감시 일시정지<br>[감시 시작]을 누르면 다시 감시합니다",
+    priceStep: "가격 선택 단계 · 감시 종료<br>결제는 예매 창에서 직접 진행하세요",
+  };
+  function pauseWatch(reason) {
+    const already = seatState.pauseReason === reason && !seatState.running && !focusPoller.active;
+    stopFocusPoller();
+    stopHoldGuard();
+    abortSeatNetWaiters();
+    window.__nolsniperRunGen = (window.__nolsniperRunGen || 0) + 1;
+    seatState.running = false;
+    seatState.stopRequested = true;
+    seatState.haltedByUser = true;
+    seatState.pauseReason = reason;
+    seatState.pausedAt = Date.now();
+    seatState.catchFocusBlock = "";
+    seatState.catchFocusCheckedAt = 0;
+    seatState.lastExit = reason;
+    if (reason === "userDeselect") {
+      seatState.locked = false;
+      seatState.confirmStarted = false;
+      seatState.awaitingPayment = false;
+      seatState.heldSeatIds.clear();
+      seatState.lastSeat = "";
+    }
+    if (already) return false;
+    traceCall("pauseWatch", reason, { pageSelected: selectedSeatCount() });
+    updateOverlay(PAUSE_TEXT[reason] || "감시 일시정지", reason === "priceStep" ? "ok" : "warn");
+    return true;
+  }
+  // The hold guard. Event-driven where it can be — the page's own
+  // BulkDeselectSeats answer wakes it through noteDeselectSeen — and polled
+  // slowly as the backstop, because a 전체삭제 press is only ever visible as
+  // the sidebar count going to 0. A timer is right here: a clamp when
+  // backgrounded costs nothing, there is no race to lose while a seat is held.
+  // Two consecutive empty reads, not one: the sidebar re-renders through an
+  // empty frame on some transitions and one read of 0 is not a decision.
+  const HOLD_GUARD_MS = 300;
+  const HOLD_GUARD_EMPTY_READS = 2;
+  function startHoldGuard() {
+    stopHoldGuard();
+    seatState.holdGuardEmpty = 0;
+    seatState.holdGuardOn = true;
+    seatState.holdGuardTimer = setInterval(holdGuardTick, HOLD_GUARD_MS);
+  }
+  function stopHoldGuard() {
+    seatState.holdGuardOn = false;
+    if (seatState.holdGuardTimer) clearInterval(seatState.holdGuardTimer);
+    seatState.holdGuardTimer = null;
+  }
+  function holdGuardTick() {
+    if (!seatState.holdGuardOn) return;
+    if (!seatState.locked) { stopHoldGuard(); return; }
+    // The page's own 7-minute timer. Past it the seat is gone whatever the
+    // sidebar still shows; the modal itself is handled by the dialog watch.
+    if (seatState.holdExpiresAt && Date.now() > seatState.holdExpiresAt + 1500) { onHoldExpired(); return; }
+    // On 가격 선택 the seat is held for the checkout; nothing to guard until
+    // the user comes back to the map (다시 선택), which is a plain seat page
+    // with an empty cart — exactly the case below.
+    if (onPriceStep() || !isSeatPage()) { seatState.holdGuardEmpty = 0; return; }
+    const held = selectedSeatCount();
+    if (held === 0) {
+      seatState.holdGuardEmpty += 1;
+      if (seatState.holdGuardEmpty >= HOLD_GUARD_EMPTY_READS) pauseWatch("userDeselect");
+    } else if (held > 0) {
+      seatState.holdGuardEmpty = 0;
+    }
+  }
+  function noteDeselectSeen() {
+    if (!seatState.holdGuardOn) return;
+    // The answer is in; the render follows within a frame or two. Count this
+    // as the first empty read and take the second one soon, not in 300ms.
+    seatState.holdGuardEmpty = Math.max(seatState.holdGuardEmpty, HOLD_GUARD_EMPTY_READS - 1);
+    setTimeout(holdGuardTick, 40);
+  }
+  // A real pointer press on a seat circle — isTrusted, which nothing the
+  // engine dispatches ever is — means the user is choosing by hand. Yield at
+  // once: stop the sweep, retire any press parked on the network, leave the
+  // map to them. Their own selection is untouched (pauseWatch never clears the
+  // map) and the watch comes back only from the 감시 시작 button.
+  function isSeatCircle(node) {
+    let el = node;
+    for (let depth = 0; el && depth < 4; depth += 1, el = el.parentNode) {
+      if (String(el.tagName || "").toLowerCase() === "circle") return true;
+    }
+    return false;
+  }
+  function onHumanPointer(event) {
+    try {
+      if (!event || event.isTrusted !== true) return;
+      if (!seatState.running || seatState.runMode !== "catch") return;
+      if (!isSeatCircle(event.target)) return;
+      seatState.humanTouches = (seatState.humanTouches || 0) + 1;
+      pauseWatch("humanTouch");
+    } catch (error) { /* a guard must never throw into the page's own handler */ }
+  }
+  function installHumanTouchGuard() {
+    // The handler hangs off window so a script reload swaps it without
+    // stacking listeners that point at a retired seatState.
+    window.__nolsniperOnHumanPointer = onHumanPointer;
+    if (window.__nolsniperHumanTouchGuard) return;
+    window.__nolsniperHumanTouchGuard = true;
+    document.addEventListener("pointerdown", (event) => window.__nolsniperOnHumanPointer?.(event), true);
   }
   // How long a freshly entered block gets to draw its circles before the loop
   // concludes the seats are not there.
@@ -5802,15 +6431,138 @@
     });
   }
 
-  function clickSeatOnMap(seatInfoId, { countBefore = null } = {}) {
+  // ── Pressing through the page's own handler ─────────────────────────────
+  //
+  // Bundle-verified (onestop-v2-front/a71854, 2026-09-05): the isDisabled gate
+  // lives only in the leaf SeatSvgCircle's onPointerUp. The block component's
+  // onSeatClick and the page's seatSelectHandler above it never re-check it;
+  // seatSelectHandler writes the optimistic cart (React state + the
+  // sessionStorage context the 선택 완료 submit reads) and sends PreselectSeat.
+  // So calling it through the fiber IS the page's own path, minus the wait for
+  // its 3-4s SWR poll to redraw the circle enabled. This is not the bare-API
+  // dead end: that mutation never touched React; this is React.
+  //
+  // Resolved at press time, never cached: useCallback identity changes on
+  // every render. Keyed on shape (a function named seatSelectHandler, or
+  // onSeatClick beside seatMeta and blockKey), never on minified names.
+  const HANDLER_WALK_DEPTH = 40;
+  function pageHandlerFor(node) {
+    if (!node) return null;
+    const fiberKey = Object.keys(node).find((key) => key.startsWith("__reactFiber") || key.startsWith("__reactInternalInstance"));
+    let fiber = fiberKey ? node[fiberKey] : null;
+    let block = null;
+    for (let depth = 0; fiber && depth < HANDLER_WALK_DEPTH; depth += 1) {
+      const props = fiber.memoizedProps || fiber.pendingProps || null;
+      if (props && typeof props === "object") {
+        if (typeof props.seatSelectHandler === "function") {
+          return { kind: "root", fn: props.seatSelectHandler, goods: props.goods || null, block };
+        }
+        if (!block && typeof props.onSeatClick === "function" && props.blockKey && props.seatMeta) {
+          block = { kind: "block", fn: props.onSeatClick, blockKey: props.blockKey };
+        }
+      }
+      fiber = fiber.return;
+    }
+    return block;
+  }
+  // The seat in the page's own shape: the seatMeta object, never a
+  // toCandidate() projection. From the circle's fiber when it is drawn, else
+  // from the block data we hold (which is the same seatMeta payload).
+  function pageSeatObject(seatInfoId, blockKey = null, node = null) {
+    const wanted = String(seatInfoId);
+    if (node) {
+      const rendered = seatRenderProps(node);
+      if (rendered?.seat && String(rendered.seat.seatInfoId) === wanted) return { seat: rendered.seat, blockKey: rendered.blockKey || blockKey };
+    }
+    for (const block of seatState.lastBlocks || []) {
+      if (blockKey && String(block.blockKey) !== String(blockKey)) continue;
+      const seat = (block.seats || []).find((item) => String(item?.seatInfoId) === wanted);
+      if (seat) return { seat, blockKey: block.blockKey };
+    }
+    return null;
+  }
+  // Any drawn circle will do to reach the handler: the walk goes up, and the
+  // block/root components are the same for every seat of the open 구역.
+  function anyRenderedCircle(prefer = null) {
+    if (prefer) return prefer;
+    if (seatIndex.observer && seatIndex.byId.size) {
+      for (const node of seatIndex.byId.values()) if (node?.isConnected !== false) return node;
+    }
+    const all = collectSeatCircles();
+    return all.length ? all[0] : null;
+  }
+  function pressVia(config) {
+    const via = String(config?.press_via || "auto");
+    return via === "handler" || via === "pointer" ? via : "auto";
+  }
+  /**
+   * Press a seat through the page's handler. True when the handler was called.
+   *
+   * Root handler: seatSelectHandler(select=true, seat, blockKey,
+   * skipNetwork=goods.isInterlocking, undefined, groupSeats). Block handler:
+   * onSeatClick(seat, isSelected=false, blockKey) — still applies the map
+   * hook's pan guards, which is fine outside our own pan.
+   */
+  function pressViaHandler(seatInfoId, { blockKey = null, node = null, quantity = 1 } = {}) {
+    const holder = anyRenderedCircle(node);
+    let handler = holder ? pageHandlerFor(holder) : null;
+    // The root seatSelectHandler is called with our own argument list, past
+    // the map hook's guards, and its closure over selectedSeat / the ticket
+    // count is whatever render it came from. Safe only where a stale view
+    // cannot matter: nothing in the cart and a 매수 of one. Anything else
+    // goes through the block's onSeatClick (the page's own argument shape,
+    // its own validateSeatCount on the live state) or, absent that, the
+    // pointer press.
+    if (handler?.kind === "root" && !((Number(quantity) || 1) === 1 && selectedSeatCount() === 0)) {
+      seatState.handlerRootRefused = (seatState.handlerRootRefused || 0) + 1;
+      handler = handler.block || null;
+    }
+    if (!handler) { seatState.handlerMisses = (seatState.handlerMisses || 0) + 1; return false; }
+    const found = pageSeatObject(seatInfoId, blockKey || handler.blockKey || null, node);
+    if (!found?.seat) { seatState.handlerMisses = (seatState.handlerMisses || 0) + 1; return false; }
+    const key = String(found.blockKey || blockKey || handler.blockKey || "");
+    try {
+      if (handler.kind === "root") handler.fn(true, found.seat, key, Boolean(handler.goods?.isInterlocking), undefined, undefined);
+      else handler.fn(found.seat, false, key);
+    } catch (error) {
+      seatState.handlerMisses = (seatState.handlerMisses || 0) + 1;
+      traceCall("pressViaHandler", seatInfoId, { threw: String(error).slice(0, 120) });
+      return false;
+    }
+    seatState.handlerPresses = (seatState.handlerPresses || 0) + 1;
+    seatState.lastPressVia = "handler";
+    seatState.lastHandlerKind = handler.kind;
+    return true;
+  }
+  function handlerReachable() {
+    const holder = anyRenderedCircle();
+    return Boolean(holder && pageHandlerFor(holder));
+  }
+
+  function clickSeatOnMap(seatInfoId, { countBefore = null, node: known = null, warm = false, blockKey = null, config = null } = {}) {
     // The focus fast path already pressed this seat a moment ago; a second
     // press would toggle it off. Report it as dispatched and move on.
     if (seatState.fastClickedId === String(seatInfoId) && nowMs() - (seatState.fastClickedAt || 0) < 1500) {
       traceClickAttempt(seatInfoId, null, "fast-path-dispatched", { before: countBefore });
       return true;
     }
-    const node = seatNodeFor(seatInfoId);
+    // A node handed in was looked up (and verified against its fiber) by the
+    // caller a moment ago — the focus fast path — so it is not looked up twice.
+    const node = known || seatNodeFor(seatInfoId);
+    const via = warm ? "pointer" : pressVia(config || seatState.pressConfig || null);
+    const handlerOk = () => {
+      if (via === "pointer") return false;
+      if (!pressViaHandler(seatInfoId, { blockKey, node: node && node.isConnected !== false ? node : null, quantity: Number((config || seatState.pressConfig || {}).quantity) || 1 })) return false;
+      seatState.fastClickedId = String(seatInfoId); seatState.fastClickedAt = nowMs();
+      if (seatState.markStartup) seatState.markStartup("firstClick");
+      traceClickAttempt(seatInfoId, node, "handler", { before: countBefore, kind: seatState.lastHandlerKind });
+      return true;
+    };
     if (!node) {
+      // Not drawn (outside the viewport, or not yet mounted). The pointer
+      // press has nothing to hit, but the page's handler does not need a
+      // circle — only the seat object and the block key.
+      if (handlerOk()) return true;
       traceClickAttempt(seatInfoId, null, "no-node");
       return false;
     }
@@ -5818,24 +6570,38 @@
     // node go nowhere, and the run would read that as the page refusing a seat
     // that was in fact fine.
     if (node.isConnected === false) {
+      if (handlerOk()) return true;
       traceClickAttempt(seatInfoId, node, "detached");
       return false;
     }
-    // The page will not sell a seat it has drawn as disabled, and clicking one
-    // raises its own 좌석 요청이 잘못되었습니다 dialog. The availability bitmap can
-    // be a step ahead of, or behind, what the map is showing; when they
-    // disagree the map is the one whose click we are about to fire.
-    if (seatNodeDisabled(node)) {
-      traceClickAttempt(seatInfoId, node, "node-disabled");
-      return false;
+    // The page will not sell a seat it has drawn as disabled: its leaf handler
+    // drops the pointerup, and it stays disabled until the page's own 3-4s
+    // SWR poll redraws it. That wait was the largest latency in the system.
+    // The bitmap says the seat is free NOW, so go through the page's handler,
+    // which never re-checks the leaf gate; the pointer press stays for the
+    // circle the page already agrees is free.
+    if (via === "handler" || seatNodeDisabled(node)) {
+      if (handlerOk()) return true;
+      if (via === "handler") traceClickAttempt(seatInfoId, node, "handler-unreachable");
+      if (seatNodeDisabled(node)) {
+        traceClickAttempt(seatInfoId, node, "node-disabled");
+        return false;
+      }
     }
+    seatState.lastPressVia = "pointer";
     // The cart is read by the caller, before the click, and handed in. Reading
     // it here meant a body.innerText — a full-document layout over a venue's
     // worth of circles — between deciding to click and clicking, for a number
     // that goes nowhere but the trace.
     firePointerSelect(node);
+    if (warm) return true;
     if (seatState.markStartup) seatState.markStartup("firstClick");
-    traceClickAttempt(seatInfoId, node, "dispatched", { before: countBefore });
+    // The trace does an elementFromPoint, which forces a layout. On the fast
+    // path that layout would sit between the pointer events and the page's
+    // own preselect leaving (a microtask away), so it is taken a macrotask
+    // later — after the request is on the wire.
+    if (known) void yieldFast().then(() => traceClickAttempt(seatInfoId, node, "dispatched", { before: selectedSeatCount(), fast: true }));
+    else traceClickAttempt(seatInfoId, node, "dispatched", { before: countBefore });
     return true;
   }
 
@@ -5903,7 +6669,18 @@
   async function fetchJson(url, options = {}) {
     const initData = getInitData();
     const headers = { ...onestopHeaders(initData), ...(options.headers || {}) };
-    const response = await fetch(url, { credentials: "include", ...options, headers });
+    // Our own seatStatus polls go around our own fetch hook. Through it, the
+    // wrapper read the body and ran applyBlockMask *before* the worker got
+    // the response, so the worker's own diff found nothing and every
+    // detection was demoted to pageFreed → the timer-clamped loop tick.
+    // It also counted our polls as the page's (pageStatusSeen 12117 on a
+    // pure focus watch) and filled the 24-entry trace with them. The page's
+    // own traffic still flows through the hook; only ours skips it.
+    // Only when window.fetch IS our wrapper: anything else installed there
+    // (a test's spy, a later hook) is honoured.
+    const ownHook = window.fetch === window.__nolsniperWrappedFetch && typeof window.__nolsniperNativeFetch === "function";
+    const direct = ownHook && /\/onestop\/api\/seatStatus/.test(String(url)) ? window.__nolsniperNativeFetch : fetch;
+    const response = await direct(url, { credentials: "include", ...options, headers });
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
       // These four endpoints carry no GraphQL envelope, so a block here used to
@@ -7087,6 +7864,14 @@
    * pointer press and the page's own preselect leaving the browser. If that
    * gap is a millisecond there is nothing in front of the round trip to win.
    */
+  // The page's select left the browser: stamped at send, not at answer, so
+  // the commit watchdog can tell "pressed and acted on" from "pressed and
+  // ignored" long before the answer.
+  function noteSelectSent(sent) {
+    const net = (window.__nolsniperLastSeatNet = window.__nolsniperLastSeatNet || {});
+    net.selectSentAt = sent?.at ?? Date.now();
+    noteCatchStage("selectSent", sent?.perf ?? performance.now());
+  }
   function notePageSeatNet(label, status, text, sent = null) {
     const net = (window.__nolsniperLastSeatNet = window.__nolsniperLastSeatNet || {});
     // After this callback has filled `net`, wake anyone waiting on it.
@@ -7109,6 +7894,13 @@
       if (/preselectSeat"\s*:\s*false/i.test(body) || /P40\d{3}/.test(body) || status >= 400) {
         net.preselectOk = false;
       }
+    }
+    if (/deselect/i.test(name)) {
+      // The page handing a hold back — the user pressed 전체삭제 or clicked the
+      // held seat off. Its own render of 선택 좌석 follows a moment later, so
+      // the guard is woken rather than concluded here.
+      net.deselectAt = at;
+      noteDeselectSeen();
     }
     if (/^select$/i.test(name) || /select-external/i.test(name) || /\/seats\/select/i.test(name)) {
       net.selectAt = at;
@@ -7134,12 +7926,13 @@
     if (typeof nativeFetch === "function") {
       window.__nolsniperNativeFetch =
         typeof nativeFetch.bind === "function" ? nativeFetch.bind(window) : nativeFetch;
-      window.fetch = async function nolsniperFetch(input, init) {
+      window.__nolsniperWrappedFetch = window.fetch = async function nolsniperFetch(input, init) {
         const url = String(input?.url || input || "");
         const watched = /\/onestop\/(gql|api\/(seats|seatStatus|seatMeta))/.test(url);
         // Taken before the await, so it is when the request left rather than
         // when it came back.
         const sent = watched ? { at: Date.now(), perf: performance.now() } : null;
+        if (watched && /\/onestop\/api\/seats\/select/.test(url)) noteSelectSent(sent);
         const response = await window.__nolsniperNativeFetch.apply(window, arguments);
         if (!watched) return response;
         try {
@@ -7172,6 +7965,7 @@
           // The onestop SPA talks through axios, so this is the hook that sees
           // the page's real preselect. Stamped here, before the native send.
           const sentAt = { at: Date.now(), perf: performance.now() };
+          if (/\/onestop\/api\/seats\/select/.test(url)) noteSelectSent(sentAt);
           this.addEventListener("loadend", () => {
             try {
               const sent = String(body || "").slice(0, 200);
@@ -7987,8 +8781,36 @@
   let seatCountScoped = 0;
   let seatCountScopeBroken = false;
   let seatCountSearchedAt = 0;
+  // 200 with the observer below attached, 25 without it. The audit was every
+  // 25th read because React can swap the box under us; the observer now sees
+  // that swap the moment it happens and drops the node, so the full-document
+  // read is reduced to a rare cross-check rather than a 0.4s cadence.
   const SEAT_COUNT_REVERIFY_EVERY = 25;
+  const SEAT_COUNT_REVERIFY_WATCHED_EVERY = 200;
   const SEAT_COUNT_SEARCH_EVERY_MS = 2000;
+  let seatCountObserver = null;
+  function watchSeatCountNode(node) {
+    if (typeof MutationObserver !== "function" || !node) return false;
+    try { seatCountObserver?.disconnect(); } catch (error) { /* stale */ }
+    seatCountObserver = null;
+    const root = node.parentElement || node;
+    try {
+      const observer = new MutationObserver((records) => {
+        if (seatCountNode !== node) return;
+        for (const record of records) {
+          if (record.type === "childList") {
+            for (const gone of record.removedNodes || []) {
+              if (gone === node || gone.contains?.(node)) { seatCountNode = null; return; }
+            }
+          }
+          if (node.isConnected === false) { seatCountNode = null; return; }
+        }
+      });
+      observer.observe(root, { childList: true, subtree: true, characterData: true });
+      seatCountObserver = observer;
+      return true;
+    } catch (error) { return false; }
+  }
 
   // The box belongs to a page. A run may start on a different one, and giving
   // up on scoping once must not condemn the whole session to the slow read.
@@ -8018,7 +8840,7 @@
       const scoped = connected ? countFromText(seatCountNode.innerText || "") : -1;
       if (scoped >= 0) {
         seatCountScoped += 1;
-        if (seatCountScoped % SEAT_COUNT_REVERIFY_EVERY !== 0) return scoped;
+        if (seatCountScoped % (seatCountObserver ? SEAT_COUNT_REVERIFY_WATCHED_EVERY : SEAT_COUNT_REVERIFY_EVERY) !== 0) return scoped;
         // Periodic audit. React can swap the box for one that renders a stale
         // number, and a scoped read that has silently stopped tracking is worse
         // than the slow read it replaced.
@@ -8041,6 +8863,7 @@
       seatCountSearchedAt = Date.now();
       seatCountNode = findSeatCountNode(count);
       seatCountScoped = 0;
+      if (seatCountNode) watchSeatCountNode(seatCountNode);
     }
     return count;
   }
@@ -8723,7 +9546,34 @@
       noteBitmapSawFree(candidate.seatInfoId);
       freed.push(candidate);
     }
+    if (freed.length) nudgePageRefresh();
     return freed;
+  }
+
+  // Ask the page to redraw now instead of in 0-4s.
+  //
+  // The page's own seatStatus poll is an SWR hook with refreshInterval
+  // 3000-4000ms (bundle-verified), and a circle stays isDisabled — the leaf
+  // gate the pointer press has to pass — until that poll lands. SWR also
+  // revalidates on window `online` (revalidateOnReconnect, deduped at 2s), so
+  // one synthetic event asks it to refetch the open blocks now: ~10ms of
+  // batching plus one RTT plus a paint, instead of a uniform 0-4s wait.
+  // Bounded by SWR's own dedupe; nothing is sent while the document is
+  // hidden, because SWR checks isVisible() first and the pulse would be lost.
+  const SWR_NUDGE_MIN_GAP_MS = 2000;
+  function nudgePageRefresh() {
+    try {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return false;
+      const now = performance.now();
+      // Against the last pulse, never against time zero: a flip inside the
+      // page's first two seconds was being swallowed by that comparison.
+      if (seatState.swrNudgedAt > 0 && now - seatState.swrNudgedAt < SWR_NUDGE_MIN_GAP_MS) return false;
+      if (typeof window.dispatchEvent !== "function" || typeof Event !== "function") return false;
+      seatState.swrNudgedAt = now;
+      seatState.swrNudges = (seatState.swrNudges || 0) + 1;
+      window.dispatchEvent(new Event("online"));
+      return true;
+    } catch (error) { return false; }
   }
 
   /**
@@ -9268,6 +10118,8 @@
         lastBlocksN: (seatState.lastBlocks || []).length,
         startupTiming: seatState.startupTiming || null,
         enterNow: armState.enterNow || null,
+        queueWarm: armState.queueWarm || null,
+        queueWarms: armState.queueWarms || 0,
         running: seatState.running,
         locked: seatState.locked,
         attempts: seatState.attempts,
@@ -9279,6 +10131,25 @@
         awaitingPayment: seatState.awaitingPayment,
         stopRequested: seatState.stopRequested,
         haltedByUser: seatState.haltedByUser,
+        pauseReason: seatState.pauseReason || "",
+        humanTouches: seatState.humanTouches || 0,
+        confirmRepresses: seatState.confirmRepresses || 0,
+        handlerRootRefused: seatState.handlerRootRefused || 0,
+        sessionExpireAt: sessionExpireAt(),
+        lastPressVia: seatState.lastPressVia || "",
+        handlerPresses: seatState.handlerPresses || 0,
+        handlerMisses: seatState.handlerMisses || 0,
+        swrNudges: seatState.swrNudges || 0,
+        statusChangedDialogs: seatState.statusChangedDialogs || 0,
+        fastDismissed: seatState.fastDismissed || 0,
+        lastFastDismissMs: seatState.lastFastDismissMs ?? null,
+        lastDialog: seatState.lastDialog || null,
+        holdRemainingMs: holdRemainingMs(),
+        pageHidden: pageHidden(),
+        holdGuardOn: Boolean(seatState.holdGuardOn),
+        lastDetectToPressMs: seatState.lastDetectToPressMs ?? null,
+        focusWorkers: focusPoller.workers,
+        focusHz: focusPollerHz(),
         skippedByMap: seatState.skippedByMap || 0,
         seatErrorDialogs: seatState.seatErrorDialogs || 0,
         lastExit: seatState.lastExit || "",
@@ -9488,7 +10359,17 @@
     return lines.join("<br>");
   }
 
-  const QUIET_WATCH_TEXT = "잔여석 0석 · 실시간 취소표 대기 중 (30ms 초고속 감시)";
+  const QUIET_WATCH_TEXT = "잔여석 0석 · 실시간 취소표 대기 중 (15ms 초고속 감시)";
+  // The page's own seatStatus poll (an SWR hook, refreshWhenHidden: false)
+  // stops entirely while the document is hidden — an occluded 예매 창 behind
+  // the 조작판 counts. The bitmap watch keeps running and the handler press
+  // does not need the redraw, but a pointer press cannot succeed until the
+  // window is visible again, and the overlay must not read 감시 중 as if
+  // nothing were wrong.
+  function pageHidden() {
+    try { return document.visibilityState === "hidden"; } catch (error) { return false; }
+  }
+  const HIDDEN_WATCH_TEXT = " · <b>예매 창이 가려짐</b> — 앞으로 꺼내 두세요";
   async function runSeatAutopilot(config, { probe = false, catchMode = false, userInitiated = false, quiet = false } = {}) {
     // Pressing a button in the panel is the only thing that lifts a stop.
     // Every exit from this function records why. Without it a run that stopped
@@ -9506,6 +10387,9 @@
     seatState.lastExit = "started";
     if (userInitiated) {
       seatState.haltedByUser = false;
+      // The button is the one thing that lifts a self-pause too.
+      seatState.pauseReason = "";
+      stopHoldGuard();
       // A press of 감시 시작 is the full watch, parked in its 구역. The quiet
       // (sold-out) variant is only ever adopted by the landing itself, and a
       // run that ended some other way must not hand its quietness on.
@@ -9538,7 +10422,9 @@
       // on a seat page — the live capture showed pageSelected -1 beside
       // locked true).
       const heldOnPage = selectedSeatCount();
-      if (userInitiated && heldOnPage <= 0) {
+      // 0 is proof (the page counted nothing); -1 is only "cannot read", and
+      // that clears on a button press alone.
+      if (heldOnPage === 0 || (userInitiated && heldOnPage <= 0)) {
         log("clearing a stale seat lock for a user-initiated run", { heldOnPage });
         traceCall("staleLock", heldOnPage, "cleared");
         seatState.locked = false;
@@ -9630,6 +10516,7 @@
         : configuredMs;
 
     seatState.running = true;
+    seatState.pressConfig = config;
     seatState.stopRequested = false;
     seatState.confirmStarted = false;
     seatState.attempts = 0;
@@ -9911,6 +10798,13 @@
         // Leave `running` to the run that replaced us.
         return;
       }
+      // The page moved on to 가격 선택 under a live watch (a selection made by
+      // hand, then 선택 완료): the checkout is the user's, and every poller
+      // stops here — the focus workers read the same URL and are already gone.
+      if (onPriceStep()) {
+        pauseWatch("priceStep");
+        return;
+      }
 
       // Before anything else this tick. A block makes every request fail and
       // every extra one can lengthen it, so there is nothing to gain by
@@ -9958,6 +10852,7 @@
       }
       if (held === quantity && held > 0) {
         seatState.locked = true;
+        startHoldGuard();
         seatState.lastSeat = seatState.lastSeat || `${held}석`;
         updateOverlay(`좌석 ${held}석 선택됨<br>안내 확인 중`, "ok");
         await advanceAfterSeatLock(config);
@@ -10077,7 +10972,7 @@
             const top = candidates[0];
             if (top && seatNodeFor(top.seatInfoId)) {
               noteCatchStage("click");
-              if (clickSeatOnMap(top.seatInfoId, { countBefore: selectedSeatCount() })) {
+              if (clickSeatOnMap(top.seatInfoId, { countBefore: selectedSeatCount(), blockKey: top.blockKey || null, config })) {
                 seatState.fastClickedId = String(top.seatInfoId);
                 seatState.fastClickedAt = nowMs();
                 seatState.fastClicks = (seatState.fastClicks || 0) + 1;
@@ -10091,11 +10986,12 @@
           // With nothing free the line is the one frozen sentence — no counters
           // ticking, nothing for the eye to chase.
           updateOverlayIfChanged(
-            freeSeatCount() === 0
+            (freeSeatCount() === 0
               ? QUIET_WATCH_TEXT + (focused ? ` · 구역 ${seatState.catchFocusBlock} 고정` : "")
               : catchStatusText(live, freeSeatCount(), focused ? CATCH_FOCUS_POLL_MS : pollMs, liveExhausted, watchRect)
-                + (focused ? ` · 구역 ${seatState.catchFocusBlock} 고정` : ""),
-            "info",
+                + (focused ? ` · 구역 ${seatState.catchFocusBlock} 고정` : ""))
+              + (pageHidden() ? HIDDEN_WATCH_TEXT : ""),
+            pageHidden() ? "warn" : "info",
           );
           // Nothing is in play, so this is the one moment the travel is free.
           // No repark on idle ticks — the only park is the one before the loop.
@@ -10106,7 +11002,7 @@
           }
           // Period, not gap: with the poller doing the fetching, the loop only
           // drains the channel — a strict 30ms period keeps the press instant.
-          await sleep(focused ? Math.max(0, CATCH_FOCUS_POLL_MS - (performance.now() - tickStartedPerf)) : idlePollMs(pollMs));
+          await pauseFor(focused ? Math.max(0, CATCH_FOCUS_POLL_MS - (performance.now() - tickStartedPerf)) : idlePollMs(pollMs));
           continue;
         }
       } else if (!candidates.length) {
@@ -10414,6 +11310,7 @@
         // finding a seat, and failing at it is never a reason to take another.
         seatState.consecutiveRejects = 0;
         seatState.locked = true;
+        startHoldGuard();
         seatState.lastSeat = label;
         seatState.lastSeatPos = group[0] ? { x: group[0].posLeft, y: group[0].posTop, block: group[0].blockKey } : null;
         seatState.running = false;
@@ -10847,6 +11744,14 @@
       }
     }
 
+    // Parked on the goods page for 지금 진입 (an arm that is not counting
+    // down): TLS, both preflights and the credential are paid for now, so
+    // the press itself is one POST.
+    if (isGoodsPage() && arm?.goods_code && !(arm.enabled && !arm.fired) && secureUrlUsableHere()) {
+      preconnectEntWaiting();
+      void premintOnLanding(arm);
+      void warmQueueApi("landing").catch(() => null);
+    }
     if ((isNolProductPage() || isGoodsPage()) && arm?.enabled && !arm.fired) {
       // Not awaited on purpose — bootRoute must return. But a rejection here
       // used to be an unhandled promise rejection and nothing more.
@@ -11258,6 +12163,7 @@
       // seat back on the server while the watch keeps running — a synthetic
       // 0→1 on a real map, so the whole path can be timed end to end.
       forgetHold() {
+        stopHoldGuard();
         const held = [...seatState.heldSeatIds];
         seatState.syntheticHold = held;
         seatState.heldSeatIds.clear();
@@ -11274,6 +12180,7 @@
       },
       async releaseHeld() {
         stopFocusPoller();
+        stopHoldGuard();
         abortSeatNetWaiters();
         window.__nolsniperRunGen = (window.__nolsniperRunGen || 0) + 1;
         seatState.running = false;
@@ -11294,6 +12201,10 @@
         seatState.userCatch = false;
         seatState.quietWatch = false;
         stopFocusPoller();
+        // Our own release below answers as a BulkDeselectSeats too; the guard
+        // must not read it as the user letting go.
+        stopHoldGuard();
+        seatState.pauseReason = "";
         // Nothing focused, nothing waiting: the next run measures its own
         // 구역, and a press parked on a network answer exits now, not in 2.5s.
         seatState.catchFocusBlock = "";
@@ -11439,10 +12350,20 @@
         startFocusPoller, stopFocusPoller, focusPollerAlive,
         pressSequence, waitForSeatNet, resolveSeatNetWaiters, abortSeatNetWaiters,
         updateOverlay, updateOverlayIfChanged, runWasSuperseded,
-        FOCUS_WORKERS,
+        FOCUS_WORKERS, CATCH_MAX_REQUESTS_PER_SEC,
+        pauseWatch, startHoldGuard, stopHoldGuard, holdGuardTick, noteDeselectSeen,
+        onHumanPointer, installHumanTouchGuard, focusPollerNextSlotMs, pauseFor, onPriceStep,
+        HOLD_GUARD_MS, HOLD_GUARD_EMPTY_READS, watchSeatMap,
+        pageHandlerFor, pressViaHandler, handlerReachable, pageSeatObject, nudgePageRefresh,
+        classifyDialogText, onDialogMounted, installDialogWatch, onHoldExpired, captchaPresent,
+        warmQueueApi, preconnectEntWaiting, premintOnLanding, selectedSeatCount, resetSeatCountScope,
+        SWR_NUDGE_MIN_GAP_MS, HOLD_LIFETIME_MS, QUEUE_WARM_LEAD_MS, CONFIRM_WATCHDOG_MS,
+        waitForSelectSent, noteSelectSent, sessionExpireAt,
       },
     };
     installNetworkWatch();
+    installHumanTouchGuard();
+    installDialogWatch();
     log(alreadyLoaded ? `autopilot reloaded ${AUTOPILOT_BUILD}` : `autopilot loaded ${AUTOPILOT_BUILD}`);
     if (alreadyLoaded && isSeatPage()) {
       updateOverlay(`스크립트 갱신 · ${AUTOPILOT_BUILD}<br>맵 클릭만 사용합니다`, "ok");

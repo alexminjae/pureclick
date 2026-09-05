@@ -1724,7 +1724,7 @@ const tests = {
     assert.ok(/if \(!secureUrlUsableHere\(\) && arm\.goods_code\)/.test(head),
       "the scheduler must move to the goods page before it starts counting");
     assert.ok(/location\.href = `\$\{GATE_ORIGIN\}\/goods\//.test(head), "and it moves to tickets.interpark.com/goods/<code>");
-    assert.ok(/CATCH_FAST_POLL_MS = 20;/.test(source) && /CATCH_FOCUS_POLL_MS = 20;/.test(source), "취켓팅 focus cadence is 20ms");
+    assert.ok(/CATCH_FAST_POLL_MS = 15;/.test(source) && /CATCH_FOCUS_POLL_MS = 15;/.test(source), "취켓팅 focus cadence is 15ms");
   },
   "취켓팅 locks onto the open block and never reparks while focused"() {
     const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
@@ -1734,10 +1734,10 @@ const tests = {
     assert.ok(!/parkInWatchedBlock\(/.test(tick), "no repark inside the catch tick at all");
     const whole = source.slice(source.indexOf("async function runSeatAutopilot("));
     assert.ok(/if \(!clickable\.length && !config\.auto_assign && !isCatch\) \{/.test(whole), "the map-move path is closed to 취켓팅");
-    assert.ok(/await sleep\(focused \? Math\.max\(0, CATCH_FOCUS_POLL_MS - /.test(tick), "30ms period (not gap) while focused");
+    assert.ok(/await pauseFor\(focused \? Math\.max\(0, CATCH_FOCUS_POLL_MS - /.test(tick), "15ms period (not gap) while focused, clamp-safe");
     assert.ok(/clickSeatOnMap\(top\.seatInfoId/.test(tick), "the freed seat is pressed on the spot");
     assert.ok(/startFocusPoller\(initData, seatState\.catchFocusBlock, config, runGen, gradeOrder, blockKeys\)/.test(tick), "the focus poller runs while focused");
-    assert.ok(/const FOCUS_WORKERS = 2;/.test(source) && /async function focusWorker\(/.test(source), "chained fetch workers, not a throttled timer");
+    assert.ok(/const FOCUS_WORKERS = 3;/.test(source) && /async function focusWorker\(/.test(source), "three interleaved chained fetch workers, not a throttled timer");
     assert.ok(/pressSequence\(ranked, config\)/.test(source), "the press+confirm sequence runs in the poller callback");
     assert.ok(/queueMicrotask\(resolveSeatNetWaiters\)/.test(source), "the network answer wakes the sequence, not a poll");
     const seq = source.slice(source.indexOf("async function pressSequence("), source.indexOf("function startFocusPoller("));
@@ -1752,7 +1752,7 @@ const tests = {
     assert.ok(/seatState\.lastError = "";/.test(branch), "sold out is not an error");
     assert.ok(/return runSeatAutopilot\(config, \{ catchMode: true, quiet: true \}\);/.test(branch), "it becomes a quiet watch in place");
     assert.ok(/if \(isCatch && !quiet && !seatState\.quietWatch\) await parkInWatchedBlock/.test(source), "a quiet watch never parks");
-    assert.ok(/QUIET_WATCH_TEXT = "잔여석 0석 · 실시간 취소표 대기 중 \(30ms 초고속 감시\)"/.test(source), "the frozen sentence");
+    assert.ok(/QUIET_WATCH_TEXT = "잔여석 0석 · 실시간 취소표 대기 중 \(15ms 초고속 감시\)"/.test(source), "the frozen sentence");
   },
   "the schedule step presses real buttons with the pointer sequence"() {
     const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
@@ -4622,7 +4622,7 @@ const tests = {
 
   "the overlay dedupe never swallows the next run's first line": () => {
     const { seatState, updateOverlay, updateOverlayIfChanged } = sandbox.window.NOLSniper.__test;
-    const line = "잔여석 0석 · 실시간 취소표 대기 중 (30ms 초고속 감시) · 구역 001:103 고정";
+    const line = "잔여석 0석 · 실시간 취소표 대기 중 (15ms 초고속 감시) · 구역 001:103 고정";
     updateOverlayIfChanged(line, "info");
     assert.equal(seatState.message, line);
     updateOverlay("정지했습니다.", "warn");           // what stopAll paints
@@ -4633,7 +4633,7 @@ const tests = {
     assert.equal(seatState.message, line, "and repeating it is still a no-op");
   },
 
-  "a stop and a restart inside one round trip leave two workers, not four": async () => {
+  "a stop and a restart inside one round trip leave three workers, not six": async () => {
     const { NOLSniper } = sandbox.window;
     const { seatState, focusPoller, startFocusPoller, stopFocusPoller, FOCUS_WORKERS } = NOLSniper.__test;
     const savedFetch = sandbox.fetch;
@@ -4649,14 +4649,14 @@ const tests = {
     try {
       live();
       startFocusPoller(initData, "001:103", {}, 1);
-      assert.equal(focusPoller.workers, FOCUS_WORKERS, "the first start spawns its pair");
+      assert.equal(focusPoller.workers, FOCUS_WORKERS, "the first start spawns its trio");
       // 전부 정지 … 감시 시작, faster than the fetch answers.
       stopFocusPoller(); seatState.running = false;
       live();
       startFocusPoller(initData, "001:103", {}, 2);
       await new Promise((r) => setTimeout(r, 160));
       assert.equal(focusPoller.workers, FOCUS_WORKERS,
-        `the old pair must retire when its fetch answers (live: ${focusPoller.workers})`);
+        `the old trio must retire when its fetch answers (live: ${focusPoller.workers})`);
       assert.equal(focusPoller.active, true, "while the new pair keeps watching");
     } finally {
       stopFocusPoller(); seatState.running = false;
@@ -4727,7 +4727,7 @@ const tests = {
     const directFn = source.slice(source.indexOf("async function enterQueueDirect("), source.indexOf("const GOODS_INFO_URL"));
     assert.match(directFn, /next\.reason === "ExpiredExistedSession"[\s\S]{0,120}< RANK_SESSION_GRACE_MS/, "the grace is applied to exactly that reading");
     const single = source.slice(source.indexOf("async function enterViaSecureUrl("), source.indexOf("function queueKeyFrom("));
-    const directAt = single.indexOf("const direct = await enterQueueDirect(waitingUrl);");
+    const directAt = single.indexOf("const direct = await enterQueueDirect(waitingUrl, { secureAnsweredPerf });");
     const navAt = single.indexOf("location.href = waitingUrl;");
     assert.ok(directAt > 0 && navAt > directAt, "line-up and rank first; the waiting page only as the fallback");
     assert.match(single, /if \(direct\.navigated\) return/, "a turn read here never also loads the waiting page");

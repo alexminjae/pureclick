@@ -26,6 +26,10 @@ DEFAULT_GRADE_ORDER: tuple[str, ...] = ()
 # every macro converge on the same front seat; picking a different corner is how
 # one instance avoids racing the crowd for it.
 VALID_STRATEGIES = frozenset({"center", "left", "right"})
+# How the autopilot presses a freed seat: through the page's own React handler
+# while the circle is still drawn disabled ("auto"), always ("handler"), or
+# never ("pointer"). See pressViaHandler in the autopilot.
+VALID_PRESS_VIA = frozenset({"auto", "handler", "pointer"})
 
 # Retired names, kept only so a saved config from an older build still loads.
 # "stage" and "center" both now mean the same thing — closest to the stage,
@@ -42,6 +46,7 @@ class SeatPreferences:
     # Venue coords (seatMeta posLeft/posTop). Empty = whole map.
     watch_rect: tuple[float, float, float, float] | None = None
     seat_strategy: str = "center"
+    press_via: str = "auto"
     max_attempts: int = 80
     retry_ms: int = 20
     poll_ms: int = 40
@@ -112,6 +117,10 @@ class SeatPreferences:
                 "seat_strategy must be one of " + ", ".join(sorted(VALID_STRATEGIES))
             )
 
+        press_via = str(data.get("press_via") or "auto").strip().lower()
+        if press_via not in VALID_PRESS_VIA:
+            raise SeatAutopilotError("press_via must be one of " + ", ".join(sorted(VALID_PRESS_VIA)))
+
         max_attempts = int(data.get("max_attempts", data.get("maxAttempts", 80)))
         retry_ms = int(data.get("retry_ms", data.get("retryMs", 20)))
         poll_ms = int(data.get("poll_ms", data.get("pollMs", 40)))
@@ -141,6 +150,7 @@ class SeatPreferences:
             block_names=tuple(str(name) for name in block_names),
             watch_rect=watch_rect,
             seat_strategy=strategy,
+            press_via=press_via,
             max_attempts=max_attempts,
             retry_ms=retry_ms,
             poll_ms=min(poll_ms, speed_ms) if speed_ms else poll_ms,
@@ -179,6 +189,7 @@ class SeatPreferences:
                 else None
             ),
             "seat_strategy": self.seat_strategy,
+            "press_via": self.press_via,
             "max_attempts": self.max_attempts,
             "retry_ms": self.retry_ms,
             "poll_ms": self.poll_ms,

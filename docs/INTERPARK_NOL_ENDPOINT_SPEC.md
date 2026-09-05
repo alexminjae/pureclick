@@ -965,7 +965,11 @@ Payment                  manual                                         POST pay
 | `checkDomAgreement()` | 2.5 ms per seat per tick | <25 ms ceiling | — |
 | Cart notice lag | 65.6 ms (16 → 80 ms ramp) | ≤45 ms (16 ms ×8, 24 ms ×36, then 80 ms) | ~1 frame |
 | Sweep serialisation | 17 sequential RTTs ≈ 490 ms | 6 in flight ≈ 1 RTT | 1 RTT |
-| Focus poll cadence | 200 ms floor, 87 % idle | 30 ms, timer-free (MessageChannel yield), ≤60 req/s | RTT-bound |
+| Focus poll cadence | 200 ms floor, 87 % idle | 15 ms floor, 3 interleaved workers paced to one send every 16.7 ms (spacing + trailing-second window), timer-free (MessageChannel yield), ≤60 req/s | cap-bound, gapless |
+| Press on a circle the page still draws disabled | refused (`node-disabled`) until the page's own SWR poll (3–4 s, `refreshInterval` random 3000–4000) redrew it | the page's `seatSelectHandler`, reached through the React fiber above the circle (`pressViaHandler`, build trigger-v70); the leaf `isDisabled` gate is the only one and it is skipped; pointer press kept for an enabled circle and as the fallback | one RTT (the page's own `PreselectSeat`) |
+| Page redraw after a 0→1 | uniform 0–4 s | a synthetic `window` `online` event on every flip (`nudgePageRefresh`, SWR `revalidateOnReconnect`, deduped 2 s; not while `document.hidden`) | ~10 ms batching + 1 RTT + paint |
+| Our own `seatStatus` polls | passed through our own `fetch` hook: diffed twice, counted as page traffic, filled the trace | bypass the hook (`__nolsniperNativeFetch`) for `seatStatus` only, while `window.fetch` is our wrapper | worker presses from its own callback |
+| Queue API before the burst | cold TLS (29–38 ms) + two uncached CORS preflights (no `Access-Control-Max-Age`, 5 s browser default) | `preconnect`/`dns-prefetch` link, `member-info` minted on the goods page and every 240 s, two discard-result POSTs at T−3 s (`warmQueueApi`) and on landing for 지금 진입 | first shot is one POST |
 | Stale round in `initData` | polled a round nobody was watching → "sold out" | `blockKey` prefix from DOM circles | 0 |
 | Schedule step | sending `playSeq` does not skip it | driven by DOM, 15 s budget | server-forced |
 | DOM render lag on a busy map (`domAgreedMs`) | ~1 s | unchanged — page-side | page-side |

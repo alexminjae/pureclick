@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -146,7 +147,21 @@ class VersionTagTests(unittest.TestCase):
 
     def test_an_unstamped_checkout_reads_as_dev_not_as_a_confusing_zero(self) -> None:
         os.environ.pop("NOLSNIPER_VERSION", None)
-        self.assertEqual(app_update.version_tag(), "(dev)")
+        # VERSION is gitignored and a local build (or a hand-written one) may
+        # have left it next to the app; "unstamped" means no such file, so the
+        # lookup is pointed at a directory that has none.
+        with tempfile.TemporaryDirectory() as empty, \
+                mock.patch.object(app_update, "__file__", str(Path(empty) / "app_update.py")), \
+                mock.patch.object(app_update.sys, "_MEIPASS", None, create=True):
+            self.assertEqual(app_update.version_tag(), "(dev)")
+
+    def test_a_stamped_version_file_reads_as_that_version(self) -> None:
+        os.environ.pop("NOLSNIPER_VERSION", None)
+        with tempfile.TemporaryDirectory() as stamped, \
+                mock.patch.object(app_update, "__file__", str(Path(stamped) / "app_update.py")), \
+                mock.patch.object(app_update.sys, "_MEIPASS", None, create=True):
+            (Path(stamped) / "VERSION").write_text("0.3.5\n", encoding="utf-8")
+            self.assertEqual(app_update.version_tag(), "(v0.3.5)")
 
     def test_a_tagged_release_shows_its_number(self) -> None:
         os.environ["NOLSNIPER_VERSION"] = "0.1.6"

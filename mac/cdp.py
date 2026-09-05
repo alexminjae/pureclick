@@ -127,6 +127,12 @@ def launch(
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-blink-features=AutomationControlled",
+        # The 예매 창 is usually behind the 조작판. Chrome aligns timers to 1s
+        # in a backgrounded/occluded window and, after five minutes, wakes a
+        # timer chain once a minute — which is the catch loop's tick and the
+        # page's own seatStatus poll. Both flags keep it at foreground speed.
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
         # Deliberately NOT --enable-automation: that sets navigator.webdriver
         # and shows the "controlled by automated software" infobar. Measured
         # without it: navigator.webdriver === false on the live page.

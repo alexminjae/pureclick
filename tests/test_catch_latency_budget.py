@@ -47,6 +47,14 @@ CEILINGS = {
     # healthy code trains people to ignore the whole file, which costs more than
     # the 15ms of slack — and 45 still fails long before the old behaviour.
     "cartNoticeLagMs": 45.0,
+    # detect -> press through pressSequence itself: bitmap flip to the pointer
+    # events leaving. Measured 0.07ms median on a laptop; the target is 0.5ms.
+    # 2.0 here because the bench runs on whatever CI runner picks it up, and
+    # the regression this guards is a layout or a scan returning to the path,
+    # which costs milliseconds, not fractions.
+    "detectToPressMs": 2.0,
+    # The fiber walk from a circle to the page root plus the handler call.
+    "handlerPressMs": 2.0,
 }
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import threading
@@ -874,6 +875,10 @@ class NolSniperApp(tk.Tk):
                 "payment": self.payment.get(),
                 "discord_webhook": self.discord.get().strip(),
                 "seat_strategy": self.seat_strategy.get(),
+                # "auto" presses through the page's own handler only while the
+                # circle is still drawn disabled. NOLSNIPER_PRESS_VIA=handler|pointer
+                # forces one path for a live probe.
+                "press_via": os.environ.get("NOLSNIPER_PRESS_VIA", "auto").strip().lower() or "auto",
                 "catch_grade_strict": False,
                 "reentry": self.reentry_on.get(),
                 "adjacent": True,

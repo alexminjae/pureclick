@@ -33,9 +33,31 @@ class CatchCadenceCeilings(unittest.TestCase):
         self.assertLessEqual(_const("CATCH_FAST_POLL_MS"), 30)
 
     def test_request_rate_is_capped(self) -> None:
-        # <=60 req/s keeps us under the gateway abuse block while ~20ms period.
+        # <=60 req/s: the gateway's abuse block (~165s, measured) has no
+        # measured threshold and 60/s is the highest rate that has run whole
+        # watches without one. The stream is made gapless UNDER this, never by
+        # raising it.
         self.assertLessEqual(_const("CATCH_MAX_REQUESTS_PER_SEC"), 60)
-        self.assertGreaterEqual(_const("FOCUS_WORKERS"), 2)
+        self.assertGreaterEqual(_const("FOCUS_WORKERS"), 3)
+
+    def test_focus_floor_is_15ms(self) -> None:
+        self.assertEqual(_const("CATCH_FOCUS_POLL_MS"), 15)
+        self.assertEqual(_const("CATCH_FAST_POLL_MS"), 15)
+
+    def test_sends_are_evenly_spaced_at_the_cap(self) -> None:
+        # Both guards on a send: spacing (one cap period since the last send)
+        # and the trailing-second window. Spacing alone is what stops three
+        # workers on a 10ms RTT firing 60 probes in 200ms and then sitting
+        # silent for 800ms (measured before the pacer: gap max 761ms).
+        can = _slice("function focusPollerCanSend(", "function focusPollerNextSlotMs(")
+        self.assertIn("focusPoller.lastSentAt < FOCUS_SEND_PERIOD_MS", can)
+        self.assertIn("focusPoller.sent.length < CATCH_MAX_REQUESTS_PER_SEC", can)
+        nxt = _slice("function focusPollerNextSlotMs(", "function onPriceStep(")
+        self.assertIn("Math.max(0, spacing, window)", nxt)
+        # The idle branch waits exactly until the next slot, never a fixed period.
+        idle = _slice("} else {\n        // Rate-capped", "focusPoller.inFlight = Math.max(0, focusPoller.inFlight);")
+        self.assertIn("await pauseFor(Math.min(FOCUS_YIELD_MS, Math.max(1, focusPollerNextSlotMs())))", idle)
+        self.assertNotIn("await sleep(", idle)
 
     def test_conflict_snap_tries_several_seats_with_no_sleep(self) -> None:
         seq = _slice("async function pressSequence(", "function startFocusPoller(")
@@ -43,6 +65,194 @@ class CatchCadenceCeilings(unittest.TestCase):
         # markSeatTaken then continue to the next seat — never a sleep between.
         self.assertRegex(seq, r"markSeatTaken\(seat\.seatInfoId\);")
         self.assertNotIn("await sleep(", seq)
+
+
+class HoldLifecycleInvariants(unittest.TestCase):
+    """Caught → held → (let go | touched | price step) leaves the engine PAUSED.
+
+    The dynamic walk is tests/journey_hold_lifecycle.mjs (run from
+    test_recovery_journeys.py); these are the shapes it relies on.
+    """
+
+    def test_the_focus_poller_dies_on_the_price_step(self) -> None:
+        alive = _slice("function focusPollerAlive(", "// The floor on one worker's poll period.")
+        self.assertIn("&& !onPriceStep()", alive)
+
+    def test_the_run_loop_pauses_on_the_price_step(self) -> None:
+        self.assertRegex(JS, r'if \(onPriceStep\(\)\) \{\s*pauseWatch\("priceStep"\);\s*return;')
+
+    def test_a_pause_never_clears_the_map_or_releases_a_hold(self) -> None:
+        fn = _slice("function pauseWatch(", "const HOLD_GUARD_MS")
+        self.assertNotIn("clearSelectedSeats", fn)
+        self.assertNotIn("releasePreselected", fn)
+        # But it is a real stop: the sweep, the parked press, and the URL
+        # watcher's ability to restart are all gone.
+        for must in ("stopFocusPoller();", "abortSeatNetWaiters();", "seatState.haltedByUser = true;",
+                     "window.__nolsniperRunGen = (window.__nolsniperRunGen || 0) + 1;"):
+            self.assertIn(must, fn)
+
+    def test_only_a_trusted_press_on_a_seat_counts_as_the_users_hand(self) -> None:
+        fn = _slice("function onHumanPointer(", "function installHumanTouchGuard(")
+        self.assertIn("event.isTrusted !== true) return;", fn)
+        self.assertIn("if (!isSeatCircle(event.target)) return;", fn)
+        self.assertIn('pauseWatch("humanTouch")', fn)
+        install = _slice("function installHumanTouchGuard(", "// How long a freshly entered block")
+        self.assertIn('document.addEventListener("pointerdown"', install)
+        self.assertIn(", true);", install, "capture phase: before the page's own handler")
+
+    def test_a_catch_starts_the_hold_guard_and_the_button_stops_it(self) -> None:
+        seq = _slice("async function pressSequence(", "// ── Hold lifecycle")
+        self.assertGreaterEqual(seq.count("startHoldGuard();"), 2, "both lock exits guard the hold")
+        start = _slice("async function runSeatAutopilot(", "const blockedFor = gatewayBlockRemainingMs();")
+        self.assertRegex(start, r'if \(userInitiated\) \{[\s\S]{0,200}seatState\.haltedByUser = false;[\s\S]{0,200}seatState\.pauseReason = "";')
+        self.assertIn("stopHoldGuard();", start)
+
+    def test_a_user_deselect_drops_the_lock_but_a_touch_keeps_the_selection(self) -> None:
+        fn = _slice("function pauseWatch(", "const HOLD_GUARD_MS")
+        self.assertRegex(fn, r'if \(reason === "userDeselect"\) \{[\s\S]{0,300}seatState\.heldSeatIds\.clear\(\);')
+        self.assertNotRegex(fn, r'if \(reason === "humanTouch"\)')
+
+    def test_the_press_path_is_warmed_before_the_first_probe(self) -> None:
+        start = _slice("function startFocusPoller(", "// How long a freshly entered block")
+        self.assertLess(start.index("warmPressPath(config, gradeOrder, blockKeys);"), start.index("void focusWorker("))
+
+    def test_yield_fast_settles_one_waiter_per_message(self) -> None:
+        y = _slice("const fastChannel = ", "// Resolve the moment")
+        self.assertIn("fastWaiters.shift()", y)
+        self.assertIn("fastWaiters.push(resolve)", y)
+
+
+class AuditFindingsAreClosed(unittest.TestCase):
+    """docs/FINAL_COMPREHENSIVE_SYSTEM_AUDIT.md, findings F1/F2/F4-F7, M1-M4, T1-T3, L1."""
+
+    def test_f1_our_own_seatstatus_polls_bypass_our_own_fetch_hook(self) -> None:
+        fn = _slice("async function fetchJson(", "if (!response.ok) {")
+        self.assertIn("window.__nolsniperNativeFetch", fn)
+        self.assertIn("/onestop\\/api\\/seatStatus/", fn)
+        # …but only while window.fetch is our wrapper; a replaced fetch is honoured.
+        self.assertIn("window.fetch === window.__nolsniperWrappedFetch", fn)
+        self.assertIn("window.__nolsniperWrappedFetch = window.fetch = async function nolsniperFetch", JS)
+
+    def test_f2_a_disabled_circle_is_pressed_through_the_pages_handler(self) -> None:
+        fn = _slice("function clickSeatOnMap(", "function seatNodeDisabled(")
+        handler_at = fn.index('if (via === "handler" || seatNodeDisabled(node))')
+        pointer_at = fn.index('seatState.lastPressVia = "pointer";')
+        self.assertLess(handler_at, pointer_at, "the handler is tried before the pointer press")
+        self.assertIn("if (handlerOk()) return true;", fn)
+        self.assertIn('traceClickAttempt(seatInfoId, node, "node-disabled");', fn, "the pointer fallback still refuses a disabled circle")
+        walk = _slice("function pageHandlerFor(", "function pageSeatObject(")
+        self.assertIn('typeof props.seatSelectHandler === "function"', walk)
+        self.assertIn('typeof props.onSeatClick === "function" && props.blockKey && props.seatMeta', walk)
+        self.assertNotRegex(walk, r"props\.(em|ed|ea|eb)\b", "keyed on shape, never on minified names")
+        press = _slice("function pressViaHandler(", "function handlerReachable(")
+        self.assertIn("handler.fn(true, found.seat, key, Boolean(handler.goods?.isInterlocking), undefined, undefined)", press)
+        self.assertIn("handler.fn(found.seat, false, key)", press)
+
+    def test_f2_the_page_is_nudged_on_every_flip_and_at_most_every_2s(self) -> None:
+        apply = _slice("function applyBlockMask(", "function nudgePageRefresh(")
+        self.assertIn("if (freed.length) nudgePageRefresh();", apply)
+        nudge = _slice("function nudgePageRefresh(", "function notePageSeatStatus(")
+        self.assertIn('window.dispatchEvent(new Event("online"))', nudge)
+        self.assertIn('document.visibilityState === "hidden") return false', nudge)
+        self.assertGreaterEqual(_const("SWR_NUDGE_MIN_GAP_MS"), 2000)
+
+    def test_f4_f5_f6_the_queue_api_is_warmed_before_the_burst(self) -> None:
+        self.assertLessEqual(_const("QUEUE_WARM_LEAD_MS"), 5000, "inside the browser's 5s preflight cache")
+        self.assertGreaterEqual(_const("QUEUE_WARM_MIN_GAP_MS"), 4000)
+        sched = _slice("async function runArmScheduler(", "async function parkInWatchedBlock(")
+        self.assertIn("preconnectEntWaiting();", sched)
+        self.assertIn("void premintOnLanding(arm);", sched)
+        self.assertLess(sched.index('await warmQueueApi("scheduled")'), sched.index("await waitUntilServerUnix(entryStart, { cancelled });"))
+        warm = _slice("async function warmQueueApi(", "function stopMintRefresh(")
+        self.assertIn("post(SECURE_URL_PATH, {})", warm)
+        self.assertIn('post(LINE_UP_PATH, { key: "" })', warm)
+        pre = _slice("function preconnectEntWaiting(", "async function warmQueueApi(")
+        self.assertIn('"dns-prefetch", "preconnect"', pre)
+        self.assertIn("ENT_WAITING_ORIGIN", pre)
+        landing = _slice("// Parked on the goods page for 지금 진입", "if (isNolProductPage()) {")
+        self.assertIn('warmQueueApi("landing")', landing)
+
+    def test_f7_the_fire_path_never_waits_on_a_bare_timer(self) -> None:
+        fn = _slice("async function waitUntilServerUnix(", "// The same state machine as core/mode.py")
+        self.assertNotIn("await sleep(", fn)
+        self.assertIn("await pauseFor(Math.min(20, remainingMs - 4));", fn)
+        burst = _slice("async function enterViaSecureUrlWithRetries(", "async function enterViaSecureUrl(")
+        self.assertIn("await pauseFor(Math.max(0, interval - (performance.now() - startedPerf)));", burst)
+        self.assertNotIn("await sleep(Math.max(0, interval", burst)
+
+    def test_m1_m4_modal_classification(self) -> None:
+        taken = re.search(r"const SEAT_TAKEN_DIALOG =\s*/(.+?)/;", JS, re.S).group(1)
+        self.assertRegex("좌석 상태가 변경되었습니다.", taken)
+        self.assertRegex("이미 선점된 좌석입니다.", taken)
+        self.assertEqual(_const("HOLD_LIFETIME_MS"), 420000)
+        expired = re.search(r"const HOLD_EXPIRED_DIALOG = /(.+?)/;", JS).group(1)
+        self.assertRegex("좌석을 선택할 수 있는 시간 10분이 종료되었어요", expired)
+        session = re.search(r"const SESSION_EXPIRED_DIALOG = /(.+?)/;", JS).group(1)
+        self.assertRegex("세션이 만료되었습니다.", session)
+        self.assertRegex("예매를 진행할 수 없습니다.", session)
+        self.assertIn('NEVER_DISMISS_DIALOG = new Set(["captcha", "sessionExpired", "holdExpired"])', JS)
+        dismiss = _slice("function dismissAnyBlockingOverlay(", "function dismissBlockingDialogs(")
+        self.assertIn("if (NEVER_DISMISS_DIALOG.has(kind))", dismiss)
+        captcha = re.search(r"function isCaptchaPageCopy\(text\) \{.*?return /(.+?)/\.test", JS, re.S).group(1)
+        self.assertRegex("화살표를 밀어 퍼즐을 맞춰주세요", captcha)
+        self.assertNotIn("동시 접속", JS, "no matcher for a string the site never shows")
+        watch = _slice("function installDialogWatch(", "function onHoldExpired(")
+        self.assertIn("observer.observe(document.body, { childList: true, subtree: true })", watch)
+        self.assertIn("seatIndex.root.contains?.(record.target)) continue;", watch, "the seat map's own churn is skipped")
+
+    def test_t3_p1_hot_path_pruning(self) -> None:
+        captcha = _slice("function captchaPresent(", "function findCaptchaModal(")
+        self.assertLess(captcha.index("captchaShapePresent()"), captcha.index("findCaptchaModal()"), "one querySelector before any innerText walk")
+        self.assertIn("CAPTCHA_CHECK_TTL_MS", captcha)
+        count = _slice("function selectedSeatCount(", "async function pageRegisteredSelection(")
+        self.assertIn("if (seatCountNode) watchSeatCountNode(seatCountNode);", count)
+        self.assertIn("seatCountObserver ? SEAT_COUNT_REVERIFY_WATCHED_EVERY : SEAT_COUNT_REVERIFY_EVERY", count)
+        self.assertGreaterEqual(_const("SEAT_COUNT_REVERIFY_WATCHED_EVERY"), 100)
+
+    def test_t1_t2_state_traps(self) -> None:
+        self.assertIn("if (heldOnPage === 0 || (userInitiated && heldOnPage <= 0)) {", JS)
+        self.assertIn("(pageHidden() ? HIDDEN_WATCH_TEXT : \"\")", JS)
+
+    def test_l1_reload_hygiene(self) -> None:
+        self.assertIn("if (window.__nolsniperOverlayHeadId) clearInterval(window.__nolsniperOverlayHeadId);", JS)
+        self.assertIn("window.__nolsniperOverlayHeadId = setInterval(", JS)
+        self.assertIn("window.__nolsniperSeatObserver?.disconnect();", JS)
+        self.assertIn("window.__nolsniperSeatObserver = seatIndex.observer;", JS)
+        self.assertIn("window.__nolsniperDialogObserver?.disconnect();", JS)
+
+
+class ReviewBlockersAreClosed(unittest.TestCase):
+    def test_blocker1_one_macrotask_then_confirm_then_a_120ms_commit_watchdog(self) -> None:
+        seq = _slice("async function pressSequence(", "function startFocusPoller(")
+        pre = seq.index('await waitForSeatNet("preselect", since, 2500);')
+        hop = seq.index("await yieldFast();\n      if (halted()) return bail(lat);\n      // Then confirm")
+        click = seq.index("if (clickConfirmSelect()) { confirmed = true; break; }")
+        dog = seq.index("await waitForSelectSent(since, CONFIRM_WATCHDOG_MS);")
+        self.assertTrue(pre < hop < click < dog)
+        self.assertEqual(_const("CONFIRM_WATCHDOG_MS"), 120)
+        self.assertIn("pressed: clickConfirmSelect()", seq, "the second press is decisive, not a wait")
+        self.assertIn("noteSelectSent(sent)", JS)
+        self.assertIn("noteSelectSent(sentAt)", JS)
+        wd = _slice("async function waitForSelectSent(", "async function pressSequence(")
+        self.assertNotIn("setTimeout", wd)
+        self.assertIn("await yieldFast();", wd)
+
+    def test_blocker2_root_handler_only_for_an_empty_cart_and_one_seat(self) -> None:
+        fn = _slice("function pressViaHandler(", "function handlerReachable(")
+        self.assertIn('if (handler?.kind === "root" && !((Number(quantity) || 1) === 1 && selectedSeatCount() === 0))', fn)
+        self.assertIn("handler = handler.block || null;", fn)
+        self.assertIn("quantity: Number((config || seatState.pressConfig || {}).quantity) || 1", JS)
+
+    def test_expiry_modals_are_never_auto_pressed(self) -> None:
+        self.assertIn('NEVER_DISMISS_DIALOG = new Set(["captcha", "sessionExpired", "holdExpired"])', JS)
+        mounted = _slice("function onDialogMounted(", "function installDialogWatch(")
+        self.assertIn("if (NEVER_DISMISS_DIALOG.has(kind) || !INFORMATIONAL_DIALOG.has(kind)) return false;", mounted)
+        self.assertIn('if (kind === "unknown" && sessionClockExpired()) kind = "sessionExpired";', mounted)
+
+    def test_chrome_is_launched_without_background_throttling(self) -> None:
+        cdp = (ROOT / "mac" / "cdp.py").read_text(encoding="utf-8")
+        self.assertIn('"--disable-background-timer-throttling",', cdp)
+        self.assertIn('"--disable-backgrounding-occluded-windows",', cdp)
 
 
 class HotPathsAreTimerFree(unittest.TestCase):

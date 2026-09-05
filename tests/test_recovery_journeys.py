@@ -14,6 +14,9 @@ check what each step leaves for the next.
 from __future__ import annotations
 
 import ast
+import json
+import shutil
+import subprocess
 import sys
 import unittest
 from datetime import datetime, timedelta
@@ -260,6 +263,77 @@ class Journey4(unittest.TestCase):
         self.assertEqual(panel.mode_text.get(), MODE_LABELS["on_seat"])
         self.assertTrue(panel.btn_catch.enabled)
         self.assertNotIn("오류", panel.guidance.get())
+
+
+JOURNEY5 = ROOT / "tests" / "journey_hold_lifecycle.mjs"
+
+
+@unittest.skipUnless(shutil.which("node"), "node is needed to drive the autopilot")
+class Journey5CatchHoldLetGo(unittest.TestCase):
+    """취켓팅 catches → holds → the user lets go → PAUSED until 감시 시작.
+
+    The page's side is played by tests/journey_hold_lifecycle.mjs against the
+    real focus poller and press sequence; this asserts what it reports and
+    what the panel makes of the state it leaves. Also covered there: a real
+    pointer press on a seat yields the watch, and step=price ends every poller.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        done = subprocess.run(
+            ["node", str(JOURNEY5), "--json"], cwd=ROOT, capture_output=True, text=True, timeout=120,
+        )
+        lines = [line for line in done.stdout.strip().splitlines() if line.startswith("{")]
+        # A failed check still prints its report (exit 1); only a harness that
+        # crashed before reporting is an error here. The failed check itself is
+        # named by test_every_check_in_the_journey_holds.
+        if not lines:
+            raise AssertionError(f"journey harness crashed:\n{done.stdout[-2000:]}\n{done.stderr[-2000:]}")
+        cls.report = json.loads(lines[-1])
+        cls.by_name = {c["name"]: c for c in cls.report["checks"]}
+
+    def _passed(self, *names: str) -> None:
+        for name in names:
+            with self.subTest(check=name):
+                self.assertIn(name, self.by_name, "the harness no longer makes this check")
+                got = self.by_name[name]
+                self.assertTrue(got["ok"], f"{name}: {got.get('detail', '')}")
+
+    def test_every_check_in_the_journey_holds(self) -> None:
+        failed = [c for c in self.report["checks"] if not c["ok"]]
+        self.assertEqual(failed, [], "\n".join(f"{c['name']}: {c.get('detail', '')}" for c in failed))
+
+    def test_the_catch_pauses_the_poller_and_says_so(self) -> None:
+        self._passed("no seatStatus leaves while a seat is held", "the overlay says 좌석 선점 완료",
+                     "the hold guard is watching")
+
+    def test_letting_go_leaves_a_clean_pause_and_nothing_is_snatched(self) -> None:
+        self._passed("paused: not running", "paused: the stale lock is dropped", "paused: sticky until 감시 시작",
+                     "paused: the poller is off", "no press while paused", "no request while paused")
+        self.assertLess(self.report["pause"]["noticedMs"], 700, "the deselect is noticed within two guard ticks")
+
+    def test_the_users_hand_and_the_price_step_end_the_sweep(self) -> None:
+        self._passed("an untrusted (our own) press does not pause", "yielded: no request follows",
+                     "yielded: the user's selection is untouched (no clear, no release)",
+                     "step=price: no request after the URL changed")
+
+    def test_the_stream_is_gapless_under_the_cap(self) -> None:
+        stream = self.report["stream"]
+        self.assertLessEqual(stream["requestsPerSec"], stream["cap"] + 2)
+        self.assertGreaterEqual(stream["requestsPerSec"], 45)
+        self.assertLess(stream["gapMaxMs"], 2 * (1000 / stream["cap"]) + 10)
+
+    def test_the_panel_reads_the_pause_as_halted_with_the_watch_on_offer(self) -> None:
+        paused = {"running": False, "runMode": "catch", "locked": False, "haltedByUser": True,
+                  "pauseReason": "userDeselect", "pageSelected": 0}
+        self.assertEqual(derive_mode(page="seat", seat=paused, arm={}), "halted")
+        panel = _Panel({"ticket_open_kst": FUTURE}, page="seat", seat=paused)
+        self.assertEqual(panel.mode_text.get(), MODE_LABELS["halted"])
+        self.assertTrue(panel.btn_catch.enabled, "감시 시작 is the way back")
+        # Touched by hand while a seat is now selected by the user: held, not watching.
+        touched = {"running": False, "runMode": "catch", "locked": False, "haltedByUser": True,
+                   "pauseReason": "humanTouch", "pageSelected": 1}
+        self.assertEqual(derive_mode(page="seat", seat=touched, arm={}), "halted")
 
 
 if __name__ == "__main__":

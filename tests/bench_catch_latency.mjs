@@ -41,6 +41,10 @@ const noop = () => {};
 
 // ---- a DOM with a real seat map in it ------------------------------------
 
+// The components above the circles: the block (onSeatClick + seatMeta +
+// blockKey) and the page root (seatSelectHandler), as the bundle has them.
+const benchRoot = { memoizedProps: { seatSelectHandler: noop, goods: { isInterlocking: false } }, return: null };
+const benchBlock = { memoizedProps: { onSeatClick: noop, blockKey: "004:001", seatMeta: [] }, return: benchRoot };
 let fiberSeq = 0;
 function circleNode(seat, { disabled = false } = {}) {
   const node = {
@@ -60,7 +64,7 @@ function circleNode(seat, { disabled = false } = {}) {
   const inner = { memoizedProps: {}, return: null };
   const outer = {
     memoizedProps: { seat, blockKey: undefined, isSelected: false },
-    return: null,
+    return: benchBlock,
   };
   Object.defineProperty(outer.memoizedProps, "isDisabled", {
     enumerable: true,
@@ -299,6 +303,58 @@ bench("click · clickSeatOnMap (find node + dispatch)", 20, () => {
   for (const at of SPREAD) race.clickSeatOnMap(drawnSeats[at].seatInfoId);
 });
 
+// 4a. the fiber bypass: the circle is still drawn disabled (the page's SWR
+// poll has not redrawn it), so the press goes up the fiber to the page's
+// own seatSelectHandler instead of waiting 0-4s for the leaf gate to open.
+race.state.lastBlocks = venue;
+bench("press via handler · disabled circle -> seatSelectHandler through the fiber", 100, () => {
+  const at = 901;
+  circles[at].__benchDisabled = true;
+  race.state.fastClickedId = "";
+  const ok = race.clickSeatOnMap(drawnSeats[at].seatInfoId, { node: circles[at], blockKey: openBlock.blockKey });
+  circles[at].__benchDisabled = false;
+  if (!ok || race.state.lastPressVia !== "handler") throw new Error("bench: the handler press did not go through the fiber");
+});
+race.state.fastClickedId = "";
+
+// 4b. detect -> press, the whole synchronous stretch of the focus fast path:
+// a 0->1 in the bitmap becomes a ranked candidate and pressSequence fires the
+// pointer events. pressSequence is async, but nothing in it yields before the
+// events leave, so the press stamp is readable the moment the call returns.
+// Measured from the seat's own freedAtPerf (stamped inside applyBlockMask),
+// which is the clock the live run uses too.
+const seq = api.__test;
+const pickerApi = api.picker;
+sandbox.window.__nolsniperRunGen = 1;
+const pressSamples = [];
+{
+  const state = race.state;
+  const mask = openBlock.seats.map(() => false);
+  mask[900] = true;
+  for (let at = 0; at < 60; at += 1) {
+    openBlock.mask = openBlock.seats.map(() => false);
+    state.fastClickedId = ""; state.fastClickedAt = 0; state.locked = false; state.stopRequested = false;
+    state.pressSequenceBusy = false; state.lastCatchLatency = null;
+    const freed = race.applyBlockMask(openBlock, mask, CONFIG);
+    const ranked = pickerApi.rankCandidates(freed, ["R석"], [], { strategy: "center" });
+    seq.pressSequence(ranked, CONFIG).catch(noop);
+    // The sequence is now parked on the preselect answer; wake it as a stop so
+    // the next sample does not queue behind a 2.5s timeout.
+    seq.abortSeatNetWaiters();
+    const lat = state.lastCatchLatency;
+    if (!lat || lat.outcome === "no-node") throw new Error("bench: pressSequence did not press the freed seat");
+    if (at >= 10) pressSamples.push(lat.pressMs);
+  }
+  pressSamples.sort((a, b) => a - b);
+  results.push({
+    name: "detect -> press · bitmap flip -> rank -> pressSequence pointer events",
+    median: pressSamples[Math.floor(pressSamples.length / 2)],
+    worst: pressSamples[pressSamples.length - 1],
+    runs: pressSamples.length,
+  });
+  state.locked = false; state.stopRequested = false; state.fastClickedId = "";
+}
+
 // 5. the per-tick instrumentation that runs whether or not anything freed.
 //
 // The seats it watches are ones the bitmap called free while the map still
@@ -386,6 +442,10 @@ if (process.argv.includes("--json")) {
   for (const row of results) {
     const key = row.name.includes("currentOpenBlock")
       ? "currentOpenBlockMs"
+      : row.name.startsWith("detect -> press")
+        ? "detectToPressMs"
+      : row.name.startsWith("press via handler")
+        ? "handlerPressMs"
       : row.name.includes("clickSeatOnMap")
         ? "clickSeatOnMapMs"
         : row.name.includes("checkDomAgreement")
@@ -411,13 +471,14 @@ for (const row of results) {
   console.log(`${pad(row.name, 60)}${num(row.median)}   ${num(row.worst)}`);
 }
 const hot =
-  (results.find((r) => r.name.startsWith("detect"))?.median || 0) +
+  (results.find((r) => r.name.startsWith("detect ·"))?.median || 0) +
   (results.find((r) => r.name.includes("clickableAmong"))?.median || 0) +
   (results.find((r) => r.name.includes("clickSeatOnMap"))?.median || 0);
 const perTick = results.find((r) => r.name.startsWith("per tick"))?.median || 0;
 const cart = cartRow.median;
 console.log("-".repeat(84));
 console.log(`${pad("detect -> click, our own code", 60)}${num(hot)}`);
+console.log(`${pad("detect -> press, measured end to end through pressSequence", 60)}${num(results.find((r) => r.name.startsWith("detect -> press"))?.median)}`);
 console.log(`${pad("added per watch tick (runs 10x/s whether or not anything freed)", 60)}${num(perTick)}`);
 console.log(`${pad("click -> 선택 완료 pressed, our own overhead", 60)}${num(cart + quiet)}`);
 console.log(`${pad("TOTAL overhead we add to detect -> 선택 완료", 60)}${num(hot + cart + quiet)}\n`);
