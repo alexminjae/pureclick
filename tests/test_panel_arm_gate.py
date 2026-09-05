@@ -172,6 +172,13 @@ class LoginWatchdogTest(unittest.TestCase):
         self.assertTrue(panel.btn_enter_now.enabled)
 
 
+class QuietWatchTest(unittest.TestCase):
+    def test_a_sold_out_watch_reads_as_waiting_not_error(self) -> None:
+        panel = _Panel({"ticket_open_kst": PAST}, page="seat", seat={"running": True, "runMode": "catch", "freeSeats": 0, "quietWatch": True})
+        self.assertEqual(panel.mode_text.get(), "취켓팅 중")
+        self.assertIn("잔여석 0석 · 실시간 취소표 대기 중", panel.guidance.get())
+
+
 class ModeBannerTest(unittest.TestCase):
     """The banner, the instruction and the buttons come from one mode."""
 

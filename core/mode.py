@@ -84,6 +84,16 @@ def derive_mode(
             return "held"
     if seat.get("running"):
         return "watching" if str(seat.get("runMode") or "") == "catch" else "grabbing"
+    # On the seat map the entry is over: an arm's running/fired flags there are
+    # leftovers from the navigation that got us here and must never read as
+    # "armed" (measured: the banner flapped watching↔armed during 취켓팅).
+    # Between two catch attempts (a lost race ends one run and the next starts
+    # within a tick) the mode stays "watching" rather than flashing on_seat.
+    if page == "seat":
+        if str(seat.get("runMode") or "") == "catch" and not seat.get("haltedByUser") \
+                and not str(seat.get("lastError") or "").strip():
+            return "watching"
+        arm = {}
     if arm.get("running") and not arm.get("fired"):
         return "armed"
     if page in {"waiting", "gates"} or (arm.get("fired") and page in {"nol", "goods"}):
@@ -149,7 +159,8 @@ def guidance(
         return Guidance(label, "좌석을 고르는 중입니다. 보안문자가 뜨면 직접 입력하세요.", "stop",
                         "진행 중", "진행 중")
     if mode == "watching":
-        return Guidance(label, "자리가 나오면 즉시 잡습니다. 멈추려면 [전부 정지].", "stop",
+        # Frozen wording: this line must not move while the watch runs.
+        return Guidance("취켓팅 중 · 실시간 좌석 감시 중", "자리가 나오면 즉시 잡습니다. 멈추려면 [전부 정지].", "stop",
                         "진행 중", "진행 중")
     if mode == "armed":
         when = f" ({open_text})" if open_text else ""

@@ -712,7 +712,7 @@ const tests = {
     // Structural: driving it needs a live map, but the ordering is the claim.
     const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     const loopAt = source.indexOf("while (seatState.attempts < maxAttempts");
-    const prepAt = source.indexOf("if (isCatch) await parkInWatchedBlock(");
+    const prepAt = source.indexOf("if (isCatch && !quiet && !seatState.quietWatch) await parkInWatchedBlock(");
     assert.ok(prepAt > 0, "the watch must prepare its 구역");
     assert.ok(prepAt < loopAt, "and do it before the loop, not on the first freed seat");
 
@@ -725,14 +725,12 @@ const tests = {
     assert.match(park, /currentOpenBlock\(\)/, "and does nothing if already there");
     assert.match(park, /pointerHeldOnMap/, "and never fights the user for the viewport");
 
-    // The idle re-check lives on the quiet branch of the watch, after the
-    // overlay update and before the sleep — not on any path where a seat is in
-    // play, where the travel would be paid at exactly the wrong moment.
-    const idle = source.slice(loopAt);
-    const idleParkAt = idle.indexOf("await parkInWatchedBlock(config, scoped)");
-    assert.ok(idleParkAt > 0, "the watch must re-park itself while idle");
-    const sleepAt = idle.indexOf("await sleep(pollMs);", idleParkAt);
-    assert.ok(sleepAt > idleParkAt, "and do it in place of waiting, not after acting on a seat");
+    // Once, before waiting — and never again while idle. Re-parking on the
+    // quiet branch moved the viewport every tick (measured: the map jerked
+    // continuously during 취켓팅), so the watch now stays wherever the one
+    // preparatory park put it and takes an undrawn freed seat via the API.
+    const idle = source.slice(loopAt, source.indexOf("} else if (!candidates.length) {", loopAt));
+    assert.ok(idle.indexOf("await parkInWatchedBlock(config, scoped)") < 0, "no re-park inside the watch loop");
   },
 
   "the watch polls the 구역 you chose, not the whole venue": async () => {
@@ -1516,6 +1514,36 @@ const tests = {
       loc.pathname = saved.pathname; loc.hostname = saved.hostname;
     }
   },
+  // 세종문화회관 대극장: floor from the block key (001:1xx/2xx/3xx) when the
+  // seat carries no floor string, and 객석 N층 strings when it does.
+  "floorRank reads Korean floor strings and the Sejong block-key scheme"() {
+    const { picker } = sandbox.window.NOLSniper;
+    assert.equal(picker.floorRank({ floor: "객석 1층" }), 0, "1층");
+    assert.equal(picker.floorRank({ floor: "객석 2층" }), 1, "2층");
+    assert.equal(picker.floorRank({ floor: "객석 3층" }), 1, "3층");
+    assert.equal(picker.floorRank({ blockKey: "001:103" }), 0, "1xx block = 1층");
+    assert.equal(picker.floorRank({ blockKey: "001:204" }), 1, "2xx block = 2층");
+    assert.equal(picker.floorRank({ blockKey: "001:305" }), 1, "3xx block = 3층");
+    assert.equal(picker.floorRank({}), 0, "no info = ground");
+  },
+  // Sejong shape: three floors stacked (1xx front/low y, 2xx/3xx higher key),
+  // a 2층 seat physically closer to the stage than a 1층 back seat. 1층 wins.
+  "a 1층 seat outranks a euclidean-closer 2층 seat at Sejong"() {
+    const { picker, race } = sandbox.window.NOLSniper;
+    const seats = [];
+    const add = (key, x, y) => seats.push({ seatInfoId: `${key}-${x}-${y}`, seatGrade: "1",
+      seatGradeName: "VIP석", rowNo: "?", seatNo: String(x), blockKey: key, seatGroupId: null, posLeft: x, posTop: y });
+    // 1층 centre block, front to back; a 2층 block that overhangs closer in y.
+    for (let y = 0; y <= 40; y += 5) for (let x = 40; x <= 60; x += 5) add("001:103", x, y);
+    add("001:203", 50, 2);   // 2층, dead centre, physically nearest the stage
+    const stage = race.stagePoint([{ blockKey: "b", seats }]);
+    const ranked = picker.rankCandidates(seats, [], [], { strategy: "center", centerX: stage.x, stage });
+    assert.equal(picker.floorRank(ranked[0]), 0, "#1 is 1층");
+    assert.equal(ranked[0].blockKey, "001:103", "the 1층 centre block");
+    const firstUpper = ranked.findIndex((r) => picker.floorRank(r) >= 1);
+    const lastGround = ranked.map((r) => picker.floorRank(r)).lastIndexOf(0);
+    assert.ok(firstUpper > lastGround, "every 1층 seat ranks before any 2층 seat");
+  },
   "a plain venue still takes front centre"() {
     const { race } = sandbox.window.NOLSniper;
     const seats = [];
@@ -1689,6 +1717,50 @@ const tests = {
   // map at step=price, where there is nothing to enter. Every early return in
   // runArmScheduler was silent, so an arm that refused looked exactly like one
   // that had never been asked.
+  "the countdown never runs off the entry origin"() {
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
+    const fn = source.slice(source.indexOf("async function runArmScheduler("));
+    const head = fn.slice(0, fn.indexOf("armState.running = true;"));
+    assert.ok(/if \(!secureUrlUsableHere\(\) && arm\.goods_code\)/.test(head),
+      "the scheduler must move to the goods page before it starts counting");
+    assert.ok(/location\.href = `\$\{GATE_ORIGIN\}\/goods\//.test(head), "and it moves to tickets.interpark.com/goods/<code>");
+    assert.ok(/CATCH_FAST_POLL_MS = 20;/.test(source) && /CATCH_FOCUS_POLL_MS = 20;/.test(source), "취켓팅 focus cadence is 20ms");
+  },
+  "취켓팅 locks onto the open block and never reparks while focused"() {
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
+    const branch = source.slice(source.indexOf("if (isCatch) {\n        if (!statusBlockKeys.length)"));
+    const tick = branch.slice(0, branch.indexOf("} else if (!candidates.length) {"));
+    assert.ok(/const scoped = focused \? \[seatState\.catchFocusBlock\] : sweepKeys;/.test(tick), "one block when focused");
+    assert.ok(!/parkInWatchedBlock\(/.test(tick), "no repark inside the catch tick at all");
+    const whole = source.slice(source.indexOf("async function runSeatAutopilot("));
+    assert.ok(/if \(!clickable\.length && !config\.auto_assign && !isCatch\) \{/.test(whole), "the map-move path is closed to 취켓팅");
+    assert.ok(/await sleep\(focused \? Math\.max\(0, CATCH_FOCUS_POLL_MS - /.test(tick), "30ms period (not gap) while focused");
+    assert.ok(/clickSeatOnMap\(top\.seatInfoId/.test(tick), "the freed seat is pressed on the spot");
+    assert.ok(/startFocusPoller\(initData, seatState\.catchFocusBlock, config, runGen, gradeOrder, blockKeys\)/.test(tick), "the focus poller runs while focused");
+    assert.ok(/const FOCUS_WORKERS = 2;/.test(source) && /async function focusWorker\(/.test(source), "chained fetch workers, not a throttled timer");
+    assert.ok(/pressSequence\(ranked, config\)/.test(source), "the press+confirm sequence runs in the poller callback");
+    assert.ok(/queueMicrotask\(resolveSeatNetWaiters\)/.test(source), "the network answer wakes the sequence, not a poll");
+    const seq = source.slice(source.indexOf("async function pressSequence("), source.indexOf("function startFocusPoller("));
+    assert.ok(!/waitForSoftHoldIdle/.test(seq) && /clickConfirmSelect\(\)/.test(seq), "confirm fires on preselect-OK, not after a quiet wait");
+    assert.ok(/markSeatTaken\(seat\.seatInfoId\);[\s\S]{0,200}continue;/.test(seq) && !/await sleep\(/.test(seq.replace(/sleep\(timeoutMs\)/g, "")), "a taken seat is marked and the next is pressed with no sleep");
+    assert.ok(/mySeq > focusPoller\.applied/.test(source), "an older answer is never applied");
+  },
+  "sold out hands the run to a quiet watch, silently and without moving"() {
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
+    const at = source.indexOf('seatState.lastExit = "soldOut";');
+    const branch = source.slice(at, at + 700);
+    assert.ok(/seatState\.lastError = "";/.test(branch), "sold out is not an error");
+    assert.ok(/return runSeatAutopilot\(config, \{ catchMode: true, quiet: true \}\);/.test(branch), "it becomes a quiet watch in place");
+    assert.ok(/if \(isCatch && !quiet && !seatState\.quietWatch\) await parkInWatchedBlock/.test(source), "a quiet watch never parks");
+    assert.ok(/QUIET_WATCH_TEXT = "잔여석 0석 · 실시간 취소표 대기 중 \(30ms 초고속 감시\)"/.test(source), "the frozen sentence");
+  },
+  "the schedule step presses real buttons with the pointer sequence"() {
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
+    const fn = source.slice(source.indexOf("async function chooseRoundOnSchedule("), source.indexOf("function shownRoundOnSeatPage("));
+    assert.ok(/nativePress\(cell\)/.test(fn) && /nativePress\(picked\)/.test(fn) && /nativePress\(next\)/.test(fn), "date, time and 다음 use nativePress");
+    assert.ok(!/cell\.click\(\)|picked\.click\(\)|next\.click\(\)/.test(fn), "no bare .click() left on the schedule step");
+    assert.ok(/Date\.now\(\) \+ 1500/.test(fn) && /date-switch-fallback/.test(fn), "1.5s fallback to the page's selection");
+  },
   "an arm that refuses says why"() {
     const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     const fn = source.slice(source.indexOf("async function runArmScheduler("));
@@ -2629,11 +2701,14 @@ const tests = {
     // as a broken macro rather than a full house. 취켓팅 is the thing that waits.
     const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
     const branch = source.slice(source.indexOf("if (!candidates.length) {", source.indexOf("while (seatState.attempts < maxAttempts")));
-    const head = branch.slice(0, 900);
-    assert.match(head, /!isCatch && \(seatState\.lastBlocks \|\| \[\]\)\.length && freeSeatCount\(\) === 0/,
+    const head = branch.slice(0, 1800);
+    assert.match(head, /!isCatch && \(\(seatState\.lastBlocks \|\| \[\]\)\.length && freeSeatCount\(\) === 0 \|\| seatState\.gradeRemainsAllZero\)/,
       "a full venue must be detected before burning attempts");
     assert.match(head, /soldOut/, "and recorded as such");
-    assert.match(head, /감시 시작/, "and point the user at 취켓팅");
+    // Sold out is a state, not a fault: no error text, and the run hands
+    // itself to a quiet watch instead of telling the user to press 감시 시작.
+    assert.match(head, /seatState\.lastError = "";/, "not recorded as an error");
+    assert.match(head, /catchMode: true, quiet: true/, "and it becomes the quiet watch in place");
   },
 
   "the open 구역 is measured from the map, not remembered": () => {
@@ -4480,6 +4555,194 @@ const tests = {
   "a small venue passes through the sampler untouched": () => {
     const points = [{ k: "a", x: 1, y: 1 }, { k: "a", x: 2, y: 2 }];
     assert.equal(sandbox.window.NOLSniper.downsampleSketch(points), points, "under the cap, do not copy or thin");
+  },
+
+  // ── Journey 4: 취켓팅 → 전부 정지 → 다시 시작 → clean start ────────────────
+  // What a stop must leave behind is nothing: the next run measures its own
+  // 구역, spawns its own workers, paints its own first line, and no press the
+  // stopped run had in flight may go on to confirm a seat.
+  "전부 정지 leaves the watch with nothing to inherit": async () => {
+    const { NOLSniper } = sandbox.window;
+    const { seatState, focusPoller } = NOLSniper.__test;
+    // A live, focused, quiet watch the user asked for.
+    Object.assign(seatState, {
+      running: true, runMode: "catch", userCatch: true, quietWatch: true,
+      stopRequested: false, haltedByUser: false, locked: false,
+      catchFocusBlock: "001:103", catchFocusCheckedAt: Date.now(),
+    });
+    focusPoller.active = true; focusPoller.key = "001:103";
+    const genBefore = sandbox.window.__nolsniperRunGen;
+    const pending = NOLSniper.__test.waitForSeatNet("preselect", Date.now(), 5000);
+
+    assert.equal(NOLSniper.stopAll(), true);
+
+    assert.equal(seatState.running, false);
+    assert.equal(seatState.stopRequested, true, "the loop is told to stop");
+    assert.equal(seatState.haltedByUser, true, "and bootRoute must not restart it");
+    assert.equal(seatState.userCatch, false, "the standing request for a watch is withdrawn");
+    assert.equal(seatState.quietWatch, false, "quietness is not carried to the next run");
+    assert.equal(seatState.catchFocusBlock, "", "no focus block survives the stop");
+    assert.equal(focusPoller.active, false, "the poller is off");
+    assert.ok(sandbox.window.__nolsniperRunGen > genBefore, "every run in flight is retired");
+    const woke = await Promise.race([pending, new Promise((r) => setTimeout(() => r("late"), 200))]);
+    assert.notEqual(woke, "late", "a press parked on the network is woken now, not at its 2.5s timeout");
+    assert.equal(woke.aborted, true, "and told it was a stop, not an answer");
+  },
+
+  "a restart re-measures the focus block instead of inheriting one": () => {
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
+    const fn = source.slice(source.indexOf("async function runSeatAutopilot("));
+    const reset = fn.slice(0, fn.indexOf("while (seatState.attempts < maxAttempts"));
+    assert.match(reset, /seatState\.catchFocusBlock = "";/, "the block is re-measured on the first tick");
+    assert.match(reset, /seatState\.catchFocusCheckedAt = 0;/, "and the 2s re-check clock starts from zero");
+    assert.match(reset, /seatState\.gradeRemainsAllZero = false;/, "a stale sold-out verdict is not carried");
+    assert.match(reset, /seatState\.fastClickedId = "";/, "nor a remembered fast press");
+    // 감시 시작 is the full watch: only a sold-out landing may make it quiet.
+    assert.match(reset, /if \(userInitiated\) \{[\s\S]{0,400}seatState\.quietWatch = false;/,
+      "a user-initiated run is never quiet by inheritance");
+    const stop = source.slice(source.indexOf("stopAll() {"), source.indexOf("stopAll() {") + 900);
+    assert.match(stop, /seatState\.catchFocusBlock = "";/, "stopAll clears the focus block");
+    assert.match(stop, /abortSeatNetWaiters\(\);/, "and wakes any press parked on the network");
+  },
+
+  "the overlay dedupe never swallows the next run's first line": () => {
+    const { seatState, updateOverlay, updateOverlayIfChanged } = sandbox.window.NOLSniper.__test;
+    const line = "잔여석 0석 · 실시간 취소표 대기 중 (30ms 초고속 감시) · 구역 001:103 고정";
+    updateOverlayIfChanged(line, "info");
+    assert.equal(seatState.message, line);
+    updateOverlay("정지했습니다.", "warn");           // what stopAll paints
+    assert.equal(seatState.message, "정지했습니다.");
+    updateOverlayIfChanged(line, "info");             // the restarted watch's first idle tick
+    assert.equal(seatState.message, line, "the same line after a stop is a change, and must be painted");
+    updateOverlayIfChanged(line, "info");
+    assert.equal(seatState.message, line, "and repeating it is still a no-op");
+  },
+
+  "a stop and a restart inside one round trip leave two workers, not four": async () => {
+    const { NOLSniper } = sandbox.window;
+    const { seatState, focusPoller, startFocusPoller, stopFocusPoller, FOCUS_WORKERS } = NOLSniper.__test;
+    const savedFetch = sandbox.fetch;
+    // One slow round trip, so a worker is always parked on a fetch when the
+    // stop and the restart arrive.
+    sandbox.fetch = () => new Promise((r) => setTimeout(() => r({ ok: false, status: 500, text: async () => "", json: async () => ({}) }), 40));
+    const live = () => Object.assign(seatState, {
+      running: true, runMode: "catch", locked: false, stopRequested: false,
+      catchFocusBlock: "001:103", lastBlocks: [{ blockKey: "001:103", seats: [] }], blockedUntil: 0,
+      pageFreed: seatState.pageFreed || [],
+    });
+    const initData = { sessionId: "s", goods: { goodsCode: "26099999" }, playSeq: "001" };
+    try {
+      live();
+      startFocusPoller(initData, "001:103", {}, 1);
+      assert.equal(focusPoller.workers, FOCUS_WORKERS, "the first start spawns its pair");
+      // 전부 정지 … 감시 시작, faster than the fetch answers.
+      stopFocusPoller(); seatState.running = false;
+      live();
+      startFocusPoller(initData, "001:103", {}, 2);
+      await new Promise((r) => setTimeout(r, 160));
+      assert.equal(focusPoller.workers, FOCUS_WORKERS,
+        `the old pair must retire when its fetch answers (live: ${focusPoller.workers})`);
+      assert.equal(focusPoller.active, true, "while the new pair keeps watching");
+    } finally {
+      stopFocusPoller(); seatState.running = false;
+      await new Promise((r) => setTimeout(r, 120));
+      sandbox.fetch = savedFetch;
+    }
+    assert.equal(focusPoller.workers, 0, "and a stop with no restart leaves none");
+  },
+
+  // ── The entry chain after 2026-09-04 17:00 (김동률, 3000th in line) ─────────
+  // Read out of the waiting room's own bundle: line-up assigns the place,
+  // rank carries the onestop URL. Both are made from the goods page now.
+  "decideLineUp and decideRank agree with core/entry.py": () => {
+    const { decideLineUp, decideRank, queueKeyFrom } = sandbox.window.NOLSniper.race;
+    assert.equal(decideLineUp({ exist: false, userSeq: 17, waitingId: "26012391:pc:17" }).action, "poll");
+    assert.equal(decideLineUp({ waitingId: "a:b:2999" }).userSeq, 2999, "userSeq from the id, as the page does");
+    assert.equal(decideLineUp({ exist: true, userSeq: 3, waitingId: "x:y:3" }).action, "poll", "already lined up keeps its place");
+    assert.equal(decideLineUp({ error: "AccessDenied_T01" }).reason, "AccessDenied_T01");
+    assert.equal(decideLineUp({ exist: true }).action, "fallback", "no id, nothing to poll");
+    assert.equal(decideLineUp({ waitingId: "a:b:1" }, 500).reason, "HTTP 500");
+    assert.equal(decideRank({ myRank: 0, totalRank: 0, oneStopUrl: "https://tickets.interpark.com/onestop?key=k", sessionId: "s" }).action, "go");
+    assert.equal(decideRank({ myRank: 12, totalRank: 500, oneStopUrl: "https://x/onestop" }).action, "go", "the URL is the turn");
+    assert.equal(decideRank({ myRank: 2999, totalRank: 3400, sessionId: "s" }).action, "poll");
+    assert.equal(decideRank({ myRank: -1, totalRank: -1 }).reason, "ExpiredSession");
+    assert.equal(decideRank({ myRank: 0, totalRank: 5, sessionId: "" }).reason, "ExpiredExistedSession");
+    assert.equal(decideRank({ myRank: 0, totalRank: 5, sessionId: "s" }).action, "poll", "rank 0 with a session is still waiting");
+    assert.equal(decideRank({ error: "ServiceUnavailable_R02" }).action, "fallback");
+    assert.equal(queueKeyFrom("https://tickets.interpark.com/waiting?key=abc%3Ddef&lang=ko"), "abc=def");
+    assert.equal(queueKeyFrom("not a url"), "");
+  },
+  "the burst mints the credential once and spends it on every shot": () => {
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
+    const { race } = sandbox.window.NOLSniper;
+    assert.equal(race.SECURE_URL_BURST_MS, 20, "20ms between shots around the open — no throttle ever seen on ent-waiting-api");
+    assert.ok(race.SIGNATURE_MAX_AGE_MS >= 10000, "a minted signature is reused for the whole burst");
+    const fn = source.slice(source.indexOf("async function enterViaSecureUrlWithRetries("), source.indexOf("async function enterViaSecureUrl("));
+    assert.match(fn, /const memberInfo = await mintMemberInfo\(arm\);\n\s*const result = await enterViaSecureUrl\(arm, memberInfo\);/,
+      "each shot takes the cached signature and makes one POST");
+    assert.doesNotMatch(fn, /fetchMemberInfo\(/, "no member-info GET inside the retry loop");
+    assert.match(fn, /offsetMs < 1500 \? SECURE_URL_BURST_MS/, "the tight interval is the burst constant");
+    assert.match(fn, /if \(isAuthError\(error\)\) \{\n\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*if \(!remintedForAuth\) \{\n\s*remintedForAuth = true;\n\s*armState\.memberInfo = null;\n\s*continue;/,
+      "an auth-looking refusal is retried once with a fresh signature before it is called a logout");
+    const single = source.slice(source.indexOf("async function enterViaSecureUrl("), source.indexOf("function queueKeyFrom("));
+    assert.match(single, /const info = memberInfo \|\| \(await mintMemberInfo\(arm\)\);/, "a cache miss still mints exactly once");
+  },
+  "the scheduler pre-mints the credential before the burst": () => {
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
+    const { race } = sandbox.window.NOLSniper;
+    assert.equal(race.PREMINT_LEAD_MS, 10000, "measured: a signature is still accepted at 601s, so mint well clear of the burst");
+    assert.ok(race.SIGNATURE_MAX_AGE_MS >= 60000 && race.SIGNATURE_MAX_AGE_MS <= 600000, "reuse for the whole burst, re-mint inside the measured validity");
+    const fn = source.slice(source.indexOf("async function runArmScheduler("));
+    const premintAt = fn.indexOf("await waitUntilServerUnix(entryStart - PREMINT_LEAD_MS / 1000, { cancelled });");
+    const mintAt = fn.indexOf("await mintMemberInfo(arm, { maxAgeMs: 0 });");
+    const burstAt = fn.indexOf("await waitUntilServerUnix(entryStart, { cancelled });");
+    assert.ok(premintAt > 0 && mintAt > premintAt && burstAt > mintAt, "wait to T-10s, mint, then wait to the burst");
+    assert.match(fn.slice(premintAt - 200, premintAt), /if \(secureUrlUsableHere\(\) && arm\.goods_code && !arm\.dry_run\)/,
+      "only where the credential can be minted, and never for a dry run");
+    assert.match(fn.slice(mintAt, mintAt + 300), /armState\.memberInfo = null;/, "a failed pre-mint leaves the burst to mint");
+    assert.match(fn.slice(premintAt - 80, mintAt), /for \(let attempt = 0; attempt < 2; attempt \+= 1\)/, "and is retried once first");
+  },
+  "the key is lined up and ranked from the goods page before any navigation": () => {
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
+    const { race } = sandbox.window.NOLSniper;
+    assert.equal(race.LINE_UP_PATH, "/waiting/api/line-up");
+    assert.equal(race.RANK_PATH, "/waiting/api/rank");
+    assert.ok(race.RANK_POLL_MS <= 200, "the turn is noticed within one poll of the URL appearing, not the page's 2–3s");
+    assert.ok(race.RANK_SESSION_GRACE_MS >= 3000, "an 'expired session' inside the ~1.7s session-creation window is not trusted");
+    const directFn = source.slice(source.indexOf("async function enterQueueDirect("), source.indexOf("const GOODS_INFO_URL"));
+    assert.match(directFn, /next\.reason === "ExpiredExistedSession"[\s\S]{0,120}< RANK_SESSION_GRACE_MS/, "the grace is applied to exactly that reading");
+    const single = source.slice(source.indexOf("async function enterViaSecureUrl("), source.indexOf("function queueKeyFrom("));
+    const directAt = single.indexOf("const direct = await enterQueueDirect(waitingUrl);");
+    const navAt = single.indexOf("location.href = waitingUrl;");
+    assert.ok(directAt > 0 && navAt > directAt, "line-up and rank first; the waiting page only as the fallback");
+    assert.match(single, /if \(direct\.navigated\) return/, "a turn read here never also loads the waiting page");
+    const direct = source.slice(source.indexOf("async function enterQueueDirect("), source.indexOf("const GOODS_INFO_URL"));
+    assert.ok(direct.indexOf("await postLineUp(key)") < direct.indexOf("await fetchRank(lined.waitingId)"), "line-up, then rank");
+    assert.match(direct, /if \(next\.action === "go"\) \{[\s\S]{0,400}location\.href = next\.url;/, "the onestop URL is navigated to the moment rank carries it");
+    assert.match(direct, /if \(\(armState\.entryGen \|\| 0\) !== gen\)/, "전부 정지 ends the rank poll");
+    const stop = source.slice(source.indexOf("stopAll() {"), source.indexOf("stopAll() {") + 1200);
+    assert.match(stop, /armState\.entryGen = \(armState\.entryGen \|\| 0\) \+ 1;/);
+    assert.match(direct, /if \(lined\.action !== "poll"\) \{ report\.outcome = `line-up: \$\{lined\.reason\}`; return \{ navigated: false/, "anything unexpected falls back to the page");
+  },
+  "secure-url and the queue calls carry the session": () => {
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
+    const secure = source.slice(source.indexOf("async function fetchSecureUrl("), source.indexOf("const SCHEDULE_STEP_TIMEOUT_MS"));
+    assert.match(secure, /credentials: "include"/, "secure-url is sent with credentials, as the gate's bundle sends it");
+    const queue = source.slice(source.indexOf("async function fetchQueueJson("), source.indexOf("const postLineUp"));
+    assert.match(queue, /credentials: "include"/, "line-up and rank too");
+    assert.match(queue, /controller\.abort\(\)/, "and bounded, like the page's own 3s abort");
+  },
+  "a stopped press sequence never goes on to confirm the seat": () => {
+    const source = readFileSync(resolve(here, "../browser/nolsniper_autopilot.js"), "utf8");
+    const seq = source.slice(source.indexOf("async function pressSequence("), source.indexOf("function startFocusPoller("));
+    assert.match(seq, /const gen = window\.__nolsniperRunGen;/, "the press remembers the run it belongs to");
+    assert.match(seq, /runWasSuperseded\(gen\)/, "and a stop (which retires the run) counts as halted");
+    assert.match(seq, /await waitForSeatNet\("preselect", since, 2500\);\n\s*if \(pre\.aborted \|\| halted\(\)\) return bail\(lat\);/,
+      "checked the moment the preselect answer (or the stop) wakes it, before anything is confirmed");
+    assert.match(seq, /await waitForSeatNet\("select", since, 3000\);\n\s*if \(sel\.aborted\) return bail\(lat\);/,
+      "and a stop during the hold answer is not read as a hold");
+    assert.match(seq, /while \(performance\.now\(\) < confirmDeadline\) \{\n\s*if \(halted\(\)\) return bail\(lat\);/,
+      "nor does the confirm loop press 선택 완료 after a stop");
   },
 };
 

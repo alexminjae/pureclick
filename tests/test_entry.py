@@ -119,3 +119,77 @@ def test_the_arm_carries_a_biz_code_through_the_round_trip():
 
 def test_the_goods_origin_is_the_one_the_credential_is_minted_on():
     assert GOODS_ORIGIN == "https://tickets.interpark.com"
+
+
+# ── The queue's own two calls, read out of the waiting room's bundle ──────────
+from core.entry import EXPIRED_RANK, LINE_UP_PATH, RANK_PATH, decide_line_up, decide_rank  # noqa: E402
+
+
+def test_the_queue_paths_are_the_waiting_rooms_own():
+    assert LINE_UP_PATH == "/waiting/api/line-up"
+    assert RANK_PATH == "/waiting/api/rank"
+    assert EXPIRED_RANK == -1
+
+
+def test_a_line_up_answer_with_a_waiting_id_is_polled():
+    got = decide_line_up({"exist": False, "userSeq": 17, "waitingId": "26012391:pc:17", "clientReq": {"goodsCode": "26012391"}})
+    assert got["action"] == "poll"
+    assert got["waiting_id"] == "26012391:pc:17"
+    assert got["user_seq"] == 17
+    assert got["exist"] is False
+
+
+def test_the_user_seq_falls_back_to_the_waiting_id():
+    # The page derives userSeq from waitingId.split(":")[2] when it resumes.
+    got = decide_line_up({"waitingId": "a:b:2999"})
+    assert got["user_seq"] == 2999
+    assert decide_line_up({"waitingId": "no-colons"})["user_seq"] is None
+
+
+def test_an_existing_line_up_is_still_polled_when_it_has_an_id():
+    # exist=true is "already lined up": keep the place, never a new wait.
+    got = decide_line_up({"exist": True, "userSeq": 3, "waitingId": "x:y:3"})
+    assert got["action"] == "poll" and got["exist"] is True
+
+
+def test_a_line_up_that_fails_falls_back_to_the_page():
+    assert decide_line_up({"error": "AccessDenied_T01"})["action"] == "fallback"
+    assert decide_line_up({"error": "AccessDenied_T01"})["reason"] == "AccessDenied_T01"
+    assert decide_line_up({"exist": True}, 200)["action"] == "fallback"       # no waitingId to poll
+    assert decide_line_up({"waitingId": "a:b:1"}, 500)["action"] == "fallback"
+    assert decide_line_up({"waitingId": "a:b:1"}, 500)["reason"] == "HTTP 500"
+    assert decide_line_up(None)["action"] == "fallback"
+
+
+def test_a_onestop_url_is_the_turn_whatever_the_rank_says():
+    got = decide_rank({"myRank": 0, "totalRank": 0, "oneStopUrl": "https://tickets.interpark.com/onestop?key=k", "sessionId": "s"})
+    assert got["action"] == "go" and got["url"].startswith("https://tickets.interpark.com/onestop")
+    # Even with a rank still showing, the URL wins (the page's own order).
+    assert decide_rank({"myRank": 12, "totalRank": 500, "oneStopUrl": "https://x/onestop"})["action"] == "go"
+
+
+def test_a_place_in_line_keeps_polling():
+    got = decide_rank({"myRank": 2999, "totalRank": 3400, "oneStopUrl": "", "sessionId": "s"})
+    assert got["action"] == "poll" and got["my_rank"] == 2999 and got["total_rank"] == 3400
+
+
+def test_the_pages_expired_states_fall_back():
+    assert decide_rank({"myRank": -1, "totalRank": -1})["reason"] == "ExpiredSession"
+    assert decide_rank({"myRank": 0, "totalRank": 5, "sessionId": ""})["reason"] == "ExpiredExistedSession"
+    assert decide_rank({"error": "ServiceUnavailable_R02"})["action"] == "fallback"
+    assert decide_rank({"myRank": 1}, 502)["reason"] == "HTTP 502"
+    # rank 0 WITH a session and no URL yet: still waiting, not expired.
+    assert decide_rank({"myRank": 0, "totalRank": 5, "sessionId": "s"})["action"] == "poll"
+
+
+def test_the_measured_queue_facts_are_recorded():
+    # tools/probe_entry_chain.py, 2026-09-05: the session appears ~1.7s after
+    # line-up, and lining the same key up twice makes two entries.
+    from core.entry import LINE_UP_IDEMPOTENT, SESSION_APPEARS_AFTER_MS
+    assert LINE_UP_IDEMPOTENT is False
+    assert 1000 <= SESSION_APPEARS_AFTER_MS <= 3000
+
+
+def test_the_signature_validity_lower_bound_is_recorded():
+    from core.entry import SIGNATURE_VALID_FOR_S
+    assert SIGNATURE_VALID_FOR_S >= 600

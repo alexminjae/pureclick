@@ -81,3 +81,32 @@ class GuidanceRules(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CatchModeStability(unittest.TestCase):
+    """On the seat map a running watch is "watching" and nothing else."""
+
+    def test_leftover_arm_flags_never_read_as_armed_on_the_seat_map(self) -> None:
+        seat = {"running": True, "runMode": "catch"}
+        for arm in ({"running": True, "fired": False}, {"running": True, "fired": True}, {"fired": True}, {}):
+            self.assertEqual(derive_mode(page="seat", seat=seat, arm=arm), "watching", arm)
+        # Even with the watch idle, an arm on the seat map is a leftover, not a state.
+        self.assertEqual(derive_mode(page="seat", seat={}, arm={"running": True, "fired": False}), "on_seat")
+
+    def test_the_gap_between_two_catch_attempts_stays_watching(self) -> None:
+        between = {"running": False, "runMode": "catch"}
+        self.assertEqual(derive_mode(page="seat", seat=between, arm={}), "watching")
+        self.assertEqual(derive_mode(page="seat", seat={**between, "haltedByUser": True}, arm={}), "halted")
+        self.assertEqual(derive_mode(page="seat", seat={**between, "lastError": "x"}, arm={}), "error")
+
+    def test_no_ghost_transitions_over_a_flapping_poll(self) -> None:
+        seat_on = {"running": True, "runMode": "catch"}
+        seat_gap = {"running": False, "runMode": "catch"}
+        polls = [({"running": True}, seat_on), ({}, seat_gap), ({"running": True}, seat_on),
+                 ({"fired": True}, seat_gap), ({}, seat_on)]
+        modes = {derive_mode(page="seat", seat=s, arm=a) for a, s in polls}
+        self.assertEqual(modes, {"watching"})
+
+    def test_watching_guidance_is_frozen_text(self) -> None:
+        g = guidance("watching", OPEN, round_picked=True, auto_seats=True)
+        self.assertEqual(g.banner, "취켓팅 중 · 실시간 좌석 감시 중")

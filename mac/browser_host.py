@@ -109,6 +109,9 @@ _COMMAND_JS = {
     "stop_all": "window.NOLSniper && NOLSniper.stopAll()",
     # Give back every held seat and unlock, without stopping the rest.
     "release_seats": "window.NOLSniper && NOLSniper.releaseHeld()",
+    # Verification hooks: keep/return a server hold without stopping the watch.
+    "forget_hold": "window.NOLSniper && NOLSniper.forgetHold()",
+    "release_only": "window.NOLSniper && NOLSniper.releaseOnly()",
     # One instrumented click, then stop. Reports into the persistent trace.
     "diagnose": "window.NOLSniper && NOLSniper.diagnose()",
     "clear_trace": "window.NOLSniper && NOLSniper.clearTrace()",
@@ -646,9 +649,14 @@ def poll_context(window: webview.Window, stop_event: threading.Event) -> None:
         # _POLL_CONTEXT_TIMEOUT seconds, so tick 8 was landing past a 60s
         # window and the file looked absent when the loop was in fact running.
         if tick in (2, 10, 40) or tick % 80 == 0:
+            # No second probe at a hung UI thread: it would only queue behind
+            # the stuck call for its own 2s timeout and stall this tick — the
+            # timeout just recorded in last_error is already the whole answer.
+            probe = ("(UI 스레드 응답 없음 — 페이지 프로브 생략)" if is_hang
+                     else _probe_page(window))
             write_desktop_diagnostic(
                 {"last_ok": last_ok, "failures": failures, "last_error": last_error},
-                _probe_page(window),
+                probe,
                 elapsed=time.time() - started_at,
             )
         stop_event.wait(0.4)

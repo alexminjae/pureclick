@@ -69,6 +69,9 @@ _COMMAND_JS = {
     "stop_all": "window.NOLSniper && NOLSniper.stopAll()",
     # Give back every held seat and unlock, without stopping the rest.
     "release_seats": "window.NOLSniper && NOLSniper.releaseHeld()",
+    # Verification hooks: keep/return a server hold without stopping the watch.
+    "forget_hold": "window.NOLSniper && NOLSniper.forgetHold()",
+    "release_only": "window.NOLSniper && NOLSniper.releaseOnly()",
     "diagnose": "window.NOLSniper && NOLSniper.diagnose()",
     "clear_trace": "window.NOLSniper && NOLSniper.clearTrace()",
 }

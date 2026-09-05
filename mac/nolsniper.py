@@ -842,6 +842,11 @@ class NolSniperApp(tk.Tk):
             self._stop_trigger_worker()
             self._remember_press("전부 정지")
             self.browser.send_command("stop_all", clear_arm=True)
+            # The arm went with the command, so the countdown must not go on
+            # counting to a moment that will no longer fire (it did: 전부 정지
+            # during 오픈 대기 left "테스트 00:00:45" ticking down to nothing).
+            self._armed_target_unix = None
+            self._armed_is_test = False
             self._flash(FAINT, "정지 요청됨", "예매 창에 정지를 전달했습니다.")
         except Exception as exc:
             self._flash(AMBER, "정지하지 못했습니다", str(exc))
@@ -1615,6 +1620,15 @@ class NolSniperApp(tk.Tk):
         previous = self._catalog or {}
         new_code = str(catalog.get("goods_code") or "")
         old_code = str(previous.get("goods_code") or "")
+        # Another show's catalog is never applied here. After a switch the state
+        # file still carries the previous show for a poll or two, and applying
+        # it drew Elisabeth's 1674-seat sketch and her 65 rounds under 김동률
+        # (measured, live audit 16:33). The current show is whichever code the
+        # panel is following or has loaded.
+        current = str(getattr(self, "_fetching_code", "") or getattr(self, "_auto_loaded_code", "")
+                      or self.goods_code.get() or "").strip().upper()
+        if new_code and current and new_code.upper() != current:
+            return
         self._catalog = catalog
         for key, var in (("goods_code", self.goods_code), ("place_code", self.place_code)):
             if catalog.get(key) and not var.get().strip():
@@ -2211,6 +2225,7 @@ class NolSniperApp(tk.Tk):
             self._last_arm_status = status.get("arm") or {}
             self._last_arm_cfg = snapshot.get("arm") or {}
             self._last_context = context or {}
+            self._tidy_arm_on_seat(context)
             if context:
                 self._follow_browser_show(context)
             self._update_guidance(context, seat)
@@ -2255,10 +2270,75 @@ class NolSniperApp(tk.Tk):
                 ):
                     self._apply_catalog(catalog)
             self._apply_autopilot_status(status, health)
+            self._run_panel_commands()
             self._publish_panel_state()
         except Exception as exc:  # noqa: BLE001 - keep the poll alive
             self._note(f"브라우저 동기화 오류: {exc}", error=True)
         self.after(500, self._poll_show)
+
+    def _tidy_arm_on_seat(self, context: dict | None) -> bool:
+        """On the seat map the entry is done: clear a leftover arm, once.
+
+        A leftover arm (config still published, or a page still reporting the
+        scheduler as running) is what made the banner and the 오픈 대기
+        countdown flap during 취켓팅. It is cleared exactly once per visit to
+        the seat map; leaving the map re-arms the latch, so an arm the user
+        makes afterwards (전부 정지 → 대기 시작 for the next round) is carried
+        through the next entry and cleared again only when *it* lands here.
+        Returns whether an arm was cleared on this call.
+        """
+        on_seat = (context or {}).get("page") == "seat"
+        if not on_seat:
+            self._arm_cleared_on_seat = False
+            return False
+        leftover = bool(getattr(self, "_last_arm_cfg", None)) or bool(
+            (getattr(self, "_last_arm_status", None) or {}).get("running"))
+        if not leftover or getattr(self, "_arm_cleared_on_seat", False):
+            return False
+        self._arm_cleared_on_seat = True
+        self._armed_target_unix = None
+        self._armed_is_test = False
+        try:
+            self.browser.push(clear_arm=True)
+        except Exception:  # noqa: BLE001 - a tidy-up, never a blocker
+            pass
+        return True
+
+    def _run_panel_commands(self) -> None:
+        """Drive the panel from a file — the audit's only way to press its buttons.
+
+        `.nolsniper_panel_cmd.json` next to the bridge state: {"cmd": ..., ...}.
+        Whitelisted, consumed once, never a shell. Used by the autonomous live
+        audit; harmless when absent.
+        """
+        try:
+            path = self.browser.state_path.with_name(".nolsniper_panel_cmd.json")
+            if not path.exists():
+                return
+            raw = path.read_text(encoding="utf-8")
+            path.unlink()
+            req = json.loads(raw) if raw.strip() else {}
+            cmd = str(req.get("cmd") or "")
+            if cmd == "pick_round":
+                want = str(req.get("play_seq") or "")
+                rounds = getattr(self, "rounds", None) or []
+                for i, row in enumerate(rounds):
+                    if str(row.get("play_seq") or row.get("playSeq") or "") == want:
+                        self.round_box.current(i)
+                        self._on_round_pick(event=object())
+                        break
+            elif cmd == "enter_now":
+                self.enter_now()
+            elif cmd == "arm":
+                self.arm()
+            elif cmd == "stop_all":
+                self.stop_all()
+            elif cmd == "open_virtual_map":
+                self.open_zone_picker()
+            elif cmd == "close_virtual_map":
+                self._close_zone_picker()
+        except Exception as exc:  # noqa: BLE001 - an audit hook must never break the poll
+            self._note(f"panel cmd 오류: {exc}", error=True)
 
     def _publish_panel_state(self) -> None:
         """What the panel is showing, as a file — for support and for tests.
@@ -2296,6 +2376,15 @@ class NolSniperApp(tk.Tk):
                 "show": self.show_title.get(),
                 "rounds": len(getattr(self, "rounds", None) or []),
                 "virtual_map_seats": len(getattr(self, "_zone_sketch", None) or []),
+                "virtual_map_open": bool(getattr(self, "_zones", None) is not None
+                                         and getattr(self, "_zone_canvas", None) is not None),
+                "virtual_map_notice": (getattr(self, "_zone_hint", None).get()
+                                       if getattr(self, "_zone_hint", None) is not None else ""),
+                "show_where": self.show_where.get(),
+                "show_round": self.show_round.get(),
+                "play_seq": self.play_seq.get(), "play_date": self.play_date.get(), "play_time": self.play_time.get(),
+                "target_time": f"{self.target_date.get()} {self.target_time.get()}",
+                "entry_offset_ms": self.entry_offset_ms.get(),
                 "target_rect": self._watch_rect,
             }
             if snapshot != getattr(self, "_panel_state_last", None):
@@ -2364,6 +2453,8 @@ class NolSniperApp(tk.Tk):
         # 예매 창 running an older automation that publishes no route.
         via = {
             "waiting-api": "대기열 API로 진입",
+            "secure-url": "대기열 API로 진입 (secure-url)",
+            "secure-url+line-up": "대기열 API로 진입 · 줄서기·순번 조회를 직접 수행",
             "book-session": "BookSession 폼으로 진입",
             "dom-click": "페이지의 예매하기 버튼을 눌러 진입",
             "dom-click-forced": "예매하기 버튼을 강제로 활성화해 진입",
@@ -2403,6 +2494,22 @@ class NolSniperApp(tk.Tk):
                 row += f" · 클릭 {click_late:+.0f}ms"
                 if arm.get("clickTries"):
                     row += f" ({arm['clickTries']}회 확인)"
+            lines.append(row)
+
+        # The queue itself, in numbers: where the key became a place in line,
+        # how long that took, and whether the turn was read here or handed to
+        # the waiting page. "3000번째" is answered by userSeq, nothing else.
+        line_up = arm.get("lineUp")
+        if isinstance(line_up, dict) and line_up.get("key"):
+            row = f"줄서기 {line_up.get('lineUpMs') or '?'}ms"
+            if line_up.get("userSeq") is not None:
+                row += f" · 순번 {line_up['userSeq']}"
+            if line_up.get("myRank") is not None:
+                row += f" · 내 앞 {line_up['myRank']} / 전체 {line_up.get('totalRank') or '?'}"
+            if line_up.get("totalMs"):
+                row += f" · 통과 {line_up['totalMs']}ms"
+            if line_up.get("outcome") and line_up.get("outcome") != "onestop":
+                row += f" · {line_up['outcome']}"
             lines.append(row)
 
         offset_ms = arm.get("entryOffsetMs") or 0
@@ -2672,6 +2779,10 @@ class NolSniperApp(tk.Tk):
             self._block_rows = []
             self._catalog = None
             self._watch_rect = None
+            # The place belongs to the show we are leaving. Kept, it rode along
+            # on the next round hint and goods-info answered with the previous
+            # show's schedule (measured: 김동률 listed 엘리자벳's rounds).
+            self.place_code.set("")
             self._clear_zone_canvas()
             self._load_cached_sketch(code)  # else the canvas shows NO_SKETCH_NOTICE
             self._schedule_zone_map()
@@ -2703,7 +2814,11 @@ class NolSniperApp(tk.Tk):
         )
         if any(round_key) and round_key != self._followed_round:
             self._followed_round = round_key
-            self._apply_context_fields(context)
+            # A round the user pinned by hand outranks the page's own default
+            # selection (측정: pick 006 = 10/24, card showed 10/17 from the
+            # product page's calendar). Follow the page only when nobody picked.
+            if not getattr(self, "_round_user_picked", False):
+                self._apply_context_fields(context)
             self._select_round_matching(context)
             self._schedule_remain_refresh(context)
 
@@ -2850,13 +2965,16 @@ class NolSniperApp(tk.Tk):
         opens = self._open_time()
         phase = sale_phase(opens, datetime.now(KST))
         open_text = opens.strftime("%m-%d %H:%M") if opens else ""
-        armed_at = getattr(self, "_armed_target_unix", None)
-        if not armed_at:
-            armed_at = (getattr(self, "_last_arm_cfg", None) or {}).get("target_server_unix")
+        cfg = getattr(self, "_last_arm_cfg", None) or {}
+        armed_at = cfg.get("target_server_unix") or getattr(self, "_armed_target_unix", None)
         if mode == "armed" and armed_at:
-            # The moment this arm fires, not the show's own open: a rehearsal
-            # a minute out must not be labelled with a date months ago.
+            # The published open this arm is aimed at, with the lead beside it —
+            # not the fire instant folded in (that printed 16:59:59 for a 17:00
+            # open and read as the wrong time).
+            lead = int(cfg.get("entry_offset_ms") or 0)
             open_text = datetime.fromtimestamp(float(armed_at), KST).strftime("%m-%d %H:%M:%S")
+            if lead:
+                open_text += f" · {lead:+d}ms"
         rounds = getattr(self, "rounds", None) or []
         round_picked = bool(rounds) and bool(str(self.play_seq.get() or "").strip())
         reason = str(seat.get("lastError") or arm.get("lastError") or "")
@@ -2865,6 +2983,8 @@ class NolSniperApp(tk.Tk):
                              open_text=open_text, reason=reason)
         instruction = told.instruction
         primary = told.primary
+        if mode == "watching" and (seat.get("quietWatch") or seat.get("freeSeats") == 0):
+            instruction = "잔여석 0석 · 실시간 취소표 대기 중 (30ms 초고속 감시)"
         logged_out = (context or {}).get("logged_in") is False
         if logged_out and mode in {"ready", "halted", "error", "no_show"}:
             # Real-time login watchdog: a page with no session cannot arm or
@@ -3173,8 +3293,13 @@ class NolSniperApp(tk.Tk):
     def _publish_round_hint(self) -> None:
         """Tell the page which round the panel is aimed at (overlay + catalog)."""
         goods = str(self.goods_code.get() or "").strip()
-        place = str(self.place_code.get() or "").strip()
-        if not goods:
+        info = self._show_info_data or {}
+        # The place from the show lookup, never a field that may still hold the
+        # previous show's; and no hint at all until the lookup is for this show.
+        if str(info.get("goods_code") or "").strip().upper() != goods.upper():
+            return
+        place = str(info.get("place_code") or self.place_code.get() or "").strip()
+        if not goods or not place:
             return
         try:
             self.browser.publish_show(goods, place, play_seq=self.play_seq.get().strip(),
@@ -3241,7 +3366,7 @@ class NolSniperApp(tk.Tk):
             time.sleep(0.2)
         return False
 
-    def _park_for_entry(self, goods_code: str) -> bool:
+    def _park_for_entry(self, goods_code: str, *, force: bool = False) -> bool:
         """Move the 예매 창 onto the origin the entry calls need, if it is not there.
 
         The credential the fire spends is minted from
@@ -3255,7 +3380,10 @@ class NolSniperApp(tk.Tk):
         """
         context = self.browser.read_page_context() or {}
         current = str(context.get("url") or "")
-        if not needs_parking(current):
+        # `force` (오픈에 자동 진입): always land on the goods page, even when the
+        # window already reports the entry origin — a stale or mid-navigation
+        # context must never leave the countdown on nol.yanolja.com.
+        if not force and not needs_parking(current):
             return False
         self.browser.navigate(park_url(goods_code))
         self._ui(self.status.set, "예매 창을 예매 출처로 이동…")
@@ -3305,7 +3433,7 @@ class NolSniperApp(tk.Tk):
             # Park before publishing, never after: the arm is what the page acts
             # on, and pushing it at a page that is about to be navigated away
             # from arms the document that is leaving.
-            if self._park_for_entry(payload.goods_code):
+            if self._park_for_entry(payload.goods_code, force=True):
                 # Long enough for the new document to boot the autopilot, capped
                 # so a park requested seconds before the open cannot eat it.
                 budget = max(0.0, deadline_perf - time.perf_counter() - 0.5)
@@ -3517,6 +3645,11 @@ class NolSniperApp(tk.Tk):
         """
         armed = self._armed_target_unix
         prefix = ""
+        # Nothing to count down to while the watch runs on the seat map: the
+        # 오픈 대기 clock under a live 취켓팅 was one of the things that blinked.
+        if getattr(self, "_mode", "") == "watching":
+            self._show_countdown(None)
+            return
         if armed is not None:
             remaining = float(armed) - self.clock.server_time_unix()
             if remaining > 0:

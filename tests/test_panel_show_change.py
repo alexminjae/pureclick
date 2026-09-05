@@ -299,3 +299,41 @@ class ArmRoundSyncTests(unittest.TestCase):
         panel.play_seq.set("001"); panel.play_date.set("20260804")
         payload = _arm_payload(panel, target_unix=1.0, offset_seconds=0.0, dry_run=False)
         self.assertEqual((payload.play_seq, payload.play_date), ("029", "20260908"))
+
+
+_park_for_entry = _load("_park_for_entry")
+from core.entry import needs_parking as _needs_parking, park_url as _park_url
+_park_for_entry.__globals__.update({"needs_parking": _needs_parking, "park_url": _park_url})
+
+
+class _NavBridge:
+    def __init__(self, url: str) -> None:
+        self.url = url; self.navigated = []
+    def read_page_context(self): return {"url": self.url}
+    def navigate(self, url): self.navigated.append(url)
+
+
+class _ParkPanel:
+    """The few panel hooks _park_for_entry touches after navigating."""
+    def __init__(self, url: str) -> None:
+        self.browser = _NavBridge(url); self.status = FakeVar(); self.notes = []
+    def _ui(self, fn, *a, **k): fn(*a, **k)
+    def _note(self, text, **k): self.notes.append(text)
+
+
+class ParkForEntryTests(unittest.TestCase):
+    """오픈에 자동 진입 always parks on the interpark goods page."""
+
+    def test_forced_park_moves_even_from_the_entry_origin(self) -> None:
+        panel = _ParkPanel("https://tickets.interpark.com/goods/26012694")
+        self.assertTrue(_park_for_entry(panel, "26012694", force=True))
+        self.assertEqual(panel.browser.navigated, ["https://tickets.interpark.com/goods/26012694"])
+
+    def test_unforced_park_is_skipped_on_the_entry_origin(self) -> None:
+        panel = _ParkPanel("https://tickets.interpark.com/goods/26012694")
+        self.assertFalse(_park_for_entry(panel, "26012694"))
+        self.assertEqual(panel.browser.navigated, [])
+
+    def test_nol_page_is_always_parked(self) -> None:
+        panel = _ParkPanel("https://nol.yanolja.com/ticket/products/26012694")
+        self.assertTrue(_park_for_entry(panel, "26012694"))

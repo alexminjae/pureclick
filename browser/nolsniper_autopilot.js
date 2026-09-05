@@ -268,6 +268,45 @@
   const ENT_WAITING_ORIGIN = "https://ent-waiting-api.interpark.com";
   const MEMBER_INFO_PATH = "/api/ticket/v2/reserve-gate/member-info";
   const SECURE_URL_PATH = "/waiting/api/secure-url";
+  // What the waiting room itself does with the key from secure-url, read out
+  // of its bundle (tickets.interpark.com/waiting, 2026-09-05): POST line-up
+  // {key} assigns the place in line (userSeq / waitingId), GET rank?waitingId=
+  // answers {myRank, totalRank, oneStopUrl,…} and the page navigates to
+  // oneStopUrl the moment it appears. The page polls rank every 2–3s and only
+  // starts after its own ~1.3MB of JS has booted — dead time that decides the
+  // position, so the sniper makes both calls itself from the goods page (CORS
+  // allows tickets.interpark.com with credentials for all four endpoints).
+  const LINE_UP_PATH = "/waiting/api/line-up";
+  const RANK_PATH = "/waiting/api/rank";
+  // Measured 2026-09-05 (tools/probe_entry_chain.py, warm connections):
+  // member-info 60ms, secure-url 9ms, line-up 14ms, rank 12–17ms. On an empty
+  // queue rank reports myRank 1 / totalRank 1 with no session for ~1.7s after
+  // line-up, then totalRank 0 + sessionId + oneStopUrl in one answer — the
+  // booking session is created server-side after the line-up, and nothing on
+  // this side shortens that. The page polls every 2–3s; 150ms notices the URL
+  // within one RTT of it appearing.
+  const RANK_POLL_MS = 150;
+  const RANK_POLL_WINDOW_MS = 15 * 60 * 1000;
+  // myRank 0 with no sessionId is the page's "expired existing session" — but
+  // the session takes ~1.7s to exist at all, so that reading is only trusted
+  // once the line-up is older than this.
+  const RANK_SESSION_GRACE_MS = 4000;
+  // line-up is NOT idempotent (measured: the same key lined up twice took two
+  // userSeq). A fallback to the waiting page after a successful line-up
+  // therefore costs the place in line — it is the last resort, never a retry.
+  // The signature member-info mints is stamped with its issue time and is
+  // minted once, before the open, so the burst spends one round trip per shot
+  // instead of two (member-info is the slowest call in the chain at ~60ms).
+  // Re-minted when older than this or refused. Measured 2026-09-05: the same
+  // signature was still accepted by secure-url at 121 s, 301 s and 601 s of
+  // age, so ten seconds before the burst is nowhere near its limit and keeps
+  // a slow or failed member-info (60 ms warm, retried) off the decisive path.
+  const SIGNATURE_MAX_AGE_MS = 300000;
+  const PREMINT_LEAD_MS = 10000;
+  // Burst cadence around the open. secure-url answers in ~9ms warm and no
+  // throttle has ever been observed on ent-waiting-api, so 20ms: at most
+  // ~75 shots across the 1.5s decisive window, under the attempt cap.
+  const SECURE_URL_BURST_MS = 20;
   const NOT_OPEN_ERROR = "UnableReservationTime";
   const BLOCKED_ERROR = "AccessDenied_Blacklist";
   const DEFAULT_SEAT_CONFIG = {
@@ -385,7 +424,17 @@
   // the measured sweep to exceed CATCH_MAX_REQUESTS_PER_SEC. On the venue
   // above that lands at 67ms rather than 100ms, at 60 requests a second
   // against the ~460 the site's own page does opening a 구역.
-  const CATCH_FAST_POLL_MS = 60;
+  //
+  // 20, not 30: the request-rate ceiling below is what actually bounds the
+  // gateway exposure, and a 30ms floor sat on top of a ~20-29ms seatStatus
+  // round trip, so a seat freeing just after a reading was up to 30ms stale
+  // before the next one. The floor now matches the RTT; the 60/s cap and the
+  // MessageChannel yield (never a timer) are unchanged.
+  const CATCH_FAST_POLL_MS = 20;
+  // Hyper-focus: once a block is open on screen, 취켓팅 reads only that block,
+  // this often, and never leaves it. Measured 17:00: sequential sweeps across
+  // 10+ blocks (~1s a lap) lost every cancellation to bots parked on one block.
+  const CATCH_FOCUS_POLL_MS = 20;
   const CATCH_MAX_REQUESTS_PER_SEC = 60;
   const CATCH_LIVE_TRIES = 8;
   // 좌석 잡기 gives up after this many refusals in a row. 취켓팅 keeps watching,
@@ -728,6 +777,44 @@
     return clockState.offsetSeconds;
   }
 
+  // Timer-free yield: WKWebView clamps setTimeout hard in a non-frontmost
+  // window; a MessageChannel hop is not clamped, so short waits stay short.
+  const fastChannel = typeof MessageChannel === "function" ? new MessageChannel() : null;
+  function yieldFast() {
+    if (!fastChannel) return Promise.resolve();
+    return new Promise((resolve) => { fastChannel.port1.onmessage = () => resolve(); fastChannel.port2.postMessage(0); });
+  }
+  // Resolve the moment the page's own seat request answers — from inside the
+  // network callback, not from a poll. `since` guards against an older answer.
+  const seatNetWaiters = [];
+  function waitForSeatNet(kind, since, timeoutMs = 2000) {
+    return new Promise((resolve) => {
+      const check = () => {
+        const net = window.__nolsniperLastSeatNet || {};
+        const at = kind === "preselect" ? net.preselectAt : net.selectAt;
+        if ((at || 0) >= since) return { ok: kind === "preselect" ? net.preselectOk !== false : net.selectOk !== false, at, net };
+        return null;
+      };
+      const now = check(); if (now) return resolve(now);
+      const waiter = { check, resolve, deadline: Date.now() + timeoutMs };
+      seatNetWaiters.push(waiter);
+      // Fallback so a request that never answers cannot hang the sequence.
+      sleep(timeoutMs).then(() => { const i = seatNetWaiters.indexOf(waiter); if (i >= 0) { seatNetWaiters.splice(i, 1); resolve({ ok: null, timeout: true }); } });
+    });
+  }
+  function resolveSeatNetWaiters() {
+    for (let i = seatNetWaiters.length - 1; i >= 0; i -= 1) {
+      const w = seatNetWaiters[i]; const hit = w.check();
+      if (hit) { seatNetWaiters.splice(i, 1); w.resolve(hit); }
+    }
+  }
+  // A stop must not wait out a 2.5s network timeout: wake every waiter now,
+  // marked, so the press sequence holding it can exit on the spot.
+  function abortSeatNetWaiters() {
+    const waiting = seatNetWaiters.splice(0);
+    for (const w of waiting) w.resolve({ ok: null, aborted: true });
+    return waiting.length;
+  }
   async function waitUntilServerUnix(targetUnix, { cancelled = null } = {}) {
     let lastCheck = 0;
     while (serverTimeUnix() < targetUnix) {
@@ -794,7 +881,16 @@
     if (head) head.textContent = overlayHeader();
   }, 500);
 
+  // Skip a repaint only when the overlay is *showing* this line already. The
+  // key is recorded by updateOverlay itself — every write, not only the
+  // de-duplicated ones — so a stop message in between ("정지했습니다.") never
+  // leaves a stale key that swallows the next run's first identical line.
+  function updateOverlayIfChanged(message, tone = "info") {
+    if (seatState.lastOverlayKey === `${tone}|${message}`) return;
+    updateOverlay(message, tone);
+  }
   function updateOverlay(message, tone = "info") {
+    seatState.lastOverlayKey = `${tone}|${message}`;
     seatState.message = String(message || "").replace(/<br\s*\/?>/gi, " · ");
     lastOverlayMessage = message;
     let root = document.getElementById("nolsniper-overlay");
@@ -892,25 +988,53 @@
   //
   // Block keys are `${playSeq}:${block}`, so the seats themselves say which
   // round is on screen, and they cannot be stale.
+  //
+  // Bounded and cached. This used to walk EVERY circle through React fiber on
+  // every call — and it is called from every seatStatus/seatMeta request and
+  // twice per 400ms host snapshot. On a 3,022-seat map that is thousands of
+  // 16-hop fiber walks several times a second on the thread the page paints
+  // from: the host's evaluate_js queued behind it and the panel read
+  // "예매 창 응답 없음". Three agreeing circles are all the evidence needed, so
+  // stop there, never look at more than a dozen, and remember the answer until
+  // the map re-mounts (the seat-index MutationObserver invalidates) or the
+  // circle count changes.
+  const LIVE_PLAY_SEQ_SAMPLE = 12;
+  const LIVE_PLAY_SEQ_TTL_MS = 500;
+  const livePlaySeq = { value: null, at: 0, circles: -1 };
+  function invalidateLivePlaySeq() {
+    livePlaySeq.at = 0;
+  }
   function currentPlaySeqFromDom() {
+    let nodes = document.querySelectorAll("circle.js-seat");
+    const count = nodes.length;
+    const now = performance.now();
+    if (livePlaySeq.at && livePlaySeq.circles === count && now - livePlaySeq.at < LIVE_PLAY_SEQ_TTL_MS) {
+      return livePlaySeq.value;
+    }
+    if (count < 3) nodes = collectSeatCircles();
     const tally = new Map();
-    for (const node of collectSeatCircles()) {
+    let best = null;
+    let bestCount = 0;
+    let inspected = 0;
+    for (const node of nodes) {
+      if (inspected >= LIVE_PLAY_SEQ_SAMPLE || bestCount >= 3) break;
+      inspected += 1;
       const key = seatFromFiber(node)?.blockKey;
       if (!key) continue;
       const seq = String(key).split(":")[0];
       if (!seq) continue;
-      tally.set(seq, (tally.get(seq) || 0) + 1);
-    }
-    let best = null;
-    let bestCount = 0;
-    for (const [seq, count] of tally) {
-      if (count > bestCount) {
+      const n = (tally.get(seq) || 0) + 1;
+      tally.set(seq, n);
+      if (n > bestCount) {
         best = seq;
-        bestCount = count;
+        bestCount = n;
       }
     }
     // A handful of circles is not evidence; a drawn 구역 is.
-    return bestCount >= 3 ? best : null;
+    livePlaySeq.value = bestCount >= 3 ? best : null;
+    livePlaySeq.circles = count;
+    livePlaySeq.at = now;
+    return livePlaySeq.value;
   }
 
   function withLivePlaySeq(initData) {
@@ -1944,8 +2068,12 @@
       playSeq: String(arm.play_seq || ""),
       preSales: arm.pre_sales || "N",
     };
+    // credentials: the gate's own bundle sends them, and the line-up that
+    // follows is made with them too — a cookie this answer sets must not be
+    // dropped on the floor by the one request in the chain that omits them.
     const response = await fetch(`${ENT_WAITING_ORIGIN}${SECURE_URL_PATH}`, {
       method: "POST",
+      credentials: "include",
       body: JSON.stringify(body),
       headers: { "Content-Type": "application/json", Accept: "application/json" },
     });
@@ -2034,6 +2162,30 @@
    * DOM means three cells reading "4". The month heading inside each slide is
    * what disambiguates them.
    */
+  // React's calendar handlers listen for the pointer sequence on the button,
+  // not a bare .click() on the wrapper cell — .click() on the <td> switched
+  // nothing (측정: 10/24 picked, calendar stayed on 10/17, "회차 선택 중…").
+  function pressable(el) {
+    if (!el) return null;
+    if (el.matches && el.matches("button,[role=button],a")) return el;
+    return (el.querySelector && el.querySelector("button,[role=button],a")) || el;
+  }
+  function nativePress(el) {
+    const node = pressable(el);
+    if (!node) return false;
+    const rect = node.getBoundingClientRect ? node.getBoundingClientRect() : { left: 0, top: 0, width: 0, height: 0 };
+    const shared = { bubbles: true, cancelable: true, composed: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2, pointerId: 1, pointerType: "mouse", isPrimary: true, button: 0 };
+    try {
+      if (typeof PointerEvent === "function") node.dispatchEvent(new PointerEvent("pointerdown", { ...shared, buttons: 1 }));
+      node.dispatchEvent(new MouseEvent("mousedown", { ...shared, buttons: 1 }));
+      if (typeof PointerEvent === "function") node.dispatchEvent(new PointerEvent("pointerup", { ...shared, buttons: 0 }));
+      node.dispatchEvent(new MouseEvent("mouseup", { ...shared, buttons: 0 }));
+      node.dispatchEvent(new MouseEvent("click", { ...shared, buttons: 0 }));
+    } catch (error) {
+      try { node.click(); } catch (inner) { return false; }
+    }
+    return true;
+  }
   // The pressed/selected calendar cell, if it is the wanted yyyyMMdd.
   function activeDateCellFor(wantedDate) {
     try {
@@ -2046,6 +2198,28 @@
       )];
       return active.find((el) => (el.textContent || "").replace(/\D/g, "") === day) || null;
     } catch { return null; }
+  }
+  // Press the calendar's next/previous-month control toward yyyyMMdd. True if
+  // a control was pressed. Selectors are deliberately loose: the month strip
+  // is an EntCalendar heading with a button either side.
+  function pageCalendarToward(wantedDate) {
+    try {
+      const heading = document.querySelector("[class*='EntCalendar_month']");
+      const ym = /^(\d{4})\.(\d{2})$/.exec(((heading && heading.textContent) || "").trim());
+      if (!ym) return false;
+      const shown = Number(ym[1]) * 12 + Number(ym[2]);
+      const want = Number(wantedDate.slice(0, 4)) * 12 + Number(wantedDate.slice(4, 6));
+      if (shown === want) return false;
+      const forward = want > shown;
+      const buttons = [...document.querySelectorAll("[class*='EntCalendar'] button, [class*='Calendar'] button")];
+      const pick = buttons.find((b) => {
+        const label = `${b.getAttribute("aria-label") || ""} ${b.textContent || ""} ${b.className || ""}`;
+        return forward ? /다음|next|›|>|right/i.test(label) : /이전|prev|‹|<|left/i.test(label);
+      });
+      if (!pick || pick.disabled) return false;
+      pick.click();
+      return true;
+    } catch { return false; }
   }
   // The day and time the page currently has pressed on /onestop/schedule.
   function adoptActiveSelection() {
@@ -2131,113 +2305,143 @@
     return cleared;
   }
 
+  // Every date button on the calendar that shows this day-of-month, best
+  // first: the one under a heading that names the wanted month, then the
+  // active swiper slide, then anything else. No dependence on the heading
+  // format or on slide-index month arithmetic — that is what left 10/25
+  // unfound while the screen sat on 10/17 (measured).
+  function findDayButtons(wantedDate) {
+    const day = String(Number(wantedDate.slice(6, 8)));
+    const ym = wantedDate.slice(0, 6);
+    const buttons = [...document.querySelectorAll(
+      "[class*='EntCalendar'] button, [class*='Calendar'] button, [class*='swiper'] button, [role='gridcell'] button, td button"
+    )].filter((btn) => {
+      const num = ((btn.querySelector("[class*='number'], [class*='Number']") || btn).textContent || "").trim().replace(/\D/g, "");
+      return num === day && !btn.disabled && !isSniperOverlay(btn);
+    });
+    const monthOf = (btn) => {
+      const scope = btn.closest("[class*='swiper-slide'], [class*='EntCalendar'], [class*='Calendar']") || document;
+      const heading = scope.querySelector("[class*='month'], [class*='Month']") || document.querySelector("[class*='EntCalendar_month']");
+      const m = /(\d{4})\D+(\d{1,2})/.exec((heading && heading.textContent) || "");
+      return m ? `${m[1]}${String(Number(m[2])).padStart(2, "0")}` : "";
+    };
+    const score = (btn) => {
+      const month = monthOf(btn);
+      const inActive = !!btn.closest(".swiper-slide-active, [class*='slide-active']");
+      return (month === ym ? 4 : month ? 0 : 2) + (inActive ? 1 : 0);
+    };
+    return buttons.sort((x, y) => score(y) - score(x));
+  }
+  function isPressed(el) {
+    return !!el && (el.getAttribute("aria-pressed") === "true" || el.getAttribute("aria-selected") === "true"
+      || /selected|active|on\b/.test(String(el.className || "")));
+  }
+  // Clear anything modal that can sit over the schedule: 예매 안내, 예매대기,
+  // sold-out notices, generic 확인/닫기 dialogs. Returns true if it pressed one.
+  function clearScheduleModals() {
+    let cleared = false;
+    try { cleared = clearScheduleNotice() || cleared; } catch (error) { /* keep going */ }
+    try { cleared = dismissBlockingDialogs() || cleared; } catch (error) { /* keep going */ }
+    try {
+      const dialogs = [...document.querySelectorAll("[role='dialog'], [class*='modal'], [class*='Modal'], [class*='popup'], [class*='Popup'], [class*='layer']")]
+        .filter((d) => !isSniperOverlay(d) && d.offsetParent !== null);
+      for (const dialog of dialogs) {
+        const btn = [...dialog.querySelectorAll("button, a, [role='button']")]
+          .find((el) => /^(확인|닫기|확인하고 예매하기|동의하고 예매하기|예매하기|계속)$/.test((el.textContent || "").replace(/\s+/g, "")));
+        if (btn) { nativePress(btn); cleared = true; }
+      }
+    } catch (error) { /* a modal we cannot name still stops nothing below */ }
+    return cleared;
+  }
+  function findNextButton() {
+    return [...document.querySelectorAll("button, a, [role='button']")]
+      .find((b) => /^(다음|변경하기)$/.test((b.textContent || "").replace(/\s+/g, "")) && !b.disabled && !isSniperOverlay(b)) || null;
+  }
   async function chooseRoundOnSchedule(arm) {
     let wantedDate = String(arm.play_date || "").replace(/\D/g, "");
-    // No date at all: the page's own selection is the round (adopted below).
-    let adopted = null;
-    const deadline = Date.now() + SCHEDULE_STEP_TIMEOUT_MS;
-    if (clearScheduleNotice()) {
-      updateOverlay("예매 안내 확인 → 회차 선택 중…", "info");
-      await sleep(200);
-    }
-
-    // 1. The date. A cell already pressed for the wanted day counts as found
-    //    even when the grid parser skips it (its selected styling differs).
+    const traceStart = Date.now();
+    const st = (seatState.scheduleTrace = { wanted: wantedDate, clock: String(arm.play_time || ""), startedAt: traceStart });
+    // Persisted: the seat page is a new document and would otherwise publish
+    // no trace at all, hiding what the schedule step just did.
+    const persist = () => { try { sessionStorage.setItem("nolsniper_schedule_trace", JSON.stringify(st)); } catch (error) { /* optional */ } };
+    const mark = (k) => { st[k] = Date.now() - traceStart; persist(); };
+    const adoptPage = (why) => {
+      const active = adoptActiveSelection();
+      if (active && active.play_date && active.play_date !== wantedDate) {
+        st.result = why;
+        updateOverlay(`${why === "date-switch-fallback" ? "날짜가 바뀌지 않아" : "고른 날짜가 달력에 없어"} 화면의 선택(${active.play_date})으로 진행합니다`, "warn");
+        wantedDate = active.play_date;
+        arm = { ...arm, play_date: active.play_date, play_time: active.play_time || arm.play_time };
+        try { const saved = loadArmConfig(); if (saved) saveArmConfig({ ...saved, play_date: arm.play_date, play_time: arm.play_time }); rememberPendingRound(arm); } catch (error) { /* still proceed */ }
+      }
+    };
+    clearScheduleModals();
+    // 1. The date: by day number across every grid, at once. If the wanted
+    //    month is not the one on screen, page toward it (bounded) first.
     let cell = null;
-    let noticeTicks = 0;
-    while (Date.now() < deadline) {
-      cell = scheduleDateCells().get(wantedDate) || activeDateCellFor(wantedDate);
-      if (cell) break;
-      if (noticeTicks++ % 4 === 0) clearScheduleNotice();
-      await sleep(200);
-    }
-    if (!cell) {
-      // The calendar does not have the wanted day (or none was wanted). If the
-      // page already has a day and a time selected, that selection *is* the
-      // round: adopt it, tell the arm so the seat-page header check agrees,
-      // and go on to [다음] — instead of failing against a date that was never
-      // a round (측정: 엘리자벳, arm said 20260804, calendar 09-01~10-31,
-      // page showed 9/4 7:30 PM selected).
-      adopted = adoptActiveSelection();
-      if (adopted) {
-        wantedDate = adopted.play_date;
-        arm = { ...arm, play_date: adopted.play_date, play_time: adopted.play_time || arm.play_time };
-        try {
-          const saved = loadArmConfig();
-          if (saved) saveArmConfig({ ...saved, play_date: arm.play_date, play_time: arm.play_time });
-          rememberPendingRound(arm);
-        } catch (error) { /* the adoption still drives this step */ }
-        updateOverlay(`화면에 선택된 회차를 사용합니다 · ${adopted.play_date} ${adopted.clock || ""}`, "info");
-        cell = adopted.cell;
-      } else {
-        const shownDays = [...scheduleDateCells().keys()];
-        const span = shownDays.length ? ` (달력: ${shownDays[0]}~${shownDays[shownDays.length - 1]})` : "";
-        return { chose: false, reason: `달력에서 공연일 ${wantedDate || "?"} 을 찾지 못했습니다${span} — 조작판에서 회차를 다시 고르세요` };
+    if (wantedDate) {
+      cell = scheduleDateCells().get(wantedDate) || findDayButtons(wantedDate)[0] || null;
+      for (let hop = 0; !cell && hop < 4; hop += 1) {
+        if (!pageCalendarToward(wantedDate)) break;
+        await sleep(250);
+        cell = scheduleDateCells().get(wantedDate) || findDayButtons(wantedDate)[0] || null;
       }
     }
-    clearScheduleNotice();
-    if (cell.disabled) return { chose: false, reason: "이 날짜는 예매할 수 없습니다" };
-    if (cell.getAttribute("aria-pressed") !== "true") cell.click();
-
-    // 2. The round on that date. One round needs no choosing; several are told
-    //    apart by the clock time, which is all the step shows.
+    if (cell) {
+      mark("dateFoundMs");
+      if (!isPressed(cell)) {
+        nativePress(cell); mark("dateClickedMs");
+        // Verify briefly (React re-renders the time blocks on a real switch);
+        // never idle on it — the page's selection is the fallback.
+        const switchedBy = Date.now() + 1500;
+        while (Date.now() < switchedBy && !isPressed(cell)) {
+          await yieldFast(); await sleep(50);
+          cell = scheduleDateCells().get(wantedDate) || findDayButtons(wantedDate)[0] || cell;
+        }
+        if (!isPressed(cell)) adoptPage("date-switch-fallback");
+      }
+    } else {
+      adoptPage("date-not-on-calendar");
+      if (st.result !== "date-not-on-calendar") {
+        // Nothing selected on screen either: press 다음 anyway so the user
+        // reaches the seat map rather than a frozen picker.
+        st.result = "date-missing-advance";
+      }
+    }
+    // 2. The time block — immediately.
     const wantedClock = clockLabel(arm.play_time);
     const wantedVariants = clockVariants(arm.play_time);
-    const matchesClock = (b) => {
-      const text = (b.innerText || b.textContent || "").replace(/\s+/g, "");
-      return wantedVariants.some((v) => text.includes(v));
-    };
+    const matchesClock = (b) => wantedVariants.some((v) => (b.innerText || b.textContent || "").replace(/\s+/g, "").includes(v));
     let picked = null;
-    let blockTicks = 0;
-    while (Date.now() < deadline) {
-      const blocks = [...document.querySelectorAll("button[class*='TimeBlock_timeButton']")]
-        .filter((b) => !b.disabled);
-      if (!blocks.length) clearScheduleNotice();
+    const timeBy = Date.now() + 1200;
+    while (Date.now() < timeBy) {
+      const blocks = [...document.querySelectorAll("button[class*='TimeBlock_timeButton'], button[class*='timeButton'], button[class*='TimeBlock']")].filter((b) => !b.disabled);
       if (blocks.length) {
-        picked = wantedClock ? blocks.find(matchesClock) : blocks[0];
-        // A single round on the day needs no clock to tell it apart. The
-        // previous build refused here and reported 회차를 찾지 못했습니다 on a
-        // page that then went on to the right seat map anyway.
-        if (!picked && blocks.length === 1) picked = blocks[0];
-        if (picked) {
-          if (picked.getAttribute("aria-pressed") !== "true") picked.click();
-          break;
-        }
-        // Blocks can render before their labels settle; look a few more times.
-        if (blockTicks++ >= 8 && wantedClock) {
-          const labels = blocks.map((b) => (b.innerText || "").replace(/\s+/g, " ").trim()).join(" / ");
-          return { chose: false, reason: `${wantedClock} 회차를 찾지 못했습니다 (화면: ${labels.slice(0, 60)})` };
-        }
-      }
-      await sleep(200);
-    }
-    if (!picked) return { chose: false, reason: "회차 목록이 나오지 않았습니다" };
-
-    // 3. 다음.
-    while (Date.now() < deadline) {
-      const next = [...document.querySelectorAll("button")]
-        .find((b) => /^(다음|변경하기)$/.test((b.textContent || "").trim()) && !b.disabled);
-      if (next) {
-        next.click();
+        picked = (wantedClock && blocks.find(matchesClock)) || blocks.find(isPressed) || blocks[0];
         break;
       }
-      clearScheduleNotice();
-      await sleep(150);
+      clearScheduleModals(); await yieldFast(); await sleep(50);
     }
-
-    // 4. Off this step, one way or another. The calendar going away is the
-    //    signal, because 일정변경 raises it as a modal that never changes the URL.
-    while (Date.now() < deadline) {
-      if (!scheduleStepVisible() && !onSchedulePage()) {
-        return { chose: true, clock: wantedClock, date: wantedDate };
+    if (picked) { if (!isPressed(picked)) nativePress(picked); mark("timePickedMs"); }
+    else { st.result = st.result || "no-time-blocks"; }
+    // 3. 다음 — immediately, then make sure we actually left. Up to three
+    //    presses ~500ms apart with modals cleared in between; ~4.5s ceiling.
+    for (let round = 0; round < 3; round += 1) {
+      const next = findNextButton();
+      if (next) { nativePress(next); if (st.nextClickedMs == null) mark("nextClickedMs"); }
+      const leaveBy = Date.now() + 1500;
+      while (Date.now() < leaveBy) {
+        if (!scheduleStepVisible() && !onSchedulePage()) {
+          mark("leftMs"); st.wantedFinal = wantedDate; st.result = st.result && st.result !== "date-missing-advance" ? st.result : "chose"; persist();
+          return { chose: true, clock: wantedClock, date: wantedDate, adopted: st.result !== "chose" };
+        }
+        clearScheduleModals(); await yieldFast(); await sleep(60);
       }
-      // The chosen round may raise its own 예매 안내 before the map opens.
-      clearScheduleNotice();
-      await sleep(200);
     }
+    st.result = "stuck-after-next";
+    st.wantedFinal = wantedDate; persist();
     return { chose: false, reason: "일정 선택에서 넘어가지 못했습니다 — 예매 창에서 [다음]을 확인하세요" };
   }
-
   /**
    * The round the seat page is currently showing, as yyyyMMdd + HHmm.
    *
@@ -2415,6 +2619,21 @@
   function isAuthError(error) {
     return /HTTP 401|로그인|logout|Unauthorized|자동 로그아웃/i.test(String(error && error.message ? error.message : error));
   }
+  // The credential, minted once and reused. Each shot of the burst used to
+  // start with its own member-info GET, so every attempt cost two round trips
+  // and the shot meant for 0ms landed one RTT late. The signature carries its
+  // issue time; it is re-minted when it ages past SIGNATURE_MAX_AGE_MS, when
+  // the gate refuses it, or when the caller asks (maxAgeMs: 0).
+  async function mintMemberInfo(arm, { maxAgeMs = SIGNATURE_MAX_AGE_MS } = {}) {
+    const have = armState.memberInfo;
+    const goods = String(arm.goods_code || "");
+    if (have && have.goods === goods && Date.now() - have.at < maxAgeMs) return have.data;
+    const startedPerf = performance.now();
+    const data = await fetchMemberInfo(arm);
+    armState.memberInfo = { goods, at: Date.now(), data, ms: Math.round(performance.now() - startedPerf) };
+    armState.premintMs = armState.memberInfo.ms;
+    return data;
+  }
   async function enterViaSecureUrlWithRetries(arm, { windowMs = SECURE_URL_WINDOW_MS } = {}) {
     const target = armTargetUnix(arm) || serverTimeUnix();
     const giveUpAt = Math.max(target, serverTimeUnix()) + windowMs / 1000;
@@ -2422,13 +2641,16 @@
     let notOpen = 0;
     let others = 0;
     let lastError = null;
+    let remintedForAuth = false;
     armState.waitingLog = [];
     while (attempts < SECURE_URL_MAX_ATTEMPTS && serverTimeUnix() < giveUpAt) {
       attempts += 1;
       const offsetMs = Math.round((serverTimeUnix() - target) * 1000);
       const startedPerf = performance.now();
       try {
-        const result = await enterViaSecureUrl(arm);
+        // Pre-minted by the scheduler; a cache miss here still mints once.
+        const memberInfo = await mintMemberInfo(arm);
+        const result = await enterViaSecureUrl(arm, memberInfo);
         noteWaitingAttempt(offsetMs, "대기열 URL", performance.now() - startedPerf);
         armState.waitingAttempts = attempts;
         return result;
@@ -2439,6 +2661,13 @@
         armState.lastError = reason;
         if (error && error.blocked) throw error;
         if (isAuthError(error)) {
+          // Once: a signature the gate no longer accepts reads like an auth
+          // failure, and a fresh one settles which of the two it was.
+          if (!remintedForAuth) {
+            remintedForAuth = true;
+            armState.memberInfo = null;
+            continue;
+          }
           const message = "로그인이 풀렸습니다 — 예매 창에서 다시 로그인한 뒤 눌러주세요 (" + reason.slice(0, 60) + ")";
           updateOverlay(message, "warn");
           armState.lastError = message;
@@ -2451,6 +2680,9 @@
             updateOverlay(`아직 오픈 전 — 대기열 요청 ${attempts}회 (${offsetMs >= 0 ? "+" : ""}${offsetMs}ms)`, "info");
           }
         } else {
+          // Not "not open yet": whatever the gate disliked, a fresh credential
+          // is the cheapest thing to change before the next shot.
+          armState.memberInfo = null;
           others += 1;
           if (others >= SECURE_URL_OTHER_ERROR_LIMIT) {
             const message = `대기열 요청이 ${others}회 연속 실패했습니다 — ${reason.slice(0, 80)}`;
@@ -2471,7 +2703,7 @@
         continue;
       }
       // Tight while the open is within reach, easing off after it.
-      const interval = offsetMs < 1500 ? 80 : offsetMs < 5000 ? 150 : 300;
+      const interval = offsetMs < 1500 ? SECURE_URL_BURST_MS : offsetMs < 5000 ? 150 : 300;
       await sleep(Math.max(0, interval - (performance.now() - startedPerf)));
     }
     armState.waitingAttempts = attempts;
@@ -2483,9 +2715,9 @@
     return null;
   }
 
-  async function enterViaSecureUrl(arm) {
-    const memberInfo = await fetchMemberInfo(arm);
-    const waitingUrl = await fetchSecureUrl(arm, memberInfo);
+  async function enterViaSecureUrl(arm, memberInfo = null) {
+    const info = memberInfo || (await mintMemberInfo(arm));
+    const waitingUrl = await fetchSecureUrl(arm, info);
     armState.enteredVia = "secure-url";
     armState.route = "secure-url";
     armState.waitingUrl = waitingUrl;
@@ -2493,9 +2725,138 @@
     // Before navigating, not after: this document is about to be replaced, and
     // the round the user chose has to survive that to be usable on 일정 선택.
     rememberPendingRound(arm);
-    updateOverlay("대기열 진입", "ok");
+    // Line up and read the rank from here, now — not after handing the key to
+    // the waiting room and paying its boot before it does exactly the same.
+    const direct = await enterQueueDirect(waitingUrl);
+    if (direct.navigated) return { waitingUrl, secureUrl: true, ...direct };
+    // The waiting page lines the key up again (line-up is not idempotent), so
+    // after a successful line-up this hands back the place we held. Only
+    // reached when rank itself gave up; say so where the panel can read it.
+    updateOverlay(`대기열 진입${direct.outcome ? ` (${direct.outcome})` : ""}`, direct.userSeq !== null ? "warn" : "ok");
     location.href = waitingUrl;
-    return { waitingUrl, secureUrl: true };
+    return { waitingUrl, secureUrl: true, ...direct };
+  }
+
+  // ── The waiting room's own two calls, made from the goods page ────────────
+  function queueKeyFrom(waitingUrl) {
+    try { return new URL(String(waitingUrl)).searchParams.get("key") || ""; } catch (error) { return ""; }
+  }
+  async function fetchQueueJson(path, { method = "GET", body = null, timeoutMs = 3000 } = {}) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(`${ENT_WAITING_ORIGIN}${path}`, {
+        method, credentials: "include", signal: controller.signal,
+        headers: { Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}) },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      });
+      const data = await response.json().catch(() => ({}));
+      return { status: response.status, data: data && typeof data === "object" ? data : {} };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  const postLineUp = (key) => fetchQueueJson(LINE_UP_PATH, { method: "POST", body: { key } });
+  const fetchRank = (waitingId) => fetchQueueJson(`${RANK_PATH}?waitingId=${encodeURIComponent(waitingId)}`, { timeoutMs: 5000 });
+  // Mirrors core/entry.py decide_line_up / decide_rank; the Python tests are
+  // the reference for these shapes.
+  function decideLineUp(data, status = 200) {
+    const d = data && typeof data === "object" ? data : {};
+    const error = String(d.error || "").trim();
+    const waitingId = String(d.waitingId || "").trim();
+    if (status !== 200 || error || !waitingId) {
+      return { action: "fallback", reason: error || (status !== 200 ? `HTTP ${status}` : "no waitingId"), waitingId: "", userSeq: null, exist: Boolean(d.exist) };
+    }
+    let seq = d.userSeq;
+    if ((seq === null || seq === undefined) && waitingId.split(":").length >= 3) {
+      const n = Number(waitingId.split(":")[2]);
+      seq = Number.isFinite(n) ? n : null;
+    }
+    return { action: "poll", reason: "", waitingId, userSeq: seq ?? null, exist: Boolean(d.exist) };
+  }
+  function decideRank(data, status = 200) {
+    const d = data && typeof data === "object" ? data : {};
+    const error = String(d.error || "").trim();
+    const out = { action: "poll", reason: "", url: "", myRank: d.myRank ?? null, totalRank: d.totalRank ?? null };
+    if (status !== 200 || error) return { ...out, action: "fallback", reason: error || `HTTP ${status}` };
+    const url = String(d.oneStopUrl || "").trim();
+    if (/^https?:\/\//i.test(url)) return { ...out, action: "go", url };
+    if (d.myRank === -1 && d.totalRank === -1) return { ...out, action: "fallback", reason: "ExpiredSession" };
+    if (d.myRank === 0 && !String(d.sessionId || "").trim()) return { ...out, action: "fallback", reason: "ExpiredExistedSession" };
+    return out;
+  }
+  // The place in line is assigned by line-up, and the turn is read from rank:
+  // both are one small request, and the waiting page makes them only after it
+  // has booted (~1.3MB of script) and then every 2–3s. Done here instead, the
+  // key goes from secure-url to a queue position in one more round trip, and
+  // the turn is noticed within RANK_POLL_MS. Anything unexpected falls back
+  // to navigating to the waiting page exactly as before.
+  async function enterQueueDirect(waitingUrl) {
+    const gen = armState.entryGen || 0;
+    const startedPerf = performance.now();
+    const report = { key: false, lineUpMs: null, rankMs: null, totalMs: null, userSeq: null, exist: false,
+                     myRank: null, totalRank: null, polls: 0, outcome: "" };
+    armState.lineUp = report;
+    const key = queueKeyFrom(waitingUrl);
+    report.key = Boolean(key);
+    if (!key) { report.outcome = "no-key"; return { navigated: false, ...report }; }
+    let lu;
+    try {
+      lu = await postLineUp(key);
+    } catch (error) {
+      report.outcome = `line-up: ${String(error).slice(0, 80)}`;
+      return { navigated: false, ...report };
+    }
+    report.lineUpMs = Math.round(performance.now() - startedPerf);
+    const lined = decideLineUp(lu.data, lu.status);
+    report.userSeq = lined.userSeq;
+    report.exist = lined.exist;
+    if (lined.action !== "poll") { report.outcome = `line-up: ${lined.reason}`; return { navigated: false, ...report }; }
+    armState.route = "secure-url+line-up";
+    // In line is entered: the panel must read 진입 중, not 오픈 대기 중, for
+    // however long the rank poll runs before the turn.
+    armState.fired = true;
+    updateOverlay(`줄서기 완료 · 순번 ${report.userSeq ?? "?"} · ${report.lineUpMs}ms`, "ok");
+    const deadline = performance.now() + RANK_POLL_WINDOW_MS;
+    let failures = 0;
+    while (performance.now() < deadline) {
+      if ((armState.entryGen || 0) !== gen) { report.outcome = "stopped"; return { navigated: false, stopped: true, ...report }; }
+      const tickPerf = performance.now();
+      let rk;
+      try {
+        rk = await fetchRank(lined.waitingId);
+        failures = 0;
+      } catch (error) {
+        failures += 1;
+        if (failures >= 5) { report.outcome = `rank: ${String(error).slice(0, 80)}`; return { navigated: false, ...report }; }
+        await sleep(RANK_POLL_MS);
+        continue;
+      }
+      report.polls += 1;
+      if (report.rankMs === null) report.rankMs = Math.round(performance.now() - startedPerf);
+      let next = decideRank(rk.data, rk.status);
+      // The session that rank reports is created ~1.7s after line-up; an
+      // "expired existing session" reading inside the grace window is that
+      // creation still in progress, not an expiry.
+      if (next.action === "fallback" && next.reason === "ExpiredExistedSession"
+          && performance.now() - startedPerf < RANK_SESSION_GRACE_MS) {
+        next = { ...next, action: "poll", reason: "" };
+      }
+      report.myRank = next.myRank;
+      report.totalRank = next.totalRank;
+      if (next.action === "go") {
+        report.totalMs = Math.round(performance.now() - startedPerf);
+        report.outcome = "onestop";
+        updateOverlay(`대기열 통과 · 순번 ${report.userSeq ?? "?"} · ${report.totalMs}ms`, "ok");
+        location.href = next.url;
+        return { navigated: true, oneStopUrl: next.url, ...report };
+      }
+      if (next.action === "fallback") { report.outcome = `rank: ${next.reason}`; return { navigated: false, ...report }; }
+      updateOverlayIfChanged(`대기열 ${next.myRank ?? "?"}번 · 전체 ${next.totalRank ?? "?"} · 순번 조회 중`, "info");
+      await sleep(Math.max(0, RANK_POLL_MS - (performance.now() - tickPerf)));
+    }
+    report.outcome = "rank window expired";
+    return { navigated: false, ...report };
   }
 
   // Absolute, not relative. On the NOL product page — which is where the user
@@ -2606,6 +2967,16 @@
     } catch {
       return null;
     }
+  }
+  // The round with this playSeq, from the show's own schedule — the truth for
+  // which date a seq means. Corrects a play_date carried on a stale, cross-
+  // origin arm (nol vs interpark localStorage): the seq is authoritative, the
+  // date only labels it. Returns null when the schedule is not cached yet.
+  function roundBySeq(goodsCode, placeCode, seq, bizCode) {
+    const schedule = scheduleFor(goodsCode, placeCode, bizCode);
+    const rows = (schedule && schedule.rounds) || [];
+    const want = String(seq || "");
+    return want ? rows.find((r) => String(r.play_seq) === want) || null : null;
   }
   function scheduleFor(goodsCode, placeCode, bizCode) {
     const key = `${goodsCode}|${placeCode}`;
@@ -3278,6 +3649,12 @@
     }
   }
 
+  // Is the scheduler already running for exactly this arm (goods + round)?
+  function sameArmRunning(arm) {
+    const goods = String(armState.armedGoodsCode || armState.goodsCode || "");
+    const seq = String(armState.armedPlaySeq || armState.playSeq || "");
+    return !!goods && goods === String(arm?.goods_code || "") && seq === String(arm?.play_seq || "");
+  }
   async function runArmScheduler(arm) {
     // Each attempt starts clean. lastError is otherwise only cleared inside
     // fireEntry, which a refused arm never reaches — so one refusal would sit
@@ -3302,6 +3679,9 @@
     // silence the user actually experienced: press 대기 시작, nothing happens,
     // nothing said. It cannot get stuck any more, but a concurrent press still
     // deserves an answer.
+    // The panel pushes the arm and then the command; the second arrival for
+    // the same arm is the same request, not a fault to report.
+    if (armState.running && sameArmRunning(arm)) return { ok: true, already: true };
     if (armState.running) return refuse("이미 대기 예약이 진행 중입니다.");
 
     // The entry only means anything where an entry can happen. On the seat map
@@ -3339,7 +3719,19 @@
     // `if (armState.running) return`, so the next press, and every press after
     // it, was refused in silence. One bad sync disabled 대기 시작 for the life of
     // the page and said nothing.
+    // The credential is minted on tickets.interpark.com only. Counting down
+    // anywhere else — measured 17:00, the 예매 창 was on nol.yanolja.com — sends
+    // the fire down the 2.5s cross-site button path instead of the 33ms queue
+    // call. Move now; the arm survives in storage and bootRoute re-arms on the
+    // goods page.
+    if (!secureUrlUsableHere() && arm.goods_code) {
+      updateOverlay("진입 원점으로 이동 중 — tickets.interpark.com 에서 대기합니다", "info");
+      location.href = `${GATE_ORIGIN}/goods/${encodeURIComponent(String(arm.goods_code))}`;
+      return { ok: false, reparked: true };
+    }
     armState.running = true;
+    armState.armedGoodsCode = String(arm.goods_code || "");
+    armState.armedPlaySeq = String(arm.play_seq || "");
     try {
       updateOverlay("서버 시각 동기화 중…", "info");
       // Where the time goes, so "it took too long" can be answered with numbers
@@ -3355,12 +3747,36 @@
       updateOverlay(`${arm.dry_run ? "테스트 " : ""}대기열 예약<br>${Math.max(0, remaining).toFixed(1)}초`, "info");
       // Stop short of the open by exactly the lead the request loop expects.
       // Waiting out the full deadline here is what made that lead dead code.
-      await waitUntilServerUnix(armEntryStartUnix(arm) ?? armTargetUnix(arm), {
-        cancelled: () => {
-          const current = loadArmConfig();
-          return !current || current.enabled === false;
-        },
-      });
+      const cancelled = () => {
+        const current = loadArmConfig();
+        if (!current || current.enabled === false) return true;
+        // Left the entry origin mid-wait (a click on a NOL link, a redirect):
+        // go back to the goods page; the arm persists and re-arms there.
+        if (!secureUrlUsableHere()) {
+          location.href = `${GATE_ORIGIN}/goods/${encodeURIComponent(String(arm.goods_code))}`;
+          return true;
+        }
+        return false;
+      };
+      const entryStart = armEntryStartUnix(arm) ?? armTargetUnix(arm);
+      // Mint the credential PREMINT_LEAD_MS before the burst, so the first
+      // shot is one POST and not a GET-then-POST — that GET was the round trip
+      // that put every 0ms shot at +60ms. Retried once; a second failure
+      // leaves the burst to mint on its first shot.
+      if (secureUrlUsableHere() && arm.goods_code && !arm.dry_run) {
+        await waitUntilServerUnix(entryStart - PREMINT_LEAD_MS / 1000, { cancelled });
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            await mintMemberInfo(arm, { maxAgeMs: 0 });
+            break;
+          } catch (error) {
+            armState.memberInfo = null;
+            log("premint failed; the burst will mint", error);
+            await sleep(500);
+          }
+        }
+      }
+      await waitUntilServerUnix(entryStart, { cancelled });
 
       // The wait is over; if the device clock moved during it, say so. The
       // target itself did not move — serverTimeUnix is anchored to
@@ -3662,10 +4078,23 @@
   }
 
   // 0 for the ground floor (1층/1F/unknown), 1 for anything above it.
+  // 0 = ground floor (1층 / 지하 / B1 / no info), 1 = any upper floor. Reads
+  // the floor string first ("객석 1층", "2F"…); when the map gives none, the
+  // block key encodes it — Sejong Center is 001:1xx (1층) / 001:2xx (2층) /
+  // 001:3xx (3층), so the hundreds digit is the floor. Without this fallback a
+  // sketch that carries only {k,x,y} ranked every seat as ground and the
+  // 1층>2층 gate silently did nothing.
   function floorRank(seat) {
     const floor = String(seat?.floor || seat?.floorName || "").replace(/\s+/g, "");
-    if (!floor) return 0;
-    return /^(1층|1F|B1|지하|G)/i.test(floor) ? 0 : (/[2-9]층|[2-9]F/i.test(floor) ? 1 : 0);
+    if (floor) {
+      if (/지하|^B\d|^G(?!\d)/i.test(floor)) return 0;
+      const named = /(\d+)\s*(층|F)/i.exec(floor);
+      if (named) return Number(named[1]) >= 2 ? 1 : 0;
+    }
+    const key = String(seat?.blockKey || "");
+    const m = /:(\d)\d\d(?::|$)/.exec(key) || /:(\d)\d\d/.exec(key);
+    if (m) return Number(m[1]) >= 2 ? 1 : 0;
+    return 0;
   }
   function rankCandidates(
     candidates,
@@ -4802,6 +5231,9 @@
       seatIndex.observer = new MutationObserver((records) => {
         for (const record of records) {
           if (record.type === "childList") {
+            // Circles came or went: the round on screen may have changed, so
+            // the cached DOM round is stale until the next look.
+            invalidateLivePlaySeq();
             // The map mounts and unmounts circles as the viewport moves, and
             // only the mounting half was handled. Unmounted seats stayed in the
             // index pointing at detached nodes, so a seat could be counted as
@@ -5028,6 +5460,189 @@
     return true;
   }
 
+  // The poller behind hyper-focus. Deliberately NOT a timer: WKWebView clamps
+  // setInterval/setTimeout hard when the 예매 창 is not the frontmost window
+  // (measured: a 30ms interval fired ~1×/s, the loop's 30ms sleep took 400ms).
+  // Instead, FOCUS_WORKERS chained fetches each re-issue the moment their
+  // answer lands, so the cadence is set by the round trip (~2 in flight ≈ one
+  // reading every RTT/2), capped at CATCH_MAX_REQUESTS_PER_SEC. Each answer is
+  // diffed in memory; an answer older than the last applied is dropped so a
+  // stale mask can never resurrect a seat that has since been taken. And the
+  // press happens right here, in the callback — not in a loop tick that may be
+  // throttled — so detection→press is a function call, not a scheduler.
+  const FOCUS_WORKERS = 2;
+  // `epoch` counts spawns and `workers` counts live loops. A worker belongs to
+  // the epoch that spawned it: a stop followed by a restart inside one fetch
+  // round trip used to leave the old pair alive beside the new one (the
+  // restart re-raised `active` before they had looked), and every such cycle
+  // added two more loops against the 60/s budget.
+  const focusPoller = { active: false, key: "", seq: 0, applied: 0, inFlight: 0, responses: [], gen: 0, sent: [], epoch: 0, workers: 0 };
+  function stopFocusPoller() {
+    focusPoller.active = false; focusPoller.key = "";
+  }
+  function focusPollerHz() {
+    const now = performance.now();
+    focusPoller.responses = focusPoller.responses.filter((t) => now - t < 1000);
+    return focusPoller.responses.length;
+  }
+  function focusPollerCanSend() {
+    const now = performance.now();
+    focusPoller.sent = focusPoller.sent.filter((t) => now - t < 1000);
+    return focusPoller.sent.length < CATCH_MAX_REQUESTS_PER_SEC && gatewayBlockRemainingMs() <= 0;
+  }
+  function focusPollerAlive(runGen, epoch = focusPoller.epoch) {
+    // Deliberately NOT gated on runGen: a sold-out landing hands off to a
+    // nested quiet-watch run (a fresh runGen) that owns the same focus block,
+    // and gating on the starting run killed the workers at that handoff
+    // (measured: 16 req then 0 on a sold-out block). A live catch on the same
+    // block is the same watch, whichever run object is driving it. It IS gated
+    // on the spawn epoch: a worker outlived by a stop+restart must not join
+    // the pair the restart spawned.
+    return focusPoller.active && epoch === focusPoller.epoch && seatState.running && !seatState.stopRequested
+      && !seatState.locked && seatState.runMode === "catch" && seatState.catchFocusBlock === focusPoller.key;
+  }
+  // The floor on one worker's poll period. A bitmap request answers in ~20ms,
+  // so this is normally free (the fetch already took it); it only bites when a
+  // request resolves — or rejects — fast (a cached error, a 429), which is
+  // exactly when two workers `continue`-spun on microtasks with no macrotask
+  // yield and starved the renderer into Chrome's "페이지 응답 없음" dialog.
+  // Flooring the period AND yielding a real macrotask every iteration keeps
+  // ~50 req/s while guaranteeing the main thread paints at 60fps.
+  const FOCUS_YIELD_MS = 20;
+  async function focusWorker(initData, config, runGen, gradeOrder, blockKeys, epoch = focusPoller.epoch) {
+    focusPoller.workers += 1;
+    try {
+      await focusWorkerLoop(initData, config, runGen, gradeOrder, blockKeys, epoch);
+    } finally {
+      focusPoller.workers = Math.max(0, focusPoller.workers - 1);
+    }
+  }
+  async function focusWorkerLoop(initData, config, runGen, gradeOrder, blockKeys, epoch) {
+    while (focusPollerAlive(runGen, epoch)) {
+      if (focusPollerCanSend()) {
+        const mySeq = ++focusPoller.seq;
+        focusPoller.sent.push(performance.now());
+        focusPoller.inFlight += 1;
+        let masks = null;
+        // The fetch itself paces the worker (~20ms RTT) and — unlike a timer —
+        // is NOT clamped when the 예매 창 is backgrounded, so the rate holds.
+        try { masks = await fetchMasksFor(initData, [focusPoller.key]); } catch (error) { masks = null; }
+        focusPoller.inFlight = Math.max(0, focusPoller.inFlight - 1);
+        focusPoller.responses.push(performance.now());
+        if (focusPollerAlive(runGen, epoch) && mySeq > focusPoller.applied) {
+          focusPoller.applied = mySeq;
+          const block = (seatState.lastBlocks || []).find((b) => String(b.blockKey) === focusPoller.key);
+          const freed = applyBlockMask(block, masks ? masks[0] || null : null, config);
+          if (freed.length) {
+            seatState.lastFreedVia = "focus";
+            const ranked = rankCandidates(freed, gradeOrder, blockKeys, pickerOptions(config, { isCatch: true }));
+            if ((Number(config.quantity) || 1) === 1 && !seatState.locked && !seatState.pressSequenceBusy) {
+              // Detection→press→confirm→snap all happen in pressSequence, off
+              // the poll loop; it has its own network awaits, never a spin.
+              seatState.pressSequenceBusy = true;
+              pressSequence(ranked, config).catch(() => {}).finally(() => { seatState.pressSequenceBusy = false; });
+            } else {
+              seatState.pageFreed.push(...ranked);
+            }
+          }
+        }
+        // A MessageChannel hop after every send — never throttled, and it hands
+        // the renderer a frame. This is what stops two workers spinning on
+        // microtasks (a fast-failing fetch) into 페이지 응답 없음, WITHOUT the
+        // setTimeout floor that a background window would clamp to ~1s.
+        await yieldFast();
+      } else {
+        // Rate-limited (60/s) or gateway-blocked: nothing to send, so idle a
+        // real ~20ms here. A clamp when backgrounded is harmless — we are
+        // deliberately waiting for the send window either way.
+        await yieldFast();
+        if (!focusPollerAlive(runGen, epoch)) break;
+        await sleep(FOCUS_YIELD_MS);
+      }
+    }
+    focusPoller.inFlight = Math.max(0, focusPoller.inFlight);
+  }
+  // Press a freed seat and lock it, fastest path there is:
+  //   detect (bitmap flip, freedAtPerf) → native pointer press (<2ms)
+  //   → page preselect answers (one RTT) → 선택 완료 pressed at once, no
+  //     "sidebar quiet" wait → page select answers → held.
+  // A taken answer marks the seat and presses the next freed one immediately.
+  const PRESS_SNAP_MAX = 4;
+  async function pressSequence(ranked, config) {
+    const tried = [];
+    // The run this press belongs to. A stop (or a fresh run) bumps the
+    // generation, and a sequence parked on a network await must notice when
+    // it wakes — without this, 전부 정지 pressed mid-hold still went on to
+    // press 선택 완료 for the run that had just been stopped.
+    const gen = window.__nolsniperRunGen;
+    const halted = () => seatState.locked || seatState.stopRequested || runWasSuperseded(gen);
+    const bail = (lat) => { finishCatchTiming("stopped"); if (lat) lat.outcome = "stopped"; };
+    for (const seat of ranked.slice(0, PRESS_SNAP_MAX)) {
+      if (halted()) return;
+      if (!seatNodeFor(seat.seatInfoId)) continue;
+      const detect = seat.freedAtPerf || performance.now();
+      startCatchTiming(detect);
+      const since = Date.now();
+      const pressed = clickSeatOnMap(seat.seatInfoId, { countBefore: selectedSeatCount() });
+      const pressAt = performance.now();
+      if (!pressed) continue;
+      noteCatchStage("click", pressAt);
+      seatState.fastClickedId = String(seat.seatInfoId); seatState.fastClickedAt = nowMs();
+      seatState.fastClicks = (seatState.fastClicks || 0) + 1;
+      tried.push(seat.seatInfoId);
+      const lat = (seatState.lastCatchLatency = { seat: seat.label || seat.seatInfoId, pressMs: +(pressAt - detect).toFixed(2), preselectMs: null, confirmMs: null, holdMs: null, outcome: "pressed" });
+      const pre = await waitForSeatNet("preselect", since, 2500);
+      if (pre.aborted || halted()) return bail(lat);
+      lat.preselectMs = pre.at ? Math.round(performance.now() - detect) : null;
+      if (pre.ok === false || pre.timeout) {
+        // Lost the race (or the page refused): 0ms cool-down and snap on.
+        markSeatTaken(seat.seatInfoId);
+        finishCatchTiming(pre.timeout ? "preselect-timeout" : "taken");
+        lat.outcome = pre.timeout ? "preselect-timeout" : "taken";
+        continue;
+      }
+      // Confirm the instant the hold is acknowledged — wait only for the button
+      // to exist (MessageChannel hops, not timers; bounded at 400ms).
+      const confirmDeadline = performance.now() + 400;
+      let confirmed = false;
+      while (performance.now() < confirmDeadline) {
+        if (halted()) return bail(lat);
+        if (clickConfirmSelect()) { confirmed = true; break; }
+        await yieldFast();
+      }
+      lat.confirmMs = confirmed ? Math.round(performance.now() - detect) : null;
+      if (!confirmed) { lat.outcome = "no-confirm-button"; seatState.lastSeat = seat.label || ""; seatState.locked = true; return; }
+      const sel = await waitForSeatNet("select", since, 3000);
+      if (sel.aborted) return bail(lat);
+      lat.holdMs = sel.at ? Math.round(performance.now() - detect) : null;
+      if (sel.ok === false) {
+        markSeatTaken(seat.seatInfoId);
+        finishCatchTiming("select-rejected");
+        lat.outcome = "select-rejected";
+        continue;
+      }
+      noteCatchStage("outcome");
+      finishCatchTiming(sel.timeout ? "unconfirmed" : "reserved");
+      lat.outcome = sel.timeout ? "unconfirmed" : "reserved";
+      seatState.locked = true; seatState.confirmStarted = true;
+      seatState.lastSeat = seat.label || String(seat.seatInfoId);
+      seatState.lastExit = "reservedUserContinues";
+      seatState.lastSeatPos = { x: seat.posLeft, y: seat.posTop, block: seat.blockKey };
+      updateOverlay(`예약 요청 ${seatState.lastSeat} · 감지→클릭 ${lat.pressMs}ms · 가선점 ${lat.preselectMs}ms · 확정 ${lat.holdMs}ms`, "ok");
+      return;
+    }
+  }
+  function startFocusPoller(initData, blockKey, config, runGen, gradeOrder = [], blockKeys = []) {
+    // Already watching this block: adopt the caller's run, keep the workers.
+    if (focusPoller.active && focusPoller.key === String(blockKey)) { focusPoller.gen = runGen; return; }
+    stopFocusPoller();
+    // A new epoch retires every worker still finishing a fetch from before.
+    const epoch = ++focusPoller.epoch;
+    focusPoller.active = true; focusPoller.key = String(blockKey); focusPoller.gen = runGen;
+    for (let i = 0; i < FOCUS_WORKERS; i += 1) {
+      void focusWorker(initData, config, runGen, gradeOrder, blockKeys, epoch).catch(() => {});
+    }
+  }
   // How long a freshly entered block gets to draw its circles before the loop
   // concludes the seats are not there.
   const BLOCK_DRAW_GRACE_MS = 3000;
@@ -5188,6 +5803,12 @@
   }
 
   function clickSeatOnMap(seatInfoId, { countBefore = null } = {}) {
+    // The focus fast path already pressed this seat a moment ago; a second
+    // press would toggle it off. Report it as dispatched and move on.
+    if (seatState.fastClickedId === String(seatInfoId) && nowMs() - (seatState.fastClickedAt || 0) < 1500) {
+      traceClickAttempt(seatInfoId, null, "fast-path-dispatched", { before: countBefore });
+      return true;
+    }
     const node = seatNodeFor(seatInfoId);
     if (!node) {
       traceClickAttempt(seatInfoId, null, "no-node");
@@ -6468,6 +7089,8 @@
    */
   function notePageSeatNet(label, status, text, sent = null) {
     const net = (window.__nolsniperLastSeatNet = window.__nolsniperLastSeatNet || {});
+    // After this callback has filled `net`, wake anyone waiting on it.
+    queueMicrotask(resolveSeatNetWaiters);
     const at = Date.now();
     const body = String(text || "");
     const name = String(label || "");
@@ -7214,12 +7837,27 @@
       catalog.sketch = seatState.showCatalog.sketch;
     }
 
+    // The round the panel picked is the round — the page's calendar default
+    // (the 08-05 14:00 it opens on) must not overwrite it in what we publish
+    // or in the toast. The remain count stays the page's, so say whose it is.
+    let hintedRound = null;
+    try {
+      const hint = loadShowHint();
+      if (hint && hint.play_seq && String(hint.goods_code || "").toUpperCase() === String(catalog.goods_code || "").toUpperCase()) {
+        hintedRound = hint;
+        catalog.play_seq = String(hint.play_seq);
+        if (hint.play_date) catalog.play_date = compactDate(hint.play_date);
+        if (hint.play_time) catalog.play_time = normalizePlayTime(hint.play_time);
+      }
+    } catch (error) { /* a hint is optional */ }
     seatState.showCatalog = catalog;
     if (isNolProductPage()) {
       const total = catalog.grades.reduce((sum, row) => sum + (Number(row.remain) || 0), 0);
-      const round = [catalog.play_date, catalog.play_time || catalog.play_seq].filter(Boolean).join(" ");
+      const round = [catalog.play_date, catalog.play_time || catalog.play_seq, catalog.play_seq && catalog.play_time ? catalog.play_seq : ""].filter(Boolean).join(" ");
+      const pageDate = compactDate((readProductSelection() || {}).play_date);
+      const remainNote = hintedRound && pageDate && pageDate !== catalog.play_date ? ` (페이지 표시일 ${pageDate} 기준)` : "";
       updateOverlay(
-        `예매판 동기화<br>${catalog.goods_name || catalog.goods_code || "?"}<br>${round || "회차 확인 중"} · 잔여 ${total}석`,
+        `예매판 동기화<br>${catalog.goods_name || catalog.goods_code || "?"}<br>${round || "회차 확인 중"} · 잔여 ${total}석${remainNote}`,
         catalog.errors.length ? "warn" : "ok",
       );
     } else {
@@ -8612,6 +9250,18 @@
       seat: {
         mode: currentMode(),
         runMode: seatState.runMode || "",
+        scheduleTrace: seatState.scheduleTrace || (() => { try { return JSON.parse(sessionStorage.getItem("nolsniper_schedule_trace") || "null"); } catch (error) { return null; } })(),
+        quietWatch: Boolean(seatState.quietWatch),
+        catchFocusBlock: seatState.catchFocusBlock || "",
+        fastClicks: seatState.fastClicks || 0,
+        focusTicks: seatState.focusTicks || 0,
+        focusPollerHz: focusPoller.active ? focusPollerHz() : 0,
+        focusPollerInFlight: focusPoller.inFlight,
+        focusTickWorkMs: seatState.focusTickWorkMs || 0,
+        focusPollerSeq: focusPoller.seq,
+        lastCatchLatency: seatState.lastCatchLatency || null,
+        lastSeatPos: seatState.lastSeatPos || null,
+        catchTimings: (seatState.catchTimings || []).slice(-3),
         mapCenterX: seatState.mapCenterX ?? null,
         mapStage: seatState.mapStage || null,
         lastOrder: seatState.lastOrder || null,
@@ -8838,7 +9488,8 @@
     return lines.join("<br>");
   }
 
-  async function runSeatAutopilot(config, { probe = false, catchMode = false, userInitiated = false } = {}) {
+  const QUIET_WATCH_TEXT = "잔여석 0석 · 실시간 취소표 대기 중 (30ms 초고속 감시)";
+  async function runSeatAutopilot(config, { probe = false, catchMode = false, userInitiated = false, quiet = false } = {}) {
     // Pressing a button in the panel is the only thing that lifts a stop.
     // Every exit from this function records why. Without it a run that stopped
     // early looked identical to one that never started: no attempts, no
@@ -8853,8 +9504,13 @@
     // from under the watch, which looked exactly like a stall.
     const runGen = (window.__nolsniperRunGen = (window.__nolsniperRunGen || 0) + 1);
     seatState.lastExit = "started";
-    if (userInitiated) seatState.haltedByUser = false;
-    else if (seatState.haltedByUser) {
+    if (userInitiated) {
+      seatState.haltedByUser = false;
+      // A press of 감시 시작 is the full watch, parked in its 구역. The quiet
+      // (sold-out) variant is only ever adopted by the landing itself, and a
+      // run that ended some other way must not hand its quietness on.
+      seatState.quietWatch = false;
+    } else if (seatState.haltedByUser) {
       seatState.lastExit = "haltedByUser";
       return;
     }
@@ -9027,6 +9683,17 @@
     seatState.domScanWorstMs = 0;
     seatState.consecutiveRejects = 0;
     seatState.skippedByMap = 0;
+    // The focus block is re-measured on this run's first tick, never inherited:
+    // the previous run's block may be closed, and a stale one aims the poller
+    // (and its "구역 N 고정" line) at a 구역 nobody is looking at. Same for the
+    // per-run counters the status publishes.
+    seatState.catchFocusBlock = "";
+    seatState.catchFocusCheckedAt = 0;
+    seatState.focusTicks = 0;
+    seatState.focusTickWorkMs = 0;
+    seatState.gradeRemainsAllZero = false;
+    seatState.fastClickedId = "";
+    seatState.fastClickedAt = 0;
     // Fresh per run, so 무작위 aims somewhere else next time while staying
     // stable for retries within this one.
     seatState.shuffleSeed = (Math.random() * 0x7fffffff) | 0;
@@ -9054,7 +9721,7 @@
       probe
         ? `좌석 프로브… · ${AUTOPILOT_BUILD}`
         : isCatch
-          ? `취켓팅 감시 중… · ${AUTOPILOT_BUILD}`
+          ? (quiet || seatState.quietWatch ? QUIET_WATCH_TEXT : `취켓팅 감시 중… · ${AUTOPILOT_BUILD}`)
           : `좌석 스캔 중… 맵 클릭만 · ${AUTOPILOT_BUILD}`,
       "info",
     );
@@ -9084,6 +9751,12 @@
 
     async function refreshCandidates() {
       const remains = await fetchGradeRemains(initData);
+      // Every grade at 0: sold out, known from one small request. Do not go
+      // on to fetch 20 blocks / 3,000 seats to learn the same thing — that
+      // wait is what kept a sold-out landing in "공연 정보 수집" for 10s+.
+      const remainValues = Object.values(remains || {});
+      seatState.gradeRemainsAllZero = remainValues.length > 0 && remainValues.every((n) => Number(n) <= 0);
+      if (seatState.gradeRemainsAllZero && !isCatch) return [];
       const dom = filterSoldOutGradeCandidates(
         collectDomCandidates(gradeOrder, blockKeys, config),
         remains,
@@ -9227,12 +9900,16 @@
     // further poll tick before it can even try — the better part of a second
     // spent arriving somewhere it could have been standing all along. Anyone
     // already in that block clicks in a frame.
-    if (isCatch) await parkInWatchedBlock(config, statusBlockKeys, { force: true });
+    // A quiet watch (sold-out landing) never touches the viewport, not even
+    // the one preparatory park; freed seats in unopened blocks are taken via
+    // the API select fallback.
+    if (isCatch && !quiet && !seatState.quietWatch) await parkInWatchedBlock(config, statusBlockKeys, { force: true });
 
     while (seatState.attempts < maxAttempts && !seatState.locked && !seatState.stopRequested) {
       if (runWasSuperseded(runGen)) {
         seatState.lastExit = "superseded";
-        break;
+        // Leave `running` to the run that replaced us.
+        return;
       }
 
       // Before anything else this tick. A block makes every request fail and
@@ -9307,8 +9984,22 @@
         // has to fetch the venue to know where anything is; every tick after
         // that watches only what was asked for.
         const watchRect = normalizeWatchRect(config.watch_rect);
-        const scoped =
+        const sweepKeys =
           (watchRect && blocksInWatchRect(seatState.lastBlocks || [], watchRect)) || statusBlockKeys;
+        // Hyper-focus. Once a block is open on screen the watch locks onto it:
+        // one block, one request, every CATCH_FOCUS_POLL_MS, no leaving and
+        // re-entering (that is the flicker), no cursor sweeping the venue.
+        // Re-checked every 2s so a block the user opens by hand is followed.
+        if (nowMs() - (seatState.catchFocusCheckedAt || 0) > 2000) {
+          seatState.catchFocusCheckedAt = nowMs();
+          const open = currentOpenBlock() || seatState.parkedBlock || "";
+          seatState.catchFocusBlock =
+            open && sweepKeys.map(String).includes(String(open)) ? String(open) : "";
+        }
+        const focused = Boolean(seatState.catchFocusBlock);
+        const scoped = focused ? [seatState.catchFocusBlock] : sweepKeys;
+        if (focused && seatState.lastBlocks?.length) startFocusPoller(initData, seatState.catchFocusBlock, config, runGen, gradeOrder, blockKeys);
+        else if (!focused) stopFocusPoller();
         // Anything the 예매 창's own traffic already showed opening is taken
         // first. It cost us no request, so it is not subject to the budget
         // that paces the sweep, and it is as fresh as the page itself — which
@@ -9318,9 +10009,12 @@
         const overheard = seatState.pageFreed.splice(0);
         const burst = triggerFired();
         if (burst) seatState.triggerBursts = (seatState.triggerBursts || 0) + 1;
+        // While the focus poller runs, detections arrive through the overheard
+        // channel every 30ms; the loop must not await a second request on top.
+        const pollerLive = focused && focusPoller.active && focusPoller.key === String(seatState.catchFocusBlock);
         const freed = overheard.length
           ? overheard
-          : await pollFreedSeats(initData, scoped, config, { burst });
+          : pollerLive ? [] : await pollFreedSeats(initData, scoped, config, { burst });
         if (overheard.length) seatState.lastFreedVia = "page";
         else if (freed.length) seatState.lastFreedVia = "poll";
         // What a tick actually costs, rather than what the sleep alone says.
@@ -9376,17 +10070,43 @@
           startCatchTiming(seatState.freedAtPerf);
           candidates = rankCandidates(freed, gradeOrder, blockKeys, pickerOptions(config, { isCatch: true }));
           seatState.catchLiveTries = 0;
+          // Focused: the seat is drawn right here — press it now, before the
+          // general path ranks, aims and moves. clickSeatOnMap remembers the
+          // press so the path below does not press it a second time.
+          if (focused && quantity === 1) {
+            const top = candidates[0];
+            if (top && seatNodeFor(top.seatInfoId)) {
+              noteCatchStage("click");
+              if (clickSeatOnMap(top.seatInfoId, { countBefore: selectedSeatCount() })) {
+                seatState.fastClickedId = String(top.seatInfoId);
+                seatState.fastClickedAt = nowMs();
+                seatState.fastClicks = (seatState.fastClicks || 0) + 1;
+              }
+            }
+          }
         } else if (live.length && !liveExhausted) {
           candidates = live;
         } else {
           seatState.attempts += 1;
-          updateOverlay(
-            catchStatusText(live, freeSeatCount(), pollMs, liveExhausted, watchRect),
+          // With nothing free the line is the one frozen sentence — no counters
+          // ticking, nothing for the eye to chase.
+          updateOverlayIfChanged(
+            freeSeatCount() === 0
+              ? QUIET_WATCH_TEXT + (focused ? ` · 구역 ${seatState.catchFocusBlock} 고정` : "")
+              : catchStatusText(live, freeSeatCount(), focused ? CATCH_FOCUS_POLL_MS : pollMs, liveExhausted, watchRect)
+                + (focused ? ` · 구역 ${seatState.catchFocusBlock} 고정` : ""),
             "info",
           );
           // Nothing is in play, so this is the one moment the travel is free.
-          await parkInWatchedBlock(config, scoped);
-          await sleep(idlePollMs(pollMs));
+          // No repark on idle ticks — the only park is the one before the loop.
+          if (focused) {
+            seatState.focusTicks = (seatState.focusTicks || 0) + 1;
+            const worked = Math.round(performance.now() - tickStartedPerf);
+            seatState.focusTickWorkMs = seatState.focusTickWorkMs ? Math.round(seatState.focusTickWorkMs * 0.7 + worked * 0.3) : worked;
+          }
+          // Period, not gap: with the poller doing the fetching, the loop only
+          // drains the channel — a strict 30ms period keeps the press instant.
+          await sleep(focused ? Math.max(0, CATCH_FOCUS_POLL_MS - (performance.now() - tickStartedPerf)) : idlePollMs(pollMs));
           continue;
         }
       } else if (!candidates.length) {
@@ -9398,12 +10118,18 @@
         // the full 최대 시도 against it and then reporting 선점 실패 (80회) reads
         // as a broken macro when the truth is that the venue is full — and it
         // is 취켓팅, not this, that waits for a cancellation.
-        if (!isCatch && (seatState.lastBlocks || []).length && freeSeatCount() === 0) {
+        if (!isCatch && ((seatState.lastBlocks || []).length && freeSeatCount() === 0 || seatState.gradeRemainsAllZero)) {
+          // Sold out is the normal state of a hot show, not a fault. Ending the
+          // run here with an error made bootRoute restart a grab every tick —
+          // overlay warn/error, mode error↔grabbing, the "발광" the user saw.
+          // Hand this run to a quiet watch instead: same document, no park, no
+          // map move, in-memory 30ms polling until a seat flips 0→1.
           seatState.lastExit = "soldOut";
-          seatState.lastError =
-            "지금 빈 좌석이 없습니다. 취소표를 기다리려면 [감시 시작]으로 취켓팅을 켜 두세요.";
-          updateOverlay("빈 좌석 없음 — 취켓팅으로 기다리세요", "warn");
-          break;
+          seatState.lastError = "";
+          seatState.userCatch = true;
+          seatState.quietWatch = true;
+          updateOverlayIfChanged(QUIET_WATCH_TEXT, "info");
+          return runSeatAutopilot(config, { catchMode: true, quiet: true });
         }
         const reason = seatState.lastError || `후보 없음 · 화면 좌석 ${seatState.domCircleCount || 0}개`;
         updateOverlay(`좌석맵 대기 (${seatState.attempts}) · ${reason}`, "info");
@@ -9445,7 +10171,11 @@
           clickable = [];  // fall into the move path below, which aims at candidates[0]
         }
       }
-      if (!clickable.length && !config.auto_assign) {
+      // 취켓팅 never moves the map: every leave/enter/fit/pan below repainted
+      // the canvas each tick while the watch chased a candidate in another
+      // block (measured: the viewport jerked continuously). A freed seat the
+      // map has not drawn is taken through the API select fallback instead.
+      if (!clickable.length && !config.auto_assign && !isCatch) {
         // Nothing we want is drawn. On a big venue that is normal: the map
         // mounts only what is in the viewport, and a stadium's first screen is
         // a picture with no seats at all until a 구역 is opened.
@@ -9572,6 +10302,8 @@
       let group = config.auto_assign ? await tryAutoAssign(pool) : null;
       const viaAutoAssign = Boolean(group?.length);
       if (!viaAutoAssign) group = selectSeatUnit(pool, quantity, config.adjacent !== false);
+      // Where the seat we are about to take sits — every hold path shares this.
+      if (group[0]) seatState.lastSeatPos = { x: group[0].posLeft, y: group[0].posTop, block: group[0].blockKey };
       if (!group.length) {
         candidates = [];
         await sleep(pollMs);
@@ -9683,6 +10415,7 @@
         seatState.consecutiveRejects = 0;
         seatState.locked = true;
         seatState.lastSeat = label;
+        seatState.lastSeatPos = group[0] ? { x: group[0].posLeft, y: group[0].posTop, block: group[0].blockKey } : null;
         seatState.running = false;
         updateOverlay(
           viaAutoAssign
@@ -9776,7 +10509,8 @@
         "error",
       );
     }
-    seatState.running = false;
+    // A run that was superseded must not clear the flag the newer run owns.
+    if (!runWasSuperseded(runGen)) seatState.running = false;
   }
 
   function compactDate(value) {
@@ -9865,9 +10599,14 @@
       const hint = loadShowHint();
       const hintGoods = String(hint?.goods_code || "").toUpperCase();
       if (hint && hintGoods && hintGoods === String(context.goods_code || "").toUpperCase()) {
-        if (!context.play_seq && hint.play_seq) context.play_seq = String(hint.play_seq);
-        if (!context.play_date && hint.play_date) context.play_date = compactDate(hint.play_date);
-        if (!context.play_time && hint.play_time) context.play_time = normalizePlayTime(hint.play_time);
+        // A picked round overrides the page's own default selection entirely,
+        // or the toast mixes the page's date with the panel's seq (measured:
+        // "20260805 026" for a pick of 20260905/026).
+        if (hint.play_seq) {
+          context.play_seq = String(hint.play_seq);
+          if (hint.play_date) context.play_date = compactDate(hint.play_date);
+          if (hint.play_time) context.play_time = normalizePlayTime(hint.play_time);
+        }
       }
     } catch (error) { /* a hint is optional */ }
     if (!context.play_seq) context.play_seq = payloadString(payload, "playSeq", /\d{3}/);
@@ -10053,11 +10792,23 @@
     if (onSchedulePage()) {
       // onestop wipes our localStorage hand-off during its boot (see the seat
       // branch below); the arm survives and names the same round.
-      const armedRound = arm && arm.play_date
-        ? { goods_code: arm.goods_code, play_date: arm.play_date,
-            play_seq: arm.play_seq, play_time: arm.play_time }
-        : null;
-      const pending = takePendingRound() || armedRound;
+      const hint = loadShowHint() || {};
+      const armGoods = String(arm?.goods_code || hint.goods_code || "");
+      const armPlace = String(arm?.place_code || hint.place_code || "");
+      const armSeq = String(arm?.play_seq || hint.play_seq || "");
+      // The seq is the truth; correct its date from the show's own schedule so
+      // a stale cross-origin arm date can never send the calendar to the wrong
+      // day (measured: arm said seq 007 but date 20261017 while 007 is 10/25).
+      const canonical = roundBySeq(armGoods, armPlace, armSeq, arm?.biz_code || hint.biz_code);
+      const armedRound = armSeq
+        ? { goods_code: armGoods, play_seq: armSeq,
+            play_date: (canonical && canonical.play_date) || (arm && arm.play_date) || hint.play_date || "",
+            play_time: (canonical && canonical.play_time) || (arm && arm.play_time) || hint.play_time || "" }
+        : (arm && arm.play_date ? { goods_code: arm.goods_code, play_date: arm.play_date, play_seq: arm.play_seq, play_time: arm.play_time } : null);
+      // The arm is the panel's freshest statement of the round; the pending
+      // key can be a leftover from an earlier entry (measured: the chooser was
+      // handed 10/17 while the arm said 10/25). Arm first, key as fallback.
+      const pending = (armedRound && armedRound.play_date) ? armedRound : takePendingRound();
       // Never two choosers at once, and never the same lost cause twice: bootRoute
       // fires on every URL/DOM change, and re-launching the chooser for a date
       // the calendar does not have is what flapped between 회차 맞추는 중 and the
@@ -10175,6 +10926,14 @@
         return;
       }
       void ensureSeatCatalog();
+      if (seatState.userCatch && !seatState.haltedByUser) {
+        // Resume the watch the user asked for; a grab would flip the mode.
+        void runSeatAutopilot(seat, { catchMode: true, quiet: Boolean(seatState.quietWatch) }).catch((error) => {
+          seatState.lastError = `취켓팅 재개 실패: ${String(error).slice(0, 90)}`;
+          seatState.running = false;
+        });
+        return;
+      }
       const autoRun = seat.enabled && shouldAutoSeatsAfterEntry();
       if (autoRun) {
         void runSeatAutopilot(seat, { catchMode: false }).catch((error) => {
@@ -10272,6 +11031,16 @@
         describeWaitingAnswer,
         noteWaitingAttempt,
         WAITING_LOG_LIMIT,
+        LINE_UP_PATH,
+        RANK_PATH,
+        RANK_POLL_MS,
+        RANK_SESSION_GRACE_MS,
+        SECURE_URL_BURST_MS,
+        SIGNATURE_MAX_AGE_MS,
+        PREMINT_LEAD_MS,
+        decideLineUp,
+        decideRank,
+        queueKeyFrom,
         preconnectQueueHost,
         rememberQueueHost,
         QUEUE_HOST_KEY,
@@ -10457,8 +11226,13 @@
       status: seatStatusSummary,
       runEntry: () => runArmScheduler(loadArmConfig()),
       runSeats: () => runSeatAutopilot(loadSeatConfig(), { userInitiated: true }),
-      runCatch: () =>
-        runSeatAutopilot(loadSeatConfig(), { catchMode: true, userInitiated: true }),
+      runCatch: () => {
+        // The user chose the watch: from here bootRoute resumes a catch, never
+        // a grab, until 전부 정지 (measured: auto-seat restarted a grab run in
+        // the gap after a lost race and the mode flapped watching↔grabbing).
+        seatState.userCatch = true;
+        return runSeatAutopilot(loadSeatConfig(), { catchMode: true, userInitiated: true });
+      },
       probeSeats: () => runSeatAutopilot(loadSeatConfig(), { probe: true, userInitiated: true }),
       // The spike. Holds one seat over the API, watches whether the 예매 창
       // notices, hands it straight back, and never presses 선택 완료.
@@ -10473,7 +11247,28 @@
       // Return every seat this page holds — the map's selection and the API
       // preselects — and drop the lock so a run can start again. Used by the
       // panel's release command and by rehearsals that must not keep a seat.
+      // Verification hooks. forgetHold: drop the local lock but keep the
+      // server hold (the seat reads 0 to everyone); releaseOnly: give that
+      // seat back on the server while the watch keeps running — a synthetic
+      // 0→1 on a real map, so the whole path can be timed end to end.
+      forgetHold() {
+        const held = [...seatState.heldSeatIds];
+        seatState.syntheticHold = held;
+        seatState.heldSeatIds.clear();
+        seatState.locked = false; seatState.confirmStarted = false; seatState.awaitingPayment = false;
+        seatState.lastCatchLatency = null;
+        return { forgot: held.length, ids: held };
+      },
+      async releaseOnly() {
+        const ids = seatState.syntheticHold || [];
+        seatState.syntheticHold = [];
+        const ok = ids.length ? await releasePreselected(ids) : true;
+        seatState.syntheticReleasedAt = performance.now();
+        return { ok, released: ids.length };
+      },
       async releaseHeld() {
+        stopFocusPoller();
+        abortSeatNetWaiters();
         window.__nolsniperRunGen = (window.__nolsniperRunGen || 0) + 1;
         seatState.running = false;
         seatState.stopRequested = true;
@@ -10490,12 +11285,22 @@
         return { ok, released: held.length, clearedOnMap: cleared };
       },
       stopAll() {
+        seatState.userCatch = false;
+        seatState.quietWatch = false;
+        stopFocusPoller();
+        // Nothing focused, nothing waiting: the next run measures its own
+        // 구역, and a press parked on a network answer exits now, not in 2.5s.
+        seatState.catchFocusBlock = "";
+        seatState.catchFocusCheckedAt = 0;
+        abortSeatNetWaiters();
         window.__nolsniperRunGen = (window.__nolsniperRunGen || 0) + 1;
         seatState.running = false;
         seatState.stopRequested = true;
         // Sticky: bootRoute must not restart it on the next URL change.
         seatState.haltedByUser = true;
         armState.running = false;
+        // A rank poll in flight belongs to a run that is over.
+        armState.entryGen = (armState.entryGen || 0) + 1;
         // Stopping with holds outstanding would silently eat the allowance —
         // both the API-level ones and whatever the seat map is showing.
         if (!seatState.locked && selectedSeatCount() > 0) clearSelectedSeats();
@@ -10547,6 +11352,7 @@
         selectSeatUnit,
         venueCenterX,
         stagePoint,
+        floorRank,
         resolveSeatType,
         decodeStatusMask,
         parseSeatStatus,
@@ -10619,6 +11425,15 @@
         armState.fired = false;
         armState.reentryTries = 0;
         return next;
+      },
+      // Live internals for the out-of-browser recovery tests (stop → restart
+      // must leave nothing behind). Read-only by convention; not a public API.
+      __test: {
+        seatState, armState, focusPoller,
+        startFocusPoller, stopFocusPoller, focusPollerAlive,
+        pressSequence, waitForSeatNet, resolveSeatNetWaiters, abortSeatNetWaiters,
+        updateOverlay, updateOverlayIfChanged, runWasSuperseded,
+        FOCUS_WORKERS,
       },
     };
     installNetworkWatch();
